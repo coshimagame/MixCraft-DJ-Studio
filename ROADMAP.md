@@ -8,8 +8,9 @@
 |1|波形、D&D、再生UI|実装済み|UI確認はTEST_CHECKLIST参照|
 |1|簡易BPM|テスト済み|120 BPMクリック音。一般楽曲精度未検証|
 |1|ミックス試聴|テスト済み|位置復元・中断・再実行|
-|1|イベントJSON/JSONL・復旧変換|実装済み|非破壊記録の基礎。完全再現は未着手|
-|1|Windows build / CI|開発中|ビルド結果はTEST_CHECKLIST参照|
+|1|イベントJSON/JSONL・復旧変換|テスト済み|非破壊記録の基礎。完全再現は未着手|
+|1|Windows build|テスト済み|exe起動と実出力ストリームをWindows11で検証|
+|1|GitHub Actions CI|実装済み|各runの成功状態・artifactはActionsで確認|
 |2|ビートグリッド・小節頭・同期・タイムストレッチ|未着手|次の優先項目|
 |2|EQ/GAIN/FILTER/Hot Cue/Cue/Loop/Quantize|未着手|ResetはDJ Cue機能とは別|
 |2|ライブラリ/タグ/SQLite/reKordbox XML|未着手|元ファイル非変更を維持|
