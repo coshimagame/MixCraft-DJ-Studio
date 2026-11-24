@@ -1,0 +1,30 @@
+name: Windows trial
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements.txt pytest==9.2.0 pyinstaller==6.22.3
+      - run: python -m pytest -q
+      - run: python make_demo.py demo
+      - run: python build.py
+      - name: Run packaged application smoke test
+        shell: pwsh
+        run: |
+          $trial = Start-Process dist/MixCraftDJStudio/MixCraftDJStudio.exe -ArgumentList '--smoke-test', 'smoke' -Wait -PassThru
+          if ($trial.ExitCode -ne 0) { throw 'Packaged smoke test failed' }
+          if (-not (Test-Path smoke/smoke.json)) { throw 'Missing smoke result' }
+      - run: python collect_licenses.py dist/MixCraftDJStudio/third-party-licenses
+      - run: Copy-Item demo,README.md,LICENSES.md,BUILD_GUIDE.md,ABLETON_COMPATIBILITY.md -Destination dist/MixCraftDJStudio -Recurse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MixCraftDJStudio-Windows-x64
+          path: dist/MixCraftDJStudio
