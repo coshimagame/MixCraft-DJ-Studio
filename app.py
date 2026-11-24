@@ -84,6 +84,36 @@ class Deck(QFrame):
         slider.setValue(80)
         slider.valueChanged.connect(lambda v: window.engine.command('volume',index,v/100))
         lay.addWidget(slider)
+        # Phase 2: GAIN / 3-band EQ / FILTER (centre = neutral)
+        for label, action, default in [('GAIN', 'gain', 50), ('EQ HIGH', 'eq_high', 50),
+                                       ('EQ MID', 'eq_mid', 50), ('EQ LOW', 'eq_low', 50),
+                                       ('FILTER', 'filter', 50)]:
+            lay.addWidget(QLabel(label))
+            s = QSlider(Qt.Orientation.Horizontal)
+            s.setRange(0, 100); s.setValue(default)
+            if action == 'gain':
+                s.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
+            else:
+                s.valueChanged.connect(lambda v, a=action, i=index: window.engine.command(a, i, v/100))
+            lay.addWidget(s)
+        # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC
+        row2 = QHBoxLayout()
+        cue_set = QPushButton('Cue Set'); cue_set.clicked.connect(lambda: window.engine.command('cue_set', index))
+        cue_jump = QPushButton('Cue'); cue_jump.clicked.connect(lambda: window.engine.command('cue_jump', index))
+        hot1 = QPushButton('Hot 1'); hot1.clicked.connect(lambda: window.engine.command('hotcue_jump', index, 1))
+        hot1s = QPushButton('Hot1 Set'); hot1s.clicked.connect(lambda: window.engine.command('hotcue_set', index, 1))
+        for b in [cue_set, cue_jump, hot1s, hot1]: row2.addWidget(b)
+        lay.addLayout(row2)
+        row3 = QHBoxLayout()
+        loop_in = QPushButton('Loop In'); loop_in.clicked.connect(lambda: window.engine.command('loop_in', index))
+        loop_out = QPushButton('Loop Out'); loop_out.clicked.connect(lambda: window.engine.command('loop_out', index))
+        loop_off = QPushButton('Loop Exit'); loop_off.clicked.connect(lambda: window.engine.command('loop_exit', index))
+        quant = QPushButton('Quantize'); quant.setCheckable(True)
+        quant.toggled.connect(lambda on, i=index: window.engine.command('quantize', i, on))
+        sync = QPushButton('SYNC'); sync.setCheckable(True)
+        sync.toggled.connect(lambda on, i=index: window.engine.command('sync', i, on))
+        for b in [loop_in, loop_out, loop_off, quant, sync]: row3.addWidget(b)
+        lay.addLayout(row3)
     def reset(self):
         self.window.engine.command('play', self.index, False)
         self.window.engine.command('seek', self.index, 0)
@@ -172,7 +202,7 @@ class Window(QMainWindow):
         layout.addLayout(settings)
         self.status = QLabel('Ready / 準備完了')
         layout.addWidget(self.status)
-        layout.addWidget(QLabel('BPM is an estimate • ビート位置・小節頭・キー・同期・ALSは未実装。元ファイルは変更しません。'))
+        layout.addWidget(QLabel('BPM・キーは推定です（手動修正は今後拡張） • EQ/Filter/Cue/HotCue/Loop/Quantize/SYNCはPhase 2実装 • ALS互換は未確認。元ファイルは変更しません。'))
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(40)
@@ -180,11 +210,25 @@ class Window(QMainWindow):
     def start_audio(self):
         if self.stream:
             self.stream.stop(); self.stream.close(); self.stream = None
+        device = self.devices.currentData()
+        extra = None
+        hostapi_name = ''
+        try:  # Phase 2: prefer WASAPI (low latency) on Windows when available
+            hostapis = sd.query_hostapis()
+            dev_info = sd.query_devices(device) if device is not None else sd.query_devices(kind='output')
+            hostapi_name = hostapis[dev_info['hostapi']]['name']
+            if 'WASAPI' in hostapi_name:
+                extra = sd.WasapiSettings(exclusive=False)
+        except Exception:
+            extra = None
         try:
-            self.stream = sd.OutputStream(samplerate=RATE, channels=2, blocksize=512,
-                dtype='float32', device=self.devices.currentData(), callback=self.callback)
+            kwargs = dict(samplerate=RATE, channels=2, blocksize=512, latency='low',
+                dtype='float32', device=device, callback=self.callback)
+            if extra is not None: kwargs['extra_settings'] = extra
+            self.stream = sd.OutputStream(**kwargs)
             self.stream.start()
-            self.status.setText('Audio active • 48 kHz / 512 frames • 操作を自動保存中')
+            latency_ms = (self.stream.latency or 0) * 1000
+            self.status.setText(f'Audio active • 48 kHz / 512 frames • {hostapi_name or "default host"} • latency {latency_ms:.0f} ms (報告値) • 操作を自動保存中')
         except Exception as error:
             self.status.setText(f'Audio unavailable / 出力エラー: {error}')
     def callback(self,outdata,frames,time_info,status):
@@ -213,6 +257,8 @@ class Window(QMainWindow):
         deck.name.setText(Path(track.path).name)
         deck.bpm.setText(f'{track.bpm or "—"} BPM ≈')
         deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
+        key_text = f' • Key {track.key} ({track.camelot})' if track.key else ''
+        deck.name.setText(Path(track.path).name + key_text)
     def preview(self):
         if not all(d['track'] for d in self.engine.decks):
             self.status.setText('Load both decks first / 両デッキに音声を読み込んでください')

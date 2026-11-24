@@ -21,6 +21,7 @@ def test_crossfader_endpoints_and_center():
     e=prepared()
     for x,expected in [(0,0.2),(1,0.4),(0.5,0.6/np.sqrt(2))]:
         e.command('cross',value=x)
+        e.render(512)  # Phase 2: parameters are de-zippered, let the 5ms ramp settle
         assert np.allclose(e.render(128),expected)
 
 def test_pause_seek_eof():

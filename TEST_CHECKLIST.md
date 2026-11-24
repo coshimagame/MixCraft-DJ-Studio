@@ -1,6 +1,18 @@
 # Test checklist
 
-2026-11-24 / Windows 11 build 26100 / Python 3.14.2 x64。
+## Phase 2 — 2026-11-24 / Linux (このVM) / Python 3.12、合成信号のみ
+
+- [x] 既存14件 + Phase 2新規16件 = 自動テスト30件通過 (pytest)
+- [x] パラメータ平滑化: 急なミュートでもサンプル間ジャンプ < 0.05 (クリック防止)
+- [x] ソフトリミッター: 大入力でも出力 ≤0.98、小信号は無変更、overload検出維持
+- [x] EQ: 低域キルでDC信号が消える / 中立EQはビット透過 / フィルターLPで8kHz減衰
+- [x] GAIN 2倍、Cue/HotCue、Loopラップ、Quantize吸着、SYNCレート算出
+- [x] BeatGrid計算、キー推定とCamelot相性、解析キャッシュ往復
+- [x] 自動ミックス計画のフレーズ整列と候補生成、MIDI Learn/LED/保存、ライブラリ/rekordbox XML
+- [ ] スクリーンショット: このVMは libEGL が無く Qt オフスクリーン起動不可 (apt取得も停滞し中止)。Windows CI で要確認
+- [ ] Windows exe ビルド / WASAPI実測 / 実機MIDI / 実曲精度 — すべて未確認 (PHASE2_NOTES 参照)
+
+## Phase 1 — 2026-11-24 / Windows 11 build 26100 / Python 3.14.2 x64
 
 - [x] DSP・デコード・破損末尾復旧の自動テスト14件通過
 - [x] クロスフェーダーA/B端点と中央の出力値
