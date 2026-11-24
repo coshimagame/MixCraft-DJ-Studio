@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 jobs:
   test-build:
+    timeout-minutes: 20
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,14 +18,21 @@ jobs:
       - run: python make_demo.py demo
       - run: python build.py
       - name: Run packaged application smoke test
+        timeout-minutes: 2
         shell: pwsh
         run: |
-          $trial = Start-Process dist/MixCraftDJStudio/MixCraftDJStudio.exe -ArgumentList '--smoke-test', 'smoke' -Wait -PassThru
+          $trial = Start-Process dist/MixCraftDJStudio/MixCraftDJStudio.exe -ArgumentList '--smoke-test', 'smoke' -WindowStyle Hidden -Wait -PassThru
           if ($trial.ExitCode -ne 0) { throw 'Packaged smoke test failed' }
           if (-not (Test-Path smoke/smoke.json)) { throw 'Missing smoke result' }
       - run: python collect_licenses.py dist/MixCraftDJStudio/third-party-licenses
-      - run: Copy-Item demo,README.md,LICENSES.md,BUILD_GUIDE.md,ABLETON_COMPATIBILITY.md -Destination dist/MixCraftDJStudio -Recurse
+      - run: Copy-Item demo,*.md -Destination dist/MixCraftDJStudio -Recurse
       - uses: actions/upload-artifact@v4
         with:
           name: MixCraftDJStudio-Windows-x64
           path: dist/MixCraftDJStudio
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MixCraftDJStudio-smoke-evidence
+          path: |
+            smoke/smoke.json
+            smoke/screenshot.png

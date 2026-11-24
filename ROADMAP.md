@@ -1,5 +1,9 @@
 # Roadmap / 機能状態
 
+2026-11-25: 受領コード30件をWindowsで再検証、回帰修正後42件通過。
+WASAPI自動選択とAPI報告遅延22msを短時間確認。詳細 PHASE2_WINDOWS.md。
+AUTO MIX接続、cache/nudge UI、MIDI配線は次回。main統合はユーザー承認後。
+
 状態: 未着手 → 開発中 → 実装済み → テスト済み → 実機確認済み。不具合ありは併記。
 
 |Phase|機能|状態|検証範囲|

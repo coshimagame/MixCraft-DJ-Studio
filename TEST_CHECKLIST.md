@@ -1,5 +1,13 @@
 # Test checklist
 
+## Windows引き継ぎ — 2026-11-25
+- [x] 受領ZIPそのままの30件がWindowsでも成功
+- [x] 回帰テスト12件を追加し42件成功（Loop無音、rate連続性、EQ平滑化、HP追従等）
+- [x] EQ/FILTER有効のQtスモークと画面PNG目視確認
+- [x] WASAPI共有出力のソース版動作: API報告22ms、status警告0、短時間のみ
+- [ ] 物理end-to-end latency、長時間負荷、実曲、MIDI機器、ALS
+詳細と残る制限は PHASE2_WINDOWS.md。以下は以前の検証記録。
+
 ## Phase 2 — 2026-11-24 / Linux (このVM) / Python 3.12、合成信号のみ
 
 - [x] 既存14件 + Phase 2新規16件 = 自動テスト30件通過 (pytest)

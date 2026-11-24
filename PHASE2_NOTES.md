@@ -1,5 +1,7 @@
 # Phase 2 実装メモ (muse/phase2-development, 2026-11-24)
 
+> 以下は受領時の記録。2026-11-25の修正・Windows検証は PHASE2_WINDOWS.md を参照。
+
 担当: かまはげた (Mw-fActory)。基準 main: fc6ed7a (v0.1.0)。既存テスト14件は維持し、
 Phase 2 テスト16件を追加して合計30件通過 (Linux / Python 3.12、合成信号のみ)。
 

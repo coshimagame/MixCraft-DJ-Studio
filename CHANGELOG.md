@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-trial — 2026-11-25
+- Muse Phase 2ソースZIPを取り込み、Windowsで受領時30件を再検証。
+- Loop/rate/EQ/FILTER/Quantize/previewの回帰修正。合計42件成功。
+- WASAPI自動選択、ホスト別出力一覧、音声statusと処理時間計測、Phase 2 UI。
+- 詳細はPHASE2_WINDOWS.md。mainは未変更。
+
 ## 0.2.0-dev — 2026-11-24 (Phase 2, 未リリース)
 - パラメータ平滑化 (5ms) とソフトニーリミッターでクリック/音割れ対策。
 - 3バンドEQ、GAIN、FILTER、CUE、HOT CUE、LOOP、Quantize、SYNC/tempo を追加 (UI配線含む)。
