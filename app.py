@@ -12,26 +12,41 @@ from engine import Engine, Journal, RATE, load_track
 from audio_config import resolve_output
 
 # ---------------------------------------------------------------------------
-# UI palette — club-dark theme. Deck A = orange, Deck B = cyan; shared
-# surfaces stay neutral so the two deck accents carry the identity.
+# UI palette — rugged industrial LCD panel. Near-black metal chassis with
+# heavy bezels; every numeric / status readout is a monochrome amber LCD
+# (dark glass, mono font, inset frame). Deck A orange / Deck B cyan survive
+# only as small header markers so the amber display language stays in charge.
 # ---------------------------------------------------------------------------
-COLOR_BG = '#101014'          # window base
-COLOR_PANEL = '#17171d'       # panel surface (decks / mixer band)
-COLOR_PANEL_HI = '#1e1e26'    # raised surface (inputs, slider grooves)
-COLOR_BUTTON = '#23232c'
-COLOR_BUTTON_HOVER = '#2d2d38'
-COLOR_BORDER = '#2b2b36'      # hairline borders
-COLOR_BORDER_HI = '#3a3a46'
-COLOR_TEXT = '#f4f4f6'
-COLOR_TEXT_SUB = '#a9a9b4'
-COLOR_TEXT_MUTE = '#6f6f7c'
-COLOR_DECK_A = '#ff7a1a'      # Deck A accent (orange)
-COLOR_DECK_B = '#22b8e6'      # Deck B accent (cyan)
-COLOR_METER = '#3ddc84'       # level meter accent
-COLOR_WAVE_BG = '#0b0b0f'
-COLOR_WAVE_GRID = '#23232e'
+COLOR_BG = '#141518'          # chassis base (dark metal)
+COLOR_PANEL = '#1e1f22'       # panel surface (decks / mixer band)
+COLOR_PANEL_HI = '#26282c'    # raised surface (inputs, slider grooves)
+COLOR_BUTTON = '#26282c'
+COLOR_BUTTON_HOVER = '#313438'
+COLOR_BORDER = '#3f4247'      # heavy bezel borders
+COLOR_BORDER_HI = '#5a5e63'
+COLOR_TEXT = '#eceae4'
+COLOR_TEXT_SUB = '#a6a39b'
+COLOR_TEXT_MUTE = '#716e68'
+COLOR_DECK_A = '#ff7a1a'      # Deck A header marker only (orange)
+COLOR_DECK_B = '#22b8e6'      # Deck B header marker only (cyan)
+COLOR_LCD_BG = '#04070a'      # LCD glass (near-black, green cast)
+COLOR_LCD_FG = '#ffb000'      # LCD amber
+COLOR_LCD_DIM = '#c07f00'     # dimmer amber for secondary readouts
+COLOR_METER = '#ffb000'       # level meter = LCD amber
+COLOR_WAVE_BG = '#04070a'
+COLOR_WAVE_GRID = '#16241a'   # dim LCD-green grid
 FONT_STACK = '"Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
-SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-size:11px;font-weight:700'
+MONO_STACK = 'Consolas, "DejaVu Sans Mono", "Courier New", monospace'
+SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:11px;font-weight:700'
+LCD_GRADIENT = ('qlineargradient(x1:0, y1:0, x2:0, y2:1, '
+                'stop:0 #0a120b, stop:0.45 #04070a, stop:1 #060a06)')
+
+def lcd_qss(size, bold=True, fg=None):
+    """Inset amber-on-black LCD readout style for display-only labels."""
+    return (f'background:{LCD_GRADIENT};color:{fg or COLOR_LCD_FG};'
+            f'font-family:{MONO_STACK};font-size:{size}px;'
+            f'font-weight:{700 if bold else 400};'
+            'border:2px solid #000000;border-radius:2px;padding:4px 10px')
 
 class Result(QObject):
     ready = Signal(int, object, str)
@@ -61,7 +76,7 @@ class Waveform(QWidget):
             p.setPen(QPen(QColor('#ffffff'), 2))
             p.drawLine(x, 0, x, self.height())
         else:
-            p.setPen(QColor(COLOR_TEXT_MUTE))
+            p.setPen(QColor(COLOR_LCD_DIM))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'DROP AUDIO HERE  /  音声ファイルをドロップ')
     def mousePressEvent(self, event):
         if self.track: self.seek.emit(event.position().x()/self.width())
@@ -74,28 +89,28 @@ class Deck(QFrame):
         self.setObjectName('deck')
         lay = QVBoxLayout(self)
         color = COLOR_DECK_A if index == 0 else COLOR_DECK_B
-        slider_qss = (f'QSlider::groove:horizontal {{height:5px;background:{COLOR_PANEL_HI};border-radius:2px}}'
-                      f'QSlider::sub-page:horizontal {{background:{color};border-radius:2px}}'
-                      f'QSlider::handle:horizontal {{width:15px;height:15px;margin:-5px 0;background:{COLOR_TEXT};border:1px solid {COLOR_BG};border-radius:4px}}')
+        slider_qss = (f'QSlider::groove:horizontal {{height:8px;background:#0c0d0e;border:1px solid {COLOR_BORDER};border-radius:2px}}'
+                      f'QSlider::sub-page:horizontal {{background:{COLOR_LCD_DIM};border-radius:2px}}'
+                      f'QSlider::handle:horizontal {{width:14px;height:24px;margin:-9px 0;background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8);border:2px solid #000000;border-radius:2px}}')
         self.slider_qss = slider_qss
         top = QHBoxLayout()
         label = QLabel('DECK '+('A' if index == 0 else 'B'))
-        label.setStyleSheet(f'color:{COLOR_BG};background:{color};font-size:16px;font-weight:800;padding:5px 12px;border-radius:4px')
+        label.setStyleSheet(f'color:{COLOR_TEXT};background:{COLOR_PANEL_HI};font-size:16px;font-weight:800;padding:5px 12px 5px 8px;border:2px solid {COLOR_BORDER};border-left:8px solid {color};border-radius:2px')
         top.addWidget(label)
         top.addStretch()
         self.bpm = QLabel('— BPM')
-        self.bpm.setStyleSheet(f'color:{COLOR_TEXT};font-size:24px;font-weight:700')
+        self.bpm.setStyleSheet(lcd_qss(26))
         top.addWidget(self.bpm)
         lay.addLayout(top)
         self.name = QLabel('No track loaded / 未読込')
-        self.name.setStyleSheet(f'color:{COLOR_TEXT_SUB}')
+        self.name.setStyleSheet(lcd_qss(12, bold=False, fg=COLOR_LCD_DIM))
         self.name.setWordWrap(True)
         lay.addWidget(self.name)
-        self.wave = Waveform(color)
+        self.wave = Waveform(COLOR_LCD_FG)
         self.wave.seek.connect(lambda x: window.engine.command('seek', index, int(x*len(self.wave.track.audio))))
         lay.addWidget(self.wave)
         self.clock = QLabel('00:00 / 00:00')
-        self.clock.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-family:Consolas,"Courier New",monospace')
+        self.clock.setStyleSheet(lcd_qss(15))
         lay.addWidget(self.clock)
         row = QHBoxLayout()
         self.load = QPushButton('Load / 読込')
@@ -194,12 +209,12 @@ class Window(QMainWindow):
         self.setCentralWidget(scroll)
         layout = QVBoxLayout(root)
         header = QHBoxLayout()
-        title = QLabel(f'MIXCRAFT  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
+        title = QLabel(f'MIXCRAFT  <span style="color:{COLOR_LCD_FG}">DJ STUDIO</span>')
         title.setStyleSheet('font-size:26px;font-weight:800')
         header.addWidget(title)
         header.addStretch()
         brand = QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial')
-        brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:12px')
+        brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:12px')
         header.addWidget(brand)
         layout.addLayout(header)
         mode_label = QLabel('DJ MODE     •     2 DECK PERFORMANCE                                        PHASE 2 / 試遊版')
@@ -375,28 +390,28 @@ STYLE = (
     f'QMainWindow {{ background:{COLOR_BG}; }}'
     f'QScrollArea {{ background:{COLOR_BG}; border:none; }}'
     f'QLabel {{ background:transparent; }}'
-    f'QFrame#deck {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:10px; padding:12px; }}'
-    f'QFrame#mixer {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:10px; padding:10px 12px; }}'
-    f'QPushButton {{ background:{COLOR_BUTTON}; border:1px solid {COLOR_BORDER_HI}; border-radius:6px; padding:8px 10px; }}'
-    f'QPushButton:hover {{ background:{COLOR_BUTTON_HOVER}; border-color:#4a4a58; }}'
-    f'QPushButton:pressed {{ background:#1b1b22; }}'
-    f'QPushButton:disabled {{ background:#1a1a20; border-color:{COLOR_BORDER}; color:#5d5d68; }}'
-    f'QPushButton:checked {{ background:#3a2410; border-color:{COLOR_DECK_A}; color:#ffb27a; }}'
-    f'QComboBox {{ background:{COLOR_PANEL_HI}; border:1px solid {COLOR_BORDER_HI}; border-radius:6px; padding:7px 9px; }}'
-    f'QComboBox:hover {{ border-color:#4a4a58; }}'
+    f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #232428, stop:1 #1a1b1e); border:2px solid {COLOR_BORDER_HI}; border-radius:3px; padding:12px; }}'
+    f'QFrame#mixer {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #232428, stop:1 #1a1b1e); border:2px solid {COLOR_BORDER_HI}; border-radius:3px; padding:10px 12px; }}'
+    f'QPushButton {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d30, stop:1 #222427); border:2px solid {COLOR_BORDER_HI}; border-radius:3px; padding:8px 10px; font-weight:600; }}'
+    f'QPushButton:hover {{ background:{COLOR_BUTTON_HOVER}; border-color:#6d7176; }}'
+    f'QPushButton:pressed {{ background:#17181a; }}'
+    f'QPushButton:disabled {{ background:#1b1c1e; border-color:{COLOR_BORDER}; color:#5d5d68; }}'
+    f'QPushButton:checked {{ background:#3d2c04; border-color:{COLOR_LCD_FG}; color:{COLOR_LCD_FG}; font-weight:800; }}'
+    f'QComboBox {{ background:{COLOR_PANEL_HI}; border:2px solid {COLOR_BORDER_HI}; border-radius:3px; padding:7px 9px; }}'
+    f'QComboBox:hover {{ border-color:#6d7176; }}'
     f'QComboBox QAbstractItemView {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; selection-background-color:{COLOR_BUTTON_HOVER}; }}'
-    f'QSlider::groove:horizontal {{ height:5px; background:{COLOR_PANEL_HI}; border-radius:2px; }}'
-    f'QSlider::sub-page:horizontal {{ background:#4d4d5a; border-radius:2px; }}'
-    f'QSlider::handle:horizontal {{ width:15px; height:15px; margin:-5px 0; background:{COLOR_TEXT}; border:1px solid {COLOR_BG}; border-radius:4px; }}'
-    f'QProgressBar {{ background:{COLOR_WAVE_BG}; border:1px solid {COLOR_BORDER}; border-radius:4px; min-height:12px; }}'
-    f'QProgressBar::chunk {{ background:{COLOR_METER}; border-radius:3px; }}'
-    f'QLabel#status {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:6px; padding:8px 10px; color:#d8d8de; }}'
+    f'QSlider::groove:horizontal {{ height:8px; background:#0c0d0e; border:1px solid {COLOR_BORDER}; border-radius:2px; }}'
+    f'QSlider::sub-page:horizontal {{ background:{COLOR_LCD_DIM}; border-radius:2px; }}'
+    f'QSlider::handle:horizontal {{ width:14px; height:24px; margin:-9px 0; background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8); border:2px solid #000000; border-radius:2px; }}'
+    f'QProgressBar {{ background:{COLOR_LCD_BG}; border:2px solid #000000; border-radius:2px; min-height:14px; color:{COLOR_LCD_FG}; font-family:{MONO_STACK}; }}'
+    f'QProgressBar::chunk {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffc233, stop:1 #cc8a00); border-radius:1px; }}'
+    f'QLabel#status {{ background:{LCD_GRADIENT}; border:2px solid #000000; border-radius:2px; padding:8px 10px; color:{COLOR_LCD_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
     f'QToolTip {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; padding:4px 6px; }}'
-    f'QScrollBar:vertical {{ background:{COLOR_BG}; width:10px; margin:0; }}'
-    f'QScrollBar::handle:vertical {{ background:#33333e; border-radius:5px; min-height:30px; }}'
+    f'QScrollBar:vertical {{ background:{COLOR_BG}; width:12px; margin:0; }}'
+    f'QScrollBar::handle:vertical {{ background:#3a3d40; border-radius:2px; min-height:30px; }}'
     f'QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}'
-    f'QScrollBar:horizontal {{ background:{COLOR_BG}; height:10px; margin:0; }}'
-    f'QScrollBar::handle:horizontal {{ background:#33333e; border-radius:5px; min-width:30px; }}'
+    f'QScrollBar:horizontal {{ background:{COLOR_BG}; height:12px; margin:0; }}'
+    f'QScrollBar::handle:horizontal {{ background:#3a3d40; border-radius:2px; min-width:30px; }}'
     f'QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}'
 )
 
