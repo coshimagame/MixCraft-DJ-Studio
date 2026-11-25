@@ -32,6 +32,7 @@ Conversion rules (user decisions 2026-11-25, design doc section 5.4):
 | master (global)      | set_parameter mixer.master_volume, value = v          |
 | play   (deck)        | transport clip.toggle_play                            |
 | cue_jump (deck)      | transport clip.cue_jump (back to clip start / cue)    |
+| hp_cue (deck)        | transport track.cue_toggle (headphones cue on/off)    |
 | loop_in / loop_out   | transport clip.loop_in / clip.loop_out                |
 | load   (deck)        | transport track.load (plan only; adapter may defer)   |
 | hotcue_jump (deck)   | fire_clip for cues_to_clip_plan clip #cue_index       |
@@ -89,6 +90,7 @@ _EQ_TARGETS = {'eq_high': 'eq_three.high',
 
 _TRANSPORT_TARGETS = {'play': 'clip.toggle_play',
                       'cue_jump': 'clip.cue_jump',
+                      'hp_cue': 'track.cue_toggle',
                       'loop_in': 'clip.loop_in',
                       'loop_out': 'clip.loop_out',
                       'load': 'track.load'}

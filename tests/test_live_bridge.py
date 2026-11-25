@@ -32,6 +32,15 @@ def test_cue_jump():
         LiveAction('transport', 1, 'clip.cue_jump', True)]
 
 
+def test_hp_cue_buttons_plan_a_cue_toggle():
+    # HEADPHONES CUE 1/2 on the DDJ-RB = Note 84 on the deck
+    # channels (hardware probe via Live's map mode, 2026-11-26).
+    assert plan_dispatch(_ddj_note(0, 84)) == [
+        LiveAction('transport', 1, 'track.cue_toggle', True)]
+    assert plan_dispatch(_ddj_note(1, 84)) == [
+        LiveAction('transport', 2, 'track.cue_toggle', True)]
+
+
 def test_note_off_and_unmapped_produce_nothing():
     assert dispatch(DDJ_RB, 'note', 0, 11, 0) is None  # note-off
     assert plan_dispatch(None) == []

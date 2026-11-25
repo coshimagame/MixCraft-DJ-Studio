@@ -29,6 +29,7 @@ _EQ_TARGETS = {'eq_high': 'eq_three.high',
 
 _TRANSPORT_TARGETS = {'play': 'clip.toggle_play',
                       'cue_jump': 'clip.cue_jump',
+                      'hp_cue': 'track.cue_toggle',
                       'loop_in': 'clip.loop_in',
                       'loop_out': 'clip.loop_out',
                       'load': 'track.load'}

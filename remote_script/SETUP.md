@@ -91,6 +91,30 @@ Filter Type の列挙インデックスはレガシー順
 **刻みを 0.01 → 0.005 拍/ティックに細分化**
 （`NUDGE_BEATS_PER_TICK`、使用者の希望）。
 
+## v1.4 修正（2026-11-26 実機）: LOW 確定とヘッドホン CUE
+
+v1.3 の診断ダンプが実機の正解を返した:
+
+- EQ Three の実名は **class `FilterEQ3`**、パラメータは
+  **`GainLo` / `GainMid` / `GainHi`** だった。LOW が死んでいた
+  原因は `GainLow` との1文字違い。v1.4 で候補の先頭を
+  `GainLo` にし、クラス候補にも `FilterEQ3` を追加した。
+  （Utility は class `StereoGain`・`Gain`、Auto Filter は
+  class `AutoFilter`・`Filter Type` / `Frequency` で従来どおり
+  一致していた。）
+- 診断ログ（`MixCraft DIAG`）は役割を終えたため全て撤去した。
+  ジョグの符号反転と 0.005 刻みは実測どおり維持
+  （生値 65 → +63 ティック = 前方向で確定）。
+
+追加機能: **DDJ-RB の HEADPHONES CUE 1/2 ボタン**（デッキ側
+チャンネルの Note 84。マッピングモードで実測）で、Live の
+デッキごとのキューモニターを切り替えられるようにした。
+押すたびにトラックの Solo がトグルし、ボタン LED が状態に
+連動する。**前提として、その Set の Cue Out が Master と
+別の出力（テンプレートでは 3/4）に設定されていること** —
+その場合 Live は Solo を Cue として扱い、音はヘッドホン
+だけに行く。Cue Out が 1/2 のままだと通常の Solo になる。
+
 ## テンプレート Set の前提
 
 スクリプトは次の形の Set を前提に動く。外れた要素は黙って

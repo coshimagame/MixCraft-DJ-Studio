@@ -76,6 +76,7 @@ class FakeTrack:
         self.clip_slots = [FakeClipSlot(self, c) for c in clips]
         self.devices = list(devices)
         self.mixer_device = FakeMixerDevice()
+        self.solo = False
         self.stop_all_calls = 0
 
     @property
@@ -192,12 +193,16 @@ def _eq_three():
 
 
 def _eq_three_lom():
-    # Parameter names as the real EQ Three exposes them via the LOM
-    # (hardware-verified 2026-11-26).
-    return FakeDevice('Eq3', 'EQ Three', [
-        FakeParam('GainLow', -15.0, 15.0, 0.0),
+    # Device class + parameter names exactly as the real EQ Three
+    # exposes them via the LOM — ground truth from the v1.3 device
+    # dump in the user's Live 10.1.43 Log.txt (2026-11-26).  Note
+    # the low band is 'GainLo', NOT 'GainLow'.
+    return FakeDevice('FilterEQ3', 'EQ Three', [
+        FakeParam('GainLo', -15.0, 15.0, 0.0),
         FakeParam('GainMid', -15.0, 15.0, 0.0),
-        FakeParam('GainHi', -15.0, 15.0, 0.0)])
+        FakeParam('GainHi', -15.0, 15.0, 0.0),
+        FakeParam('FreqLo', 30.0, 500.0, 250.0),
+        FakeParam('FreqHi', 500.0, 8000.0, 2500.0)])
 
 
 def _auto_filter():
@@ -348,14 +353,16 @@ def test_channel_fader_trim_and_eq_reach_device_params():
 
 
 def test_eq_knobs_drive_lom_named_eq_three_params():
-    # Regression (hardware 2026-11-26): a real EQ Three names its
-    # parameters GainLow/GainMid/GainHi.  The script's original
-    # 'Low Gain'/'Mid Gain'/'High Gain' spellings matched nothing,
-    # so the DDJ-RB EQ knobs silently did nothing on hardware.
+    # Regression (hardware 2026-11-26): a real EQ Three (LOM class
+    # 'FilterEQ3') names its parameters GainLo/GainMid/GainHi.  The
+    # script's original 'Low Gain'/'Mid Gain'/'High Gain' spellings
+    # matched nothing, and v1.2's 'GainLow' still missed the low
+    # band by one letter — the LOW knob stayed dead until the real
+    # names were dumped from Live's own Log.txt.
     surface, song = _make_surface(eq_factory=_eq_three_lom)
     track = song.tracks[0]
-    low, mid, hi = track.devices[1].parameters
-    assert (low.name, mid.name, hi.name) == ('GainLow', 'GainMid',
+    low, mid, hi = track.devices[1].parameters[:3]
+    assert (low.name, mid.name, hi.name) == ('GainLo', 'GainMid',
                                             'GainHi')
     surface.receive_midi(_cc(0, 15, 127))   # EQ LOW deck A -> max
     surface.receive_midi(_cc(0, 11, 127))   # EQ MID deck A -> max
@@ -421,141 +428,37 @@ def test_missing_devices_are_skipped_silently():
     surface.receive_midi(_cc(0, 34, 5))     # jog with nothing playing
 
 
+
 # ---------------------------------------------------------------------------
-# Diagnostics (LOW-band investigation, 2026-11-26)
+# Headphone cue buttons (v1.4, hardware probe 2026-11-26)
 # ---------------------------------------------------------------------------
 
 
-def _log_lines(surface):
-    return [args[0] for args in surface._c_instance.log_lines
-            if args and isinstance(args[0], str)]
-
-
-def _diag_lines(surface):
-    return [line for line in _log_lines(surface)
-            if line.startswith('MixCraft DIAG')]
-
-
-def test_diag_device_dump_happens_once():
-    # Construction triggers the first clip-plan refresh, which must
-    # dump each deck track's devices + parameter names exactly once.
-    surface, song = _make_surface(eq_factory=_eq_three_lom)
-    device_lines = [l for l in _diag_lines(surface) if ' device ' in l]
-    assert len(device_lines) == 6           # 3 devices x 2 deck tracks
-    # The dump exposes the real object environment: class + params.
-    assert any('track 1' in l and "class='Eq3'" in l
-               and 'GainLow' in l and 'GainMid' in l and 'GainHi' in l
-               for l in device_lines)
-    assert any('track 2' in l and "class='Utility'" in l
-               and "'Gain'" in l for l in device_lines)
-    assert any('track 1' in l and "class='AutoFilter'" in l
-               and 'Frequency' in l for l in device_lines)
-    # Later plan refreshes (init + periodic) must not dump again.
-    surface._refresh_clip_plans()
-    surface._refresh_clip_plans()
-    device_lines = [l for l in _diag_lines(surface) if ' device ' in l]
-    assert len(device_lines) == 6
-
-
-def test_diag_eq_failure_logged_once():
-    song = FakeSong([FakeTrack('Bare A', clips=[FakeClip('X')]),
-                     FakeTrack('Bare B')])
-    surface = MixCraft(FakeCInstance(song))
-    surface.receive_midi(_cc(0, 7, 100))    # EQ HI, no EQ device
-    surface.receive_midi(_cc(0, 7, 40))     # again: still one line
-    failures = [l for l in _diag_lines(surface)
-                if l == 'MixCraft DIAG no param for eq_three.high '
-                        'on track 1']
-    assert len(failures) == 1
-    # A different band on the same track logs its own failure line.
-    surface.receive_midi(_cc(0, 15, 100))   # EQ LOW
-    failures = [l for l in _diag_lines(surface)
-                if l == 'MixCraft DIAG no param for eq_three.low '
-                        'on track 1']
-    assert len(failures) == 1
-
-
-def test_diag_eq_success_logged_once_with_matched_name():
-    surface, song = _make_surface(eq_factory=_eq_three_lom)
-    surface.receive_midi(_cc(0, 15, 127))   # LOW deck A
-    surface.receive_midi(_cc(0, 15, 0))     # again: still one line
-    surface.receive_midi(_cc(1, 11, 90))    # MID deck B
-    matched = [l for l in _diag_lines(surface)
-               if l.startswith('MixCraft DIAG matched')]
-    low = [l for l in matched if 'eq_three.low' in l
-           and 'track 1' in l]
-    assert len(low) == 1 and 'GainLow' in low[0]
-    mid_b = [l for l in matched if 'eq_three.mid' in l
-             and 'track 2' in l]
-    assert len(mid_b) == 1 and 'GainMid' in mid_b[0]
-    # No failure lines when every band resolves.
-    assert not [l for l in _diag_lines(surface) if 'no param' in l]
-
-
-def test_diag_transport_play_logged_once():
+def test_hp_cue_note_toggles_track_solo():
+    # The RB's HEADPHONES CUE 1/2 buttons send Note 84 on the deck
+    # channels (probed via Live's map mode).  Each press toggles the
+    # deck track's solo — which Live treats as Cue when the set's
+    # Cue Out is a separate output.
     surface, song = _make_surface()
-    surface.receive_midi(_note(0, 11))      # PLAY from stopped
-    surface.receive_midi(_note(0, 11))      # PLAY again (stops it)
-    play = [l for l in _diag_lines(surface)
-            if 'clip.toggle_play' in l]
-    assert len(play) == 1                   # once per (track, target)
-    assert 'track 1' in play[0]
-    assert 'playing_slot_index=-1' in play[0]
-    assert 'fired start slot' in play[0]
+    track_a, track_b = song.tracks
+    assert track_a.solo is False and track_b.solo is False
+    surface.receive_midi(_note(0, 84))      # HP CUE 1 -> on
+    assert track_a.solo is True
+    assert track_b.solo is False
+    surface.receive_midi(_note(0, 84))      # again -> off
+    assert track_a.solo is False
+    surface.receive_midi(_note(1, 84))      # HP CUE 2 -> on
+    assert track_b.solo is True
+    surface.receive_midi(_note(1, 84, 0))   # note-off: no-op
+    assert track_b.solo is True
 
 
-def test_diag_transport_play_stop_outcome():
+def test_hp_cue_led_follows_solo_state():
     surface, song = _make_surface()
-    song.tracks[0].clip_slots[0].fire()     # already playing
-    surface.receive_midi(_note(0, 11))      # PLAY -> stop
-    play = [l for l in _diag_lines(surface)
-            if 'clip.toggle_play' in l]
-    assert len(play) == 1
-    assert 'playing_slot_index=0' in play[0]
-    assert 'stopped playback' in play[0]
-
-
-def test_diag_transport_cue_from_stopped():
-    surface, song = _make_surface()
-    surface.receive_midi(_note(0, 12))      # CUE from stopped
-    surface.receive_midi(_note(0, 12))      # again: still one line
-    cue = [l for l in _diag_lines(surface) if 'clip.cue_jump' in l]
-    assert len(cue) == 1
-    assert 'playing_slot_index=-1' in cue[0]
-    assert 'fired start slot' in cue[0]
-
-
-def test_diag_transport_cue_refire_and_no_slot():
-    surface, song = _make_surface()
-    song.tracks[0].clip_slots[0].fire()     # playing
-    surface.receive_midi(_note(0, 12))      # CUE while playing
-    cue = [l for l in _diag_lines(surface) if 'clip.cue_jump' in l]
-    assert len(cue) == 1
-    assert 'playing_slot_index=0' in cue[0]
-    assert 're-fired playing slot' in cue[0]
-    # Deck B track holds no clips at all: CUE finds no slot.
-    surface2, song2 = _make_surface(deck_b_clips=(None,))
-    surface2.receive_midi(_note(1, 12))     # CUE deck B
-    cue_b = [l for l in _diag_lines(surface2)
-             if 'clip.cue_jump' in l and 'track 2' in l]
-    assert len(cue_b) == 1
-    assert 'no slot found' in cue_b[0]
-
-
-def test_diag_jog_logged_once_per_deck():
-    surface, song = _make_surface()
-    surface.receive_midi(_note(0, 11))      # start deck A playback
-    surface.receive_midi(_cc(0, 34, 3))     # first jog deck A
-    surface.receive_midi(_cc(0, 34, 5))     # again: no second line
-    jog = [l for l in _diag_lines(surface) if ' jog ' in l]
-    assert len(jog) == 1
-    assert 'track 1' in jog[0]
-    assert '0.0236' in jog[0]               # raw normalised = 3/127
-    assert 'ticks=-3' in jog[0]             # inverted sign
-    assert '-0.015' in jog[0]               # -3 ticks x 0.005 beats
-    surface.receive_midi(_note(1, 11))      # start deck B playback
-    surface.receive_midi(_cc(1, 34, 127))   # first jog deck B
-    jog = [l for l in _diag_lines(surface) if ' jog ' in l]
-    assert len(jog) == 2
-    assert 'track 2' in jog[1]
-    assert 'ticks=1' in jog[1]
+    surface.receive_midi(_note(0, 84))      # cue deck A on
+    surface.update_display()
+    assert (0x90, 84, 127) in surface.sent_midi   # CUE 1 LED lit
+    assert (0x91, 84, 0) in surface.sent_midi     # CUE 2 LED dark
+    surface.receive_midi(_note(0, 84))      # cue deck A off again
+    surface.update_display()
+    assert (0x90, 84, 0) in surface.sent_midi

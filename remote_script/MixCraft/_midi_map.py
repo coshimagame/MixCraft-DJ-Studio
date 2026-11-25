@@ -61,6 +61,9 @@ def _build_ddj_rb():
           (0, 33): ('jog', 0), (1, 33): ('jog', 1)}            # JOG wheel side
     note = {(0, 11): ('play', 0), (1, 11): ('play', 1),        # PLAY/PAUSE
             (0, 12): ('cue_jump', 0), (1, 12): ('cue_jump', 1),
+            # HEADPHONES CUE 1/2 = Note 84 on the deck channels
+            # (hardware probe via Live's map mode, 2026-11-26).
+            (0, 84): ('hp_cue', 0), (1, 84): ('hp_cue', 1),
             (0, 88): ('sync', 0), (1, 88): ('sync', 1),
             (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
             (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
