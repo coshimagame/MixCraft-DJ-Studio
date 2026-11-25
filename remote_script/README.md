@@ -25,6 +25,10 @@ Live の User Library 内 `Remote Scripts/MixCraft/` に、Live が要求する
 パッケージ形（`__init__.py` が `create_instance` を返す）で置く。
 `live_bridge.py` / `midi_map.py` / `library.py` は Live 非依存なので、
 そのまま同梱するか、開発リポジトリからコピーして使う。
+（2026-11-25 実機結果: Live 10.1.43 では User Library 側は走査
+されず、実際に効いた置き場所は
+`C:\ProgramData\Ableton\Live 10 Suite\Resources\MIDI Remote Scripts\`
+だった。下のチェックリスト「スクリプトの置き場所」参照。）
 
 ## アダプターの責務（これだけ）
 
@@ -99,6 +103,12 @@ Live の User Library 内 `Remote Scripts/MixCraft/` に、Live が要求する
       明示的に送る設計どおり必要。色・明滅の velocity 仕様と
       APC40 側（velocity=1 で緑という既存仮定）の実照合は
       スクリプト導入時に行う。
+      **スクリプト経由の点灯を確認（2026-11-25 深夜）**:
+      MixCraft Remote Script v1.1 が送るフィードバックで
+      DDJ-RB の PLAY LED が点灯した。点灯のタイミングはボタン
+      押下の瞬間ではなく、クリップが実際に再生を開始した時点
+      （発射クオンタイズの分だけ遅れる）。これは仕様どおりの
+      挙動であり故障ではない。
 - [ ] **EQ Three のパラメータ**: 未了。バンドゲインの正規化値と
       dB の対応、「0.5 = 0 dB」をテンプレート側のレンジ調整で
       実現できるかは、テンプレート作成時に確認する。
@@ -120,10 +130,32 @@ Live の User Library 内 `Remote Scripts/MixCraft/` に、Live が要求する
 - [ ] **クリップ発射と nudge**: 未了（スクリプト段階）。Session
       クリップ発射の量子化挙動、再生中クリップの位置補正を
       API で行う方法（代替案: ビートジャンプへの読み替え）。
-- [ ] **Remote Script の Python 環境**: 未了（スクリプト導入時）。
-      Live 10 同梱 Python の版と、同梱モジュール（dataclasses
-      等）の利用可否。使えない場合は `live_bridge.py` の
-      書き換え範囲をここに記録する。
+- [x] **Remote Script の Python 環境**: **確認済み
+      （2026-11-25 深夜）**。MixCraft Remote Script が
+      Live 10.1.43 で読み込まれた（Log に
+      `(MixCraft) MixCraft Remote Script v1 loaded` の行を
+      確認）。Live 10 の同梱 Python は 2.7 で、スクリプトは
+      2.7 互換で書いてある（`live_bridge` / `midi_map` は
+      Python 2.7 対応に直した同梱コピーを使用し、dataclasses
+      等の Python 3 専用機能は同梱側で回避済み）。
+- [x] **スクリプトの置き場所**: **確認済み（2026-11-25
+      深夜）**。Live 10.1.43 は User Library 内の
+      `Remote Scripts/` を走査しなかった（コントロール
+      サーフェイスの一覧に出ず、Log にも痕跡なし）。実際に
+      効いた置き場所は
+      `C:\ProgramData\Ableton\Live 10 Suite\Resources\MIDI Remote Scripts\`
+      （貼り付け時に管理者権限の確認ダイアログあり）。
+- [x] **スクリプト経由の操作**: **確認済み（2026-11-25
+      深夜）**。v1 ではスクリプトに MIDI が一切届かなかった。
+      原因は Live の仕様で、`build_midi_map` の中で
+      `Live.MidiMap.forward_midi_note` /
+      `forward_midi_cc` による明示転送を宣言しないと
+      `receive_midi` には何も届かない（Ableton 純正
+      スクリプトのソースでも裏取り済み）。v1.1 で DDJ-RB の
+      使用チャンネル（0-based で 0, 1, 4, 5, 6, 7, 8）の
+      全ノート/全 CC を転送するよう直した結果、手動
+      マッピング無しで DDJ-RB がスクリプト経由で Live を
+      駆動した（ユーザー判定「うごいた」）。
 
 ## 運用メモ（実機で判明したこと）
 
