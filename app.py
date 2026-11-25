@@ -7,8 +7,9 @@ import sounddevice as sd
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar)
+    QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
 from engine import Engine, Journal, RATE, load_track
+from audio_config import resolve_output
 
 class Result(QObject):
     ready = Signal(int, object, str)
@@ -20,7 +21,7 @@ class Waveform(QWidget):
         self.track = None
         self.position = 0
         self.color = color
-        self.setMinimumHeight(170)
+        self.setMinimumHeight(120)
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor('#10151f'))
@@ -84,6 +85,45 @@ class Deck(QFrame):
         slider.setValue(80)
         slider.valueChanged.connect(lambda v: window.engine.command('volume',index,v/100))
         lay.addWidget(slider)
+        # Phase 2: GAIN / 3-band EQ / FILTER (centre = neutral)
+        self.controls = {}
+        for label, action, default in [('GAIN', 'gain', 50), ('EQ HIGH', 'eq_high', 50),
+                                       ('EQ MID', 'eq_mid', 50), ('EQ LOW', 'eq_low', 50),
+                                       ('FILTER', 'filter', 50)]:
+            control_row = QHBoxLayout()
+            control_label = QLabel(label)
+            control_label.setFixedWidth(80)
+            control_row.addWidget(control_label)
+            s = QSlider(Qt.Orientation.Horizontal)
+            s.setRange(0, 100); s.setValue(default)
+            if action == 'gain':
+                s.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
+            else:
+                s.valueChanged.connect(lambda v, a=action, i=index: window.engine.command(a, i, v/100))
+            self.controls[action] = s
+            control_row.addWidget(s)
+            lay.addLayout(control_row)
+        # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC
+        row2 = QHBoxLayout()
+        cue_set = QPushButton('Cue Set'); cue_set.clicked.connect(lambda: window.engine.command('cue_set', index))
+        cue_jump = QPushButton('Cue'); cue_jump.clicked.connect(lambda: window.engine.command('cue_jump', index))
+        hot1 = QPushButton('Hot 1'); hot1.clicked.connect(lambda: window.engine.command('hotcue_jump', index, 1))
+        hot1s = QPushButton('Hot1 Set'); hot1s.clicked.connect(lambda: window.engine.command('hotcue_set', index, 1))
+        for b in [cue_set, cue_jump, hot1s, hot1]: row2.addWidget(b)
+        lay.addLayout(row2)
+        row3 = QHBoxLayout()
+        loop_in = QPushButton('Loop In'); loop_in.clicked.connect(lambda: window.engine.command('loop_in', index))
+        loop_out = QPushButton('Loop Out'); loop_out.clicked.connect(lambda: window.engine.command('loop_out', index))
+        loop_off = QPushButton('Loop Exit'); loop_off.clicked.connect(lambda: window.engine.command('loop_exit', index))
+        quant = QPushButton('Quantize'); quant.setCheckable(True)
+        self.quant = quant
+        quant.toggled.connect(lambda on, i=index: window.engine.command('quantize', i, on))
+        sync = QPushButton('SYNC'); sync.setCheckable(True)
+        self.sync = sync
+        sync.setToolTip('Tempo match only / テンポのみ一致。音程も変わります。ビート位相同期なし。')
+        sync.toggled.connect(lambda on, i=index: window.engine.command('sync', i, on))
+        for b in [loop_in, loop_out, loop_off, quant, sync]: row3.addWidget(b)
+        lay.addLayout(row3)
     def reset(self):
         self.window.engine.command('play', self.index, False)
         self.window.engine.command('seek', self.index, 0)
@@ -99,10 +139,15 @@ class Deck(QFrame):
 class Window(QMainWindow):
     def __init__(self, audio=True):
         super().__init__()
-        self.setWindowTitle('MixCraft DJ Studio • Mw-fActory • Phase 1')
-        self.resize(1100,740)
+        self.setWindowTitle('MixCraft DJ Studio • Mw-fActory • Phase 2 Trial')
+        self.resize(1100,850)
         self.engine = Engine()
         self.stream = None
+        self.audio_status_count = 0
+        self.callback_count = 0
+        self.callback_seconds = 0.0
+        self.callback_max_seconds = 0.0
+        self.hostapi_name = ''
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.result = Result()
         self.result.ready.connect(self.loaded)
@@ -110,16 +155,19 @@ class Window(QMainWindow):
         data = Path(os.getenv('LOCALAPPDATA', str(Path.home()/'.local/share'))) / 'MixCraftDJStudio'
         self.journal = Journal(data/'sessions'/f'{time.time_ns()}.jsonl')
         root = QWidget()
-        self.setCentralWidget(root)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(root)
+        self.setCentralWidget(scroll)
         layout = QVBoxLayout(root)
         header = QHBoxLayout()
         title = QLabel('MIXCRAFT  <span style="color:#55d9cf">DJ STUDIO</span>')
         title.setStyleSheet('font-size:27px;font-weight:800')
         header.addWidget(title)
         header.addStretch()
-        header.addWidget(QLabel('MW-FACTORY   /   OFFLINE   /   v0.1.0'))
+        header.addWidget(QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial'))
         layout.addLayout(header)
-        layout.addWidget(QLabel('DJ MODE     •     2 DECK PERFORMANCE                                        PHASE 1 / 試遊版'))
+        layout.addWidget(QLabel('DJ MODE     •     2 DECK PERFORMANCE                                        PHASE 2 / 試遊版'))
         decks = QHBoxLayout()
         self.decks = [Deck(self,i) for i in range(2)]
         for deck in self.decks: decks.addWidget(deck)
@@ -160,10 +208,12 @@ class Window(QMainWindow):
         settings = QHBoxLayout()
         settings.addWidget(QLabel('AUDIO OUTPUT / 出力'))
         self.devices = QComboBox()
-        self.devices.addItem('System default / 既定', None)
+        self.devices.addItem('Automatic / WASAPI優先', 'auto')
+        self.devices.addItem('System default / システム既定', None)
         try:
+            hosts = sd.query_hostapis()
             for i,d in enumerate(sd.query_devices()):
-                if d['max_output_channels'] >= 2: self.devices.addItem(d['name'],i)
+                if d['max_output_channels'] >= 2: self.devices.addItem(d['name']+' / '+hosts[d['hostapi']]['name'],i)
         except Exception: pass
         settings.addWidget(self.devices,1)
         apply = QPushButton('Apply / 適用')
@@ -172,7 +222,9 @@ class Window(QMainWindow):
         layout.addLayout(settings)
         self.status = QLabel('Ready / 準備完了')
         layout.addWidget(self.status)
-        layout.addWidget(QLabel('BPM is an estimate • ビート位置・小節頭・キー・同期・ALSは未実装。元ファイルは変更しません。'))
+        notice = QLabel('BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。MIDI入出力・ALS未対応。元ファイルは変更しません。')
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(40)
@@ -180,16 +232,35 @@ class Window(QMainWindow):
     def start_audio(self):
         if self.stream:
             self.stream.stop(); self.stream.close(); self.stream = None
+        device = self.devices.currentData()
+        extra = None
+        hostapi_name = ''
+        try:  # Phase 2: prefer WASAPI (low latency) on Windows when available
+            device, hostapi_name = resolve_output(device, sd)
+            if 'WASAPI' in hostapi_name:
+                extra = sd.WasapiSettings(exclusive=False)
+        except Exception:
+            extra = None
+            device = None if device == 'auto' else device
         try:
-            self.stream = sd.OutputStream(samplerate=RATE, channels=2, blocksize=512,
-                dtype='float32', device=self.devices.currentData(), callback=self.callback)
+            kwargs = dict(samplerate=RATE, channels=2, blocksize=512, latency='low',
+                dtype='float32', device=device, callback=self.callback)
+            if extra is not None: kwargs['extra_settings'] = extra
+            self.stream = sd.OutputStream(**kwargs)
             self.stream.start()
-            self.status.setText('Audio active • 48 kHz / 512 frames • 操作を自動保存中')
+            self.hostapi_name = hostapi_name
+            latency_ms = (self.stream.latency or 0) * 1000
+            self.status.setText(f'Audio active • 48 kHz / 512 frames • {hostapi_name or "default host"} • latency {latency_ms:.0f} ms (報告値) • 操作を自動保存中')
         except Exception as error:
             self.status.setText(f'Audio unavailable / 出力エラー: {error}')
     def callback(self,outdata,frames,time_info,status):
-        if status: self.engine.overloads += 1
+        started = time.perf_counter()
+        if status: self.audio_status_count += 1
         outdata[:] = self.engine.render(frames)
+        elapsed = time.perf_counter()-started
+        self.callback_count += 1
+        self.callback_seconds += elapsed
+        self.callback_max_seconds = max(self.callback_max_seconds, elapsed)
     def load(self,index,path):
         if index in self.loading: return
         self.loading.add(index)
@@ -213,6 +284,8 @@ class Window(QMainWindow):
         deck.name.setText(Path(track.path).name)
         deck.bpm.setText(f'{track.bpm or "—"} BPM ≈')
         deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
+        key_text = f' • Key {track.key} ({track.camelot})' if track.key else ''
+        deck.name.setText(Path(track.path).name + key_text)
     def preview(self):
         if not all(d['track'] for d in self.engine.decks):
             self.status.setText('Load both decks first / 両デッキに音声を読み込んでください')
@@ -228,6 +301,8 @@ class Window(QMainWindow):
         try: self.journal.drain(self.engine)
         except OSError as e: self.status.setText(f'Autosave error: {e}')
         for widget,d in zip(self.decks,self.engine.decks):
+            for button, key in [(widget.quant,'quantize'),(widget.sync,'sync')]:
+                button.blockSignals(True); button.setChecked(d[key]); button.blockSignals(False)
             widget.wave.position = d['position']
             widget.wave.update()
             widget.play.setText('Ⅱ Pause / 一時停止' if d['playing'] else '▶ Play / 再生')
@@ -235,7 +310,7 @@ class Window(QMainWindow):
             def clock(s): return f'{int(s)//60:02}:{int(s)%60:02}'
             widget.clock.setText(f'{clock(d["position"]/RATE)} / {clock(length)}')
         self.meter.setValue(int(self.engine.peak*100))
-        self.meter.setToolTip(f'Clamp / audio status count: {self.engine.overloads}')
+        self.meter.setToolTip(f'Limiter: {self.engine.overloads} / Audio status: {self.audio_status_count}')
         self.cross.setEnabled(self.engine.preview is None)
         self.preview_button.setEnabled(self.engine.preview is None)
     def closeEvent(self,event):
@@ -251,6 +326,7 @@ QWidget { background:#171d28; color:#e4eaf4; font-family:"Segoe UI"; font-size:1
 QMainWindow { background:#111722; } QFrame#deck { border:1px solid #303b4d; border-radius:10px; padding:12px; }
 QPushButton { background:#2b374c; border:1px solid #40506a; border-radius:5px; padding:9px; }
 QPushButton:hover { background:#3b4c63; } QPushButton:disabled { color:#6c7789; }
+QPushButton:checked { background:#26655f; border-color:#55d9cf; }
 QComboBox { background:#253044; padding:8px; } QSlider::groove:horizontal { height:5px; background:#35425a; }
 QSlider::handle:horizontal { width:16px; margin:-7px 0; background:#6bded3; border-radius:4px; }
 QProgressBar { background:#10151f; border:0; } QProgressBar::chunk { background:#55d9cf; }
@@ -260,7 +336,7 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     smoke_mode = len(sys.argv)>2 and sys.argv[1] in ('--smoke-test','--audio-smoke-test')
-    window = Window(audio=not smoke_mode or sys.argv[1]=='--audio-smoke-test')
+    window = Window(audio=not smoke_mode)
     window.show()
     if smoke_mode:
         from smoke import schedule

@@ -1,14 +1,30 @@
-"""Offline two-deck engine. Commands take effect at audio block boundaries."""
-from dataclasses import dataclass
+"""Offline two-deck engine. Commands take effect at audio block boundaries.
+
+Phase 2 additions:
+- de-zippered (smoothed) volume / cross / master / gain / EQ / filter:
+  every parameter ramps linearly over SMOOTH_FRAMES so abrupt moves do not
+  click.  Steady-state values are unchanged, so mixes render identically
+  once a ramp has settled (~5 ms).
+- 3-band EQ (crossover design; neutral EQ is bit-transparent), channel
+  GAIN and a resonant-free one-pole FILTER (LP below centre, HP above).
+- soft-knee limiter above 0.90 instead of a bare hard clip at 0.98.
+- CUE / HOT CUE / LOOP / Quantize (beat-grid snapping), SYNC and tempo
+  (rate playback — this pitches the audio; pitch-preserving time-stretch
+  is NOT implemented and is not claimed).
+- beat grid, key and analysis cache via analysis.py.
+"""
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import SimpleQueue
 import json
 import math
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample_poly, correlate, find_peaks
+from scipy.signal import resample_poly, correlate, find_peaks, lfilter
+from analysis import BeatGrid, estimate_beat_offset, estimate_key
 
 RATE = 48000
+SMOOTH_FRAMES = 240  # 5 ms at 48 kHz
 
 @dataclass
 class Track:
@@ -17,8 +33,16 @@ class Track:
     peaks: np.ndarray
     bpm: float | None
     confidence: float
+    beat_offset: int = 0
+    beat_confidence: float = 0.0
+    key: str | None = None
+    camelot: str | None = None
+    key_confidence: float = 0.0
+    def grid(self):
+        return BeatGrid(self.bpm, self.beat_offset) if self.bpm else None
 
-def load_track(path):
+def load_track(path, cache=None):
+    cached = cache.get(path) if cache else None
     info = sf.info(path)
     if info.duration > 1800:
         raise ValueError('Phase 1: maximum track length is 30 minutes')
@@ -31,8 +55,17 @@ def load_track(path):
         audio = resample_poly(audio, RATE // gcd, rate // gcd).astype('float32')
     audio = np.nan_to_num(audio)
     peaks = np.array([np.max(np.abs(x)) for x in np.array_split(audio, min(1400, len(audio)))])
+    if cached:
+        return Track(str(Path(path).resolve()), audio, peaks, cached['bpm'], cached['confidence'],
+                     cached['beat_offset'] or 0, 0.0, cached['key'], cached['camelot'], cached['key_confidence'] or 0.0)
     bpm, confidence = estimate_bpm(audio)
-    return Track(str(Path(path).resolve()), audio, peaks, bpm, confidence)
+    offset, beat_conf = estimate_beat_offset(audio, bpm)
+    key, camelot, key_conf = estimate_key(audio)
+    if cache:
+        cache.put(path, dict(bpm=bpm, confidence=confidence, beat_offset=offset,
+                             key=key, camelot=camelot, key_confidence=key_conf))
+    return Track(str(Path(path).resolve()), audio, peaks, bpm, confidence,
+                 offset, beat_conf, key, camelot, key_conf)
 
 def estimate_bpm(audio):
     mono = audio[:RATE * 180].mean(axis=1)
@@ -54,27 +87,92 @@ def estimate_bpm(audio):
     if bpm < 90: bpm *= 2  # dance-music prior; not a reliable meter detector
     return round(bpm, 1), float(np.clip(ac[lag] / (ac[0]+1e-12), 0, 1))
 
+def _smooth(state, key, target, frames):
+    """A 240-frame linear ramp, independent of callback block size."""
+    ramps = state.setdefault('_ramps', {})
+    previous, remaining, step = ramps.get(key, (state[key], 0, 0.0))
+    if target != previous:
+        remaining = SMOOTH_FRAMES
+        step = (target - state[key]) / remaining
+    n = min(frames, remaining)
+    values = np.full(frames, target, dtype=np.float64)
+    values[:n] = state[key] + step * np.arange(n)
+    state[key] = state[key] + step*n if n < remaining else target
+    ramps[key] = (target, remaining-n, step)
+    return values
+
+def _soft_limit(out):
+    a = np.abs(out)
+    over = a > 0.90
+    if np.any(over):
+        limited = 0.90 + 0.08 * np.tanh((a[over] - 0.90) / 0.08)
+        out[over] = np.sign(out[over]) * limited
+    return out
+
+class _OnePole:
+    """Stateful one-pole low-pass used for EQ crossovers / filter."""
+    def __init__(self, cutoff):
+        self.alpha = 1 - math.exp(-2 * math.pi * cutoff / RATE)
+        self.state = np.zeros(2, dtype=np.float64)
+    def run(self, x, alpha=None):
+        if not len(x): return x.astype(np.float64)
+        if alpha is None:
+            alpha = np.full(len(x), self.alpha)
+        # Only parameter transitions require sample-wise coefficient changes.
+        changed = np.flatnonzero(np.diff(alpha))
+        prefix = int(changed[-1]+2) if len(changed) else 0
+        y = np.empty_like(x, dtype=np.float64)
+        state = self.state
+        for i in range(prefix):
+            state = state + alpha[i] * (x[i] - state)
+            y[i] = state
+        if prefix < len(x):
+            a = float(alpha[-1])
+            y[prefix:], _ = lfilter([a], [1, -(1-a)], x[prefix:], axis=0,
+                                    zi=((1-a)*state)[None, :])
+        self.state = y[-1].copy()
+        return y
+
+
+def _new_deck():
+    return dict(track=None, position=0, playing=False, volume=0.8,
+                gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5,
+                cue=0, hotcues={}, loop_start=None, loop_end=None, loop_active=False,
+                quantize=False, rate=1.0, sync=False,
+                _lp_low=None, _lp_high=None, _lp_filter=None, _hp_filter=None)
+
 class Engine:
     def __init__(self):
-        self.decks = [dict(track=None, position=0, playing=False, volume=0.8) for _ in range(2)]
+        self.decks = [_new_deck() for _ in range(2)]
         self.cross = 0.5
         self.master = 0.8
+        self._cur = dict(cross=0.5, master=0.8)
+        self._deck_cur = [dict(volume=0.8, gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5) for _ in range(2)]
         self.commands = SimpleQueue()
         self.events = SimpleQueue()
         self.frame = 0
         self.peak = 0.0
         self.overloads = 0
         self.preview = None
+        self.master_deck = 0
 
     def command(self, action, deck=None, value=None):
         self.commands.put((action, deck, value))
+
+    def _snap(self, d, frame):
+        if d['quantize'] and d['track'] is not None and d['track'].grid():
+            frame = d['track'].grid().nearest_beat(frame)
+        return int(np.clip(frame, 0, len(d['track'].audio))) if d['track'] else 0
 
     def _apply(self):
         while not self.commands.empty():
             action, index, value = self.commands.get()
             d = self.decks[index] if index is not None else None
             if action == 'load':
-                d.update(track=value, position=0, playing=False)
+                keep = {k: d[k] for k in ('volume','gain','eq_low','eq_mid','eq_high','filter','quantize')}
+                d.update(_new_deck()); d.update(keep)
+                self._deck_cur[index] = {k: d[k] for k in ('volume','gain','eq_low','eq_mid','eq_high','filter')}
+                d['track'] = value
                 value = value.path
             elif action == 'play':
                 if d['track'] is not None:
@@ -82,51 +180,135 @@ class Engine:
                     d['playing'] = bool(value)
             elif action == 'seek':
                 if d['track'] is not None:
-                    d['position'] = int(np.clip(value, 0, len(d['track'].audio)))
+                    d['position'] = self._snap(d, int(np.clip(value, 0, len(d['track'].audio))))
             elif action == 'volume': d['volume'] = float(np.clip(value, 0, 1))
+            elif action == 'gain': d['gain'] = float(np.clip(value, 0, 2))
+            elif action in ('eq_low', 'eq_mid', 'eq_high'):
+                d[action] = float(np.clip(value, 0, 1)) * 2.0  # UI 0..1, 0.5 = neutral
+            elif action == 'filter': d['filter'] = float(np.clip(value, 0, 1))
             elif action == 'cross': self.cross = float(np.clip(value, 0, 1))
             elif action == 'master': self.master = float(np.clip(value, 0, 1))
+            elif action == 'cue_set': d['cue'] = self._snap(d, d['position'])
+            elif action == 'cue_jump':
+                if d['track'] is not None: d['position'] = d['cue']
+            elif action == 'hotcue_set':
+                if d['track'] is not None: d['hotcues'][int(value)] = self._snap(d, d['position'])
+            elif action == 'hotcue_jump':
+                if int(value) in d['hotcues']: d['position'] = d['hotcues'][int(value)]
+            elif action == 'loop_in':
+                d['loop_active'] = False
+                d['loop_start'] = self._snap(d, d['position'])
+            elif action == 'loop_out':
+                d['loop_end'] = self._snap(d, d['position'])
+                d['loop_active'] = d['loop_start'] is not None and d['loop_end'] > d['loop_start']
+            elif action == 'loop_exit': d['loop_active'] = False
+            elif action == 'quantize': d['quantize'] = bool(value)
+            elif action == 'tempo': d['rate'] = float(np.clip(value, 0.5, 2.0))
+            elif action == 'sync':
+                d['sync'] = bool(value)
+                other = self.decks[1 - index]
+                if value and d['track'] and other['track'] and d['track'].bpm and other['track'].bpm:
+                    d['rate'] = float(np.clip(other['track'].bpm * other['rate'] / d['track'].bpm, 0.5, 2.0))
+                elif not value: d['rate'] = 1.0
+            elif action == 'beat_offset':
+                if d['track'] is not None: d['track'].beat_offset = int(value)
             elif action == 'preview':
                 self._restore_preview()
-                if all(d['track'] is not None for d in self.decks):
-                    duration = min(int(value * RATE), *(len(d['track'].audio) for d in self.decks))
-                    self.preview = [0, duration, [(d['position'], d['playing']) for d in self.decks], self.cross]
+                if all(x['track'] is not None for x in self.decks):
+                    duration = min(int(value * RATE), *(len(x['track'].audio) for x in self.decks))
+                    self.preview = [0, duration, [{k: x[k] for k in ('position', 'playing', 'rate', 'sync', 'loop_active')} for x in self.decks], self.cross]
                     self.decks[0]['position'] = len(self.decks[0]['track'].audio)-duration
                     self.decks[1]['position'] = 0
-                    for d in self.decks: d['playing'] = True
+                    for x in self.decks: x.update(playing=True, rate=1.0, sync=False, loop_active=False)
             elif action == 'stop_preview': self._restore_preview()
             self.events.put(dict(frame=self.frame, sample_rate=RATE, action=action, deck=index, value=value))
 
     def _restore_preview(self):
         if self.preview:
             for d, state in zip(self.decks, self.preview[2]):
-                d['position'], d['playing'] = state
+                d.update(state)
             self.cross = self.preview[3]
+            self._cur['cross'] = self.preview[3]
+            self._cur.get('_ramps', {}).pop('cross', None)
             self.preview = None
+
+    def _process_deck(self, d, cur, block, frames):
+        x = block.astype(np.float64)
+        eq = [cur[k + '_arr'][:frames, None] for k in ('eq_low','eq_mid','eq_high')]
+        if any(np.any(g != 1) for g in eq):
+            if d['_lp_low'] is None:
+                d['_lp_low'], d['_lp_high'] = _OnePole(200), _OnePole(4000)
+            low = d['_lp_low'].run(x)
+            upper = d['_lp_high'].run(x)
+            x = low*eq[0] + (upper-low)*eq[1] + (x-upper)*eq[2]
+        else:
+            d['_lp_low'] = d['_lp_high'] = None
+        f = cur['filter_arr'][:frames]
+        if np.any(f != 0.5):
+            if d['_lp_filter'] is None:
+                d['_lp_filter'], d['_hp_filter'] = _OnePole(20000), _OnePole(20)
+            low_cut = 100 * 200**(np.minimum(f, .5)*2)
+            high_cut = 20 * 200**(np.maximum(f-.5, 0)*2)
+            low = d['_lp_filter'].run(x, 1-np.exp(-2*np.pi*low_cut/RATE))
+            high = x-d['_hp_filter'].run(x, 1-np.exp(-2*np.pi*high_cut/RATE))
+            wet = np.minimum(np.abs(f-.5)/.05, 1)[:,None]
+            filtered = np.where((f < .5)[:,None], low, high)
+            x = x*(1-wet) + filtered*wet
+        else:
+            d['_lp_filter'] = d['_hp_filter'] = None
+        return x.astype('float32')
+
+    def _read_deck(self, d, frames):
+        audio = d['track'].audio
+        rate = d['rate']
+        indices = d['position'] + rate*np.arange(frames)
+        loop = d['loop_active'] and d['loop_end'] is not None
+        if loop:
+            lo, hi = d['loop_start'], d['loop_end']
+            indices = np.where(indices >= hi, lo+(indices-lo) % (hi-lo), indices)
+        else:
+            indices = indices[indices < len(audio)]
+        n = len(indices)
+        if not n: return np.empty((0,2), dtype='float32')
+        left = np.floor(indices).astype(np.int64)
+        right = left+1
+        if loop: right = np.where(right >= hi, lo, right)
+        right = np.minimum(right, len(audio)-1)
+        fraction = (indices-left)[:,None]
+        block = (audio[left]*(1-fraction)+audio[right]*fraction).astype('float32')
+        end = d['position']+n*rate
+        if loop and end >= hi: end = lo+(end-lo) % (hi-lo)
+        d['position'] = min(end, len(audio))
+        if not loop and end >= len(audio): d['playing'] = False
+        return block
 
     def render(self, frames):
         self._apply()
         out = np.zeros((frames, 2), dtype='float32')
         if self.preview:
             x = np.clip((self.preview[0]+np.arange(frames))/max(1,self.preview[1]-1), 0, 1)
-            self.cross = float(x[-1])
+            self.cross = float(x[-1]); self._cur['cross'] = self.cross
             gains = [np.cos(x*np.pi/2)[:,None], np.sin(x*np.pi/2)[:,None]]
             active_frames = min(frames, self.preview[1]-self.preview[0])
         else:
-            gains = [math.cos(self.cross*math.pi/2), math.sin(self.cross*math.pi/2)]
+            cross_arr = _smooth(self._cur, 'cross', self.cross, frames)
+            gains = [np.cos(cross_arr*np.pi/2)[:,None], np.sin(cross_arr*np.pi/2)[:,None]]
             active_frames = frames
-        for d, gain in zip(self.decks, gains):
+        master_arr = _smooth(self._cur, 'master', self.master, frames)
+        for di, (d, gain) in enumerate(zip(self.decks, gains)):
             if d['track'] is None or not d['playing']: continue
-            start = d['position']
-            n = min(active_frames, len(d['track'].audio)-start)
-            if n > 0:
-                g = gain[:n] if isinstance(gain, np.ndarray) else gain
-                out[:n] += d['track'].audio[start:start+n]*d['volume']*g
-            d['position'] += n
-            if d['position'] >= len(d['track'].audio): d['playing'] = False
-        out *= self.master
+            cur = self._deck_cur[di]
+            for key in ('volume', 'gain', 'eq_low', 'eq_mid', 'eq_high', 'filter'):
+                cur[key + '_arr'] = _smooth(cur, key, d[key], frames)
+            block = self._read_deck(d, active_frames)
+            n = len(block)
+            if n:
+                block = self._process_deck(d, cur, block, n)
+                level = (cur['volume_arr'][:n]*cur['gain_arr'][:n])[:,None]
+                out[:n] += block*level*gain[:n]
+        out = (out * master_arr[:, None]).astype('float32')
         if np.max(np.abs(out), initial=0) > 0.98: self.overloads += 1
-        np.clip(out, -0.98, 0.98, out=out)  # safety clamp, not a mastering limiter
+        out = _soft_limit(out)
         self.peak = float(np.max(np.abs(out), initial=0))
         self.frame += frames
         if self.preview:
@@ -145,8 +327,8 @@ class Journal:
         while not engine.events.empty():
             event = engine.events.get()
             self.history.append(event)
-            self.file.write(json.dumps(event, ensure_ascii=False)+'\n')
+            self.file.write(json.dumps(event, ensure_ascii=False, default=str)+'\n')
         self.file.flush()
 
     def export(self, path):
-        Path(path).write_text(json.dumps(dict(schema=1, sample_rate=RATE, events=self.history), ensure_ascii=False, indent=2), encoding='utf-8')
+        Path(path).write_text(json.dumps(dict(schema=1, sample_rate=RATE, events=self.history), ensure_ascii=False, indent=2, default=str), encoding='utf-8')
