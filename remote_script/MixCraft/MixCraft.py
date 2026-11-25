@@ -51,9 +51,14 @@ PAD_COUNT = 8
 # forwards the full note/CC ranges on exactly these channels.
 FORWARD_CHANNELS = (0, 1, 4, 5, 6, 7, 8)
 
-_EQ_PARAMS = {'eq_three.high': 'High Gain',
-              'eq_three.mid': 'Mid Gain',
-              'eq_three.low': 'Low Gain'}
+# EQ Three's real LOM parameter names are GainLow/GainMid/GainHi
+# (hardware-verified 2026-11-26: the '... Gain' spellings matched
+# nothing, so the EQ knobs were silently dead).  Each entry is an
+# ordered candidate tuple: the true LOM name first, the old spelling
+# kept as a fallback for builds that might differ.
+_EQ_PARAMS = {'eq_three.high': ('GainHi', 'High Gain'),
+              'eq_three.mid': ('GainMid', 'Mid Gain'),
+              'eq_three.low': ('GainLow', 'Low Gain')}
 _EQ_DEVICE_CLASSES = ('Eq3', 'Eq8')
 _EQ_DEVICE_NAMES = ('EQ Three', 'EQ Eight')
 _FILTER_DEVICE_CLASSES = ('AutoFilter',)
@@ -336,10 +341,18 @@ class MixCraft(ControlSurface):
     def _find_param(self, track, class_names, device_names, param_name):
         """Find a device parameter by device class/name + parameter name.
 
-        Primary match is the LOM ``class_name``; the display-name
-        match is a fallback for builds whose class strings differ.
-        Returns None (caller skips) when nothing matches.
+        ``param_name`` may be a single name or an ordered tuple of
+        candidate names (EQ Three: the real LOM name first, legacy
+        spellings after); candidates are tried in order within the
+        matched device.  Primary device match is the LOM
+        ``class_name``; the display-name match is a fallback for
+        builds whose class strings differ.  Returns None (caller
+        skips) when nothing matches.
         """
+        if isinstance(param_name, (tuple, list)):
+            candidates = tuple(param_name)
+        else:
+            candidates = (param_name,)
         fallback = None
         for device in track.devices:
             params = None
@@ -349,13 +362,14 @@ class MixCraft(ControlSurface):
                 params = device.parameters
             elif fallback is None:
                 for param in device.parameters:
-                    if param.name == param_name:
+                    if param.name in candidates:
                         fallback = param
                         break
             if params is not None:
-                for param in params:
-                    if param.name == param_name:
-                        return param
+                for candidate in candidates:
+                    for param in params:
+                        if param.name == candidate:
+                            return param
         return fallback
 
     def _apply_filter(self, track, deck, bipolar):

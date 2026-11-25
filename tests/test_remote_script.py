@@ -191,6 +191,15 @@ def _eq_three():
         FakeParam('High Gain', -15.0, 15.0, 0.0)])
 
 
+def _eq_three_lom():
+    # Parameter names as the real EQ Three exposes them via the LOM
+    # (hardware-verified 2026-11-26).
+    return FakeDevice('Eq3', 'EQ Three', [
+        FakeParam('GainLow', -15.0, 15.0, 0.0),
+        FakeParam('GainMid', -15.0, 15.0, 0.0),
+        FakeParam('GainHi', -15.0, 15.0, 0.0)])
+
+
 def _auto_filter():
     return FakeDevice('AutoFilter', 'Auto Filter', [
         FakeParam('Filter Type', 0, 4, 0),
@@ -202,8 +211,11 @@ def _utility():
         FakeParam('Gain', -70.0, 35.0, 0.0)])
 
 
-def _make_surface(deck_a_clips=('Song A',), deck_b_clips=('Song B',)):
-    devices = [_utility(), _eq_three(), _auto_filter()]
+def _make_surface(deck_a_clips=('Song A',), deck_b_clips=('Song B',),
+                  eq_factory=None):
+    if eq_factory is None:
+        eq_factory = _eq_three
+    devices = [_utility(), eq_factory(), _auto_filter()]
     track_a = FakeTrack('Deck A',
                         clips=[FakeClip(n) if n else None
                                for n in deck_a_clips],
@@ -211,7 +223,7 @@ def _make_surface(deck_a_clips=('Song A',), deck_b_clips=('Song B',)):
     track_b = FakeTrack('Deck B',
                         clips=[FakeClip(n) if n else None
                                for n in deck_b_clips],
-                        devices=[_utility(), _eq_three(), _auto_filter()])
+                        devices=[_utility(), eq_factory(), _auto_filter()])
     song = FakeSong([track_a, track_b])
     surface = MixCraft(FakeCInstance(song))
     return surface, song
@@ -333,6 +345,33 @@ def test_channel_fader_trim_and_eq_reach_device_params():
     assert hi.name == 'High Gain' and hi.value == 15.0
     surface.receive_midi(_cc(0, 7, 0))
     assert hi.value == -15.0
+
+
+def test_eq_knobs_drive_lom_named_eq_three_params():
+    # Regression (hardware 2026-11-26): a real EQ Three names its
+    # parameters GainLow/GainMid/GainHi.  The script's original
+    # 'Low Gain'/'Mid Gain'/'High Gain' spellings matched nothing,
+    # so the DDJ-RB EQ knobs silently did nothing on hardware.
+    surface, song = _make_surface(eq_factory=_eq_three_lom)
+    track = song.tracks[0]
+    low, mid, hi = track.devices[1].parameters
+    assert (low.name, mid.name, hi.name) == ('GainLow', 'GainMid',
+                                            'GainHi')
+    surface.receive_midi(_cc(0, 15, 127))   # EQ LOW deck A -> max
+    surface.receive_midi(_cc(0, 11, 127))   # EQ MID deck A -> max
+    surface.receive_midi(_cc(0, 7, 127))    # EQ HI  deck A -> max
+    assert low.value == 15.0 and mid.value == 15.0 and hi.value == 15.0
+    surface.receive_midi(_cc(0, 15, 0))
+    surface.receive_midi(_cc(0, 11, 0))
+    surface.receive_midi(_cc(0, 7, 0))
+    assert low.value == -15.0 and mid.value == -15.0
+    assert hi.value == -15.0
+    surface.receive_midi(_cc(0, 11, 64))    # centre detent ~ flat
+    assert abs(mid.value) < 0.25
+    # Deck B speaks the same names.
+    track_b = song.tracks[1]
+    surface.receive_midi(_cc(1, 7, 127))    # EQ HI deck B -> max
+    assert track_b.devices[1].parameters[2].value == 15.0
 
 
 def test_tempo_and_sync_are_ignored():
