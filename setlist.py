@@ -26,8 +26,10 @@ NAS / Google Drive の共有フォルダ経由で PC に渡し、PC 側 (この�
 
 読み取りは寛容にする: 欠けたフィールドは None / デフォルトで補い、
 duration ("6:30" のような mm:ss 文字列) や length_seconds などの別名も
-受け付ける。ただし format / version が違うデータは別物なので、
-SetlistFormatError で明確に弾く。
+受け付ける。スマホ側ページの実出力は camelCase (setBpm / durationSec /
+previewLink / status など) なので、その別名にも対応する (対応表は
+SETLIST_FORMAT.md)。format は "mixcraft" で始まる文字列 (大小無視) で
+version が 1 なら受け付け、それ以外は SetlistFormatError で明確に弾く。
 
 使い方 (CLI):
     python setlist.py check <setlist.json>          # 形式検証 + 件数/合計時間
@@ -43,6 +45,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 FORMAT = "mixcraft-setlist"
 VERSION = 1
@@ -100,6 +103,45 @@ def _first(raw, *names):
     return None
 
 
+_AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".ogg", ".oga", ".wav", ".flac")
+
+
+def _looks_like_audio_url(url) -> bool:
+    """URL が音源ファイルそのもの (直接再生できる) らしいかどうか。
+
+    パス部分 (クエリ除く) の拡張子で判定する。iTunes / Deezer の試聴
+    ファイル (.m4a / .mp3) はこちら、YouTube / Spotify / Beatport /
+    Bandcamp の曲ページは拡張子を持たないので対象外になる。
+    """
+    if not url or not isinstance(url, str):
+        return False
+    path = urlparse(url).path.lower()
+    return path.endswith(_AUDIO_SUFFIXES)
+
+
+_STATUS_PLAYING = {"playing", "now", "now_playing", "nowplaying",
+                   "current", "on_air", "onair"}
+_STATUS_PLAYED = {"played", "done", "finished", "complete", "completed"}
+
+
+def _normalize_status(value):
+    """スマホ側の status 文字列を played / playing / queued にそろえる。
+
+    値が無い場合は None (状態不明)。未知の文字列は「まだかかっていない」
+    として queued に寄せる。
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if not text:
+        return None
+    if text in _STATUS_PLAYING:
+        return "playing"
+    if text in _STATUS_PLAYED:
+        return "played"
+    return "queued"
+
+
 # ---------------------------------------------------------------------------
 # 正規化
 # ---------------------------------------------------------------------------
@@ -108,20 +150,41 @@ def normalize_track(raw) -> dict:
     """1 曲分を正本の形にそろえる。欠けたフィールドは None で補う。"""
     if not isinstance(raw, dict):
         raw = {}
-    duration = _parse_duration(_first(raw, "duration_seconds", "length_seconds",
+    duration = _parse_duration(_first(raw, "duration_seconds", "durationSec",
+                                       "duration_sec", "length_seconds",
                                        "duration", "seconds", "length"))
     if duration is None:
         duration = _parse_duration(raw.get("duration_text"))
+    # スマホ側の previewLink は「貼られた曲ページ / 試聴リンク」。
+    # 音源ファイルそのものらしい URL (.mp3/.m4a 等) は preview_url に、
+    # それ以外 (YouTube 等の曲ページ) は source_url に振り分ける。
+    preview_url = raw.get("preview_url")
+    preview_source = raw.get("preview_source")
+    source_url = raw.get("source_url")
+    link = _first(raw, "previewLink", "preview_link")
+    if link:
+        if _looks_like_audio_url(link):
+            if preview_url is None:
+                preview_url = link
+            if preview_source is None:
+                preview_source = "link"
+        elif source_url is None:
+            source_url = link
     return {
         "title": _first(raw, "title", "name") or "",
         "artist": _first(raw, "artist", "artist_name", "matched_artist"),
         "bpm": _as_float(_first(raw, "bpm", "tempo", "average_bpm")),
         "key": _first(raw, "key", "camelot", "tonality", "key_name"),
         "duration_seconds": duration,
-        "preview_url": raw.get("preview_url"),
-        "preview_source": raw.get("preview_source"),
-        "source_url": raw.get("source_url"),
+        "preview_url": preview_url,
+        "preview_source": preview_source,
+        "source_url": source_url,
         "local_preview": _first(raw, "local_preview", "preview_file"),
+        # スマホ側の付帯情報 (あれば保持する。並びは配列順が正で、
+        # position は照合用にそのまま残すだけ)
+        "note": _first(raw, "note", "cueNote", "cue_note"),
+        "status": _normalize_status(_first(raw, "status", "state")),
+        "position": _as_int(raw.get("position")),
         # PC 側に実ファイルがある場合の任意フィールド (正本では未使用でも保持)
         "path": raw.get("path"),
         "cues": raw.get("cues") or [],
@@ -129,21 +192,35 @@ def normalize_track(raw) -> dict:
 
 
 def canonical_track(track) -> dict:
-    """保存用の正本フィールドだけに絞った 1 曲分 (path/cues は落とす)。"""
+    """保存用の正本フィールドだけに絞った 1 曲分 (path/cues は落とす)。
+
+    スマホ側の付帯情報 (note / status / position) は、値がある場合だけ
+    一緒に残す (load → save → load で情報が落ちないように)。
+    """
     t = normalize_track(track)
-    return {k: t[k] for k in ("title", "artist", "bpm", "key", "duration_seconds",
-                              "preview_url", "preview_source", "source_url",
-                              "local_preview")}
+    out = {k: t[k] for k in ("title", "artist", "bpm", "key", "duration_seconds",
+                             "preview_url", "preview_source", "source_url",
+                             "local_preview")}
+    for k in ("note", "status", "position"):
+        if t.get(k) is not None:
+            out[k] = t[k]
+    return out
 
 
 def normalize_setlist(data) -> dict:
-    """セットリスト全体を正本の形にそろえる。format/version 不一致はエラー。"""
+    """セットリスト全体を正本の形にそろえる。format/version 不一致はエラー。
+
+    format 判定は緩めてある: "mixcraft" で始まる文字列 (大文字小文字は
+    無視) で version が 1 なら受け付ける。スマホ側ページの実出力は
+    format の正確な綴りが版によって揺れる可能性があるためで、それ以外
+    (欠落・無関係な文字列・version 不一致) は従来通り弾く。
+    """
     if not isinstance(data, dict):
         raise SetlistFormatError("セットリストは JSON オブジェクトである必要があります")
     fmt = data.get("format")
-    if fmt != FORMAT:
+    if not (isinstance(fmt, str) and fmt.strip().lower().startswith("mixcraft")):
         raise SetlistFormatError(
-            f"format が違います: {fmt!r} (期待値: {FORMAT!r})。"
+            f"format が違います: {fmt!r} (期待値: {FORMAT!r} 系)。"
             "MixCraft のセットリスト JSON ではない可能性があります")
     version = data.get("version", VERSION)
     if _as_int(version) != VERSION:
@@ -152,15 +229,28 @@ def normalize_setlist(data) -> dict:
     tracks = data.get("tracks") or []
     if not isinstance(tracks, list):
         raise SetlistFormatError("tracks はリストである必要があります")
-    current = _as_int(data.get("current_index"))
+    norm_tracks = [normalize_track(t) for t in tracks]
+    # 再生状態の復元: 明示の current_index があればそれを正とし、無ければ
+    # status="playing" の曲から復元する。started はトップレベルが正で、
+    # 無ければ played / playing の存在から推定する。
+    current = _as_int(_first(data, "current_index", "currentIndex"))
+    if current is None or current < 0:
+        current = next((i for i, t in enumerate(norm_tracks)
+                        if t["status"] == "playing"), -1)
+    if data.get("started") is not None:
+        started = bool(data.get("started"))
+    else:
+        started = any(t["status"] in ("played", "playing") for t in norm_tracks)
     return {
         "format": FORMAT,
         "version": VERSION,
-        "exported_at": data.get("exported_at"),
-        "set_bpm": _as_float(data.get("set_bpm")),
-        "started": bool(data.get("started", False)),
-        "current_index": current if current is not None else -1,
-        "tracks": [normalize_track(t) for t in tracks],
+        "exported_at": _first(data, "exported_at", "exportedAt"),
+        "set_bpm": _as_float(_first(data, "set_bpm", "setBpm")),
+        "target_minutes": _as_float(_first(data, "target_minutes",
+                                           "targetMinutes")),
+        "started": started,
+        "current_index": current,
+        "tracks": norm_tracks,
     }
 
 
@@ -218,6 +308,8 @@ def save_setlist(setlist, path, now=None) -> dict:
         "current_index": data["current_index"],
         "tracks": [canonical_track(t) for t in data["tracks"]],
     }
+    if data.get("target_minutes") is not None:
+        out["target_minutes"] = data["target_minutes"]
     Path(path).write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n",
                           encoding="utf-8")
     return out
@@ -327,8 +419,10 @@ def _cmd_check(path) -> int:
     total = total_seconds(data)
     bpm = data["set_bpm"]
     print(f"OK: format={data['format']} version={data['version']}")
+    target = data.get("target_minutes")
     print(f"  set_bpm: {bpm if bpm is not None else '(未設定)'}"
-          f" / started: {data['started']} / current_index: {data['current_index']}")
+          f" / started: {data['started']} / current_index: {data['current_index']}"
+          + (f" / target: {target:g} 分" if target is not None else ""))
     print(f"  tracks: {len(data['tracks'])} 曲 / 合計時間: {format_duration(total)}"
           f" ({total} 秒)")
     for i, t in enumerate(data["tracks"], 1):

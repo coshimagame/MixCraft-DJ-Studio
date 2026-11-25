@@ -57,7 +57,43 @@
 - 別名も受け付ける: `name`→`title`、`tempo`→`bpm`、`camelot` / `tonality`→`key`、
   `length_seconds`→`duration_seconds`、`duration` は `"6:30"` のような
   mm:ss 文字列 (h:mm:ss も可) でもよい
-- ただし `format` / `version` が違うデータは `SetlistFormatError` で明確に弾く
+- `format` 判定は緩めてある: `"mixcraft"` で始まる文字列 (大文字小文字は
+  無視) で `version` が `1` なら受け付ける。それ以外 (欠落・無関係な
+  文字列・version 不一致) は `SetlistFormatError` で明確に弾く
+
+## スマホ側ページの実出力 (camelCase) との対応表
+
+スマホの下ごしらえページの書き出しは camelCase なので、PC 側は
+以下の対応で正本 (snake_case) に読み替える (実装: `setlist.py`、
+検証: `tests/test_setlist.py` の `PHONE_EXPORT` サンプル)。
+
+### トップレベル
+
+| スマホ実出力 | 正本 | 扱い |
+|---|---|---|
+| `exportedAt` | `exported_at` | そのまま保持 |
+| `setBpm` | `set_bpm` | 数値化して保持 |
+| `targetMinutes` | `target_minutes` | 目標時間 (分)。正規化 dict に保持し、保存時も落とさない |
+| `started` | `started` | 最優先で採用 (下記の推定より強い) |
+| `totalSeconds` | — | 無視する (合計は各曲の長さから再計算) |
+| (なし) | `current_index` | 各曲の `status` から復元する |
+
+### tracks[] の各曲
+
+| スマホ実出力 | 正本 | 扱い |
+|---|---|---|
+| `position` | `position` | 照合用に保持するだけ。並び順は配列順が正 |
+| `durationSec` | `duration_seconds` | 秒数として保持 |
+| `cueNote` | `note` | メモとして保持 |
+| `previewLink` | `source_url` / `preview_url` | 貼られた曲ページ / 試聴リンク。音源ファイルらしい URL (パスが `.mp3` / `.m4a` / `.aac` / `.ogg` / `.wav` / `.flac` で終わる) は `preview_url` (+ `preview_source="link"`) に、それ以外 (YouTube 等の曲ページ) は `source_url` に振り分ける |
+| `status` | `status` + 状態復元 | `played` / `playing` / `queued` に正規化して各曲に残す。`now playing` のような表記揺れも `playing` に寄せる |
+
+### 再生状態の復元ルール
+
+- `current_index`: 明示値があればそれが正。無ければ `status="playing"`
+  の曲の位置、無ければ `-1`
+- `started`: トップレベルの `started` があればそれが正。無ければ
+  `played` / `playing` の曲が 1 つでもあれば `true` と推定する
 
 ## 運用
 

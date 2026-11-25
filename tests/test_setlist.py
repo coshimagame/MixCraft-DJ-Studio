@@ -176,6 +176,111 @@ def test_setlist_from_manifest_round_trip(tmp_path):
     assert total_seconds(loaded) == 795
 
 
+# ---------------------------------------------------------------------------
+# Phone page's actual export (camelCase, verified against the real builder
+# output): keys differ from the canonical snake_case, so load_setlist must
+# map them. Pinned here so the two sides cannot drift apart silently.
+# ---------------------------------------------------------------------------
+
+PHONE_EXPORT = {
+    "format": "mixcraft-setlist",
+    "version": 1,
+    "exportedAt": "2026-11-25T13:00:00+09:00",
+    "setBpm": 122,
+    "targetMinutes": 60,
+    "started": True,
+    "totalSeconds": 1515,
+    "tracks": [
+        {"position": 1, "title": "Song A", "artist": "Artist A", "bpm": 120,
+         "key": "8A", "durationSec": 390, "cueNote": "イントロ32小節",
+         "previewLink": "https://www.youtube.com/watch?v=exampleA",
+         "status": "played"},
+        {"position": 2, "title": "Song B", "artist": "Artist B", "bpm": 122,
+         "key": "5A", "durationSec": 405, "cueNote": None,
+         "previewLink": "https://audio-ssl.itunes.apple.com/itunes-assets"
+                        "/previewB.m4a",
+         "status": "playing"},
+        {"position": 3, "title": "Song C", "artist": None, "bpm": 123,
+         "key": "10A", "durationSec": 720, "cueNote": "",
+         "previewLink": None, "status": "queued"},
+    ],
+}
+
+
+def test_load_phone_export_camelcase():
+    data = load_setlist(PHONE_EXPORT)
+    # top-level aliases
+    assert data["set_bpm"] == 122
+    assert data["exported_at"] == "2026-11-25T13:00:00+09:00"
+    assert data["target_minutes"] == 60
+    assert data["started"] is True
+    # state restored from per-track status (no current_index in the export)
+    assert data["current_index"] == 1
+    a, b, c = data["tracks"]
+    assert a["status"] == "played" and b["status"] == "playing"
+    assert c["status"] == "queued"
+    # per-track aliases
+    assert a["duration_seconds"] == 390 and b["duration_seconds"] == 405
+    assert c["duration_seconds"] == 720
+    assert a["note"] == "イントロ32小節"
+    assert a["position"] == 1 and c["position"] == 3
+    # a pasted page link (YouTube) becomes source_url, not a playable file
+    assert a["source_url"] == "https://www.youtube.com/watch?v=exampleA"
+    assert a["preview_url"] is None
+    # a direct audio file link (.m4a) becomes preview_url
+    assert b["preview_url"].endswith("/previewB.m4a")
+    assert b["preview_source"] == "link"
+    assert c["preview_url"] is None and c["source_url"] is None
+    # totalSeconds in the export is ignored; totals come from durations
+    assert total_seconds(data) == 390 + 405 + 720
+
+
+def test_phone_export_round_trip_keeps_information(tmp_path):
+    path = tmp_path / "phone.json"
+    save_setlist(load_setlist(PHONE_EXPORT), path)
+    again = load_setlist(path)
+    assert again["set_bpm"] == 122 and again["target_minutes"] == 60
+    assert again["started"] is True and again["current_index"] == 1
+    a, b, _ = again["tracks"]
+    assert a["duration_seconds"] == 390 and a["status"] == "played"
+    assert a["note"] == "イントロ32小節"
+    assert a["source_url"] == "https://www.youtube.com/watch?v=exampleA"
+    assert b["status"] == "playing" and b["preview_url"].endswith(".m4a")
+
+
+def test_format_prefix_is_accepted_case_insensitively():
+    for fmt in ("mixcraft-setlist", "Mixcraft Setlist", "MIXCRAFT"):
+        data = load_setlist({"format": fmt, "version": 1, "tracks": []})
+        assert data["format"] == FORMAT  # normalized to the canonical name
+    # ...but an unrelated or missing format still raises, as does version 2
+    with pytest.raises(SetlistFormatError):
+        load_setlist({"format": "mixsetlist", "version": 1, "tracks": []})
+    with pytest.raises(SetlistFormatError):
+        load_setlist({"format": "mixcraft-setlist", "version": 2, "tracks": []})
+
+
+def test_started_and_current_inferred_from_status():
+    data = load_setlist({
+        "format": FORMAT, "version": 1,
+        "tracks": [{"title": "A", "status": "played"},
+                   {"title": "B", "status": "now playing"},
+                   {"title": "C", "status": "queued"}],
+    })
+    assert data["started"] is True  # inferred: something has played
+    assert data["current_index"] == 1  # "now playing" normalized to playing
+    fresh = load_setlist({"format": FORMAT, "version": 1,
+                          "tracks": [{"title": "A", "status": "queued"}]})
+    assert fresh["started"] is False and fresh["current_index"] == -1
+
+
+def test_top_level_started_wins_over_status():
+    data = load_setlist({
+        "format": FORMAT, "version": 1, "started": False,
+        "tracks": [{"title": "A", "status": "played"}],
+    })
+    assert data["started"] is False  # explicit top-level value has priority
+
+
 def test_setlist_to_clip_tracks():
     clip_tracks = setlist_to_clip_tracks(CANONICAL)
     assert len(clip_tracks) == 2
