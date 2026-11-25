@@ -11,12 +11,19 @@ from pathlib import Path
 
 # (channel, number) -> action.  CC = continuous, NOTE = button.
 APC40 = {  # original APC40, clip-launch grid repurposed as hot cues
+    # Knob layout (user decision 2026-11-25): the top 8 knobs (Track Control
+    # section, CC 16-23) belong to Deck A, the bottom 8 knobs (Device Control
+    # section, CC 24-31) belong to Deck B. Per deck: HIGH/MID/LOW/FILTER on
+    # the section's top row, GAIN first on its bottom row; CC 21-23 and
+    # CC 29-31 stay unassigned as spares for MIDI Learn.
     'cc': {(0, 48): ('volume', 0), (0, 49): ('volume', 1),
            (0, 55): ('master', None), (0, 56): ('cross', None),
-           (0, 16): ('eq_high', 0), (0, 20): ('eq_high', 1),
-           (0, 17): ('eq_mid', 0), (0, 21): ('eq_mid', 1),
-           (0, 18): ('eq_low', 0), (0, 22): ('eq_low', 1),
-           (0, 19): ('filter', 0), (0, 23): ('filter', 1)},
+           (0, 16): ('eq_high', 0), (0, 17): ('eq_mid', 0),
+           (0, 18): ('eq_low', 0), (0, 19): ('filter', 0),
+           (0, 20): ('gain', 0),
+           (0, 24): ('eq_high', 1), (0, 25): ('eq_mid', 1),
+           (0, 26): ('eq_low', 1), (0, 27): ('filter', 1),
+           (0, 28): ('gain', 1)},
     'note': {(0, 50): ('play', 0), (0, 49): ('play', 1),
              (0, 52): ('cue_jump', 0), (0, 51): ('cue_jump', 1),
              (0, 32): ('hotcue_jump', 0), (0, 33): ('hotcue_jump', 0)},
@@ -24,22 +31,45 @@ APC40 = {  # original APC40, clip-launch grid repurposed as hot cues
 APC40_MKII = {
     'cc': {(0, 48): ('volume', 0), (0, 49): ('volume', 1),
            (0, 55): ('master', None), (0, 56): ('cross', None),
-           (0, 16): ('eq_high', 0), (0, 20): ('eq_high', 1),
-           (0, 17): ('eq_mid', 0), (0, 21): ('eq_mid', 1),
-           (0, 18): ('eq_low', 0), (0, 22): ('eq_low', 1),
-           (0, 19): ('filter', 0), (0, 23): ('filter', 1)},
+           (0, 16): ('eq_high', 0), (0, 17): ('eq_mid', 0),
+           (0, 18): ('eq_low', 0), (0, 19): ('filter', 0),
+           (0, 20): ('gain', 0),
+           (0, 24): ('eq_high', 1), (0, 25): ('eq_mid', 1),
+           (0, 26): ('eq_low', 1), (0, 27): ('filter', 1),
+           (0, 28): ('gain', 1)},
     'note': {(0, 50): ('play', 0), (0, 49): ('play', 1),
              (0, 52): ('cue_jump', 0), (0, 51): ('cue_jump', 1)},
 }
-DDJ_RB = {  # Pioneer DDJ-RB, HID/MIDI class device — mapping is provisional
-    'cc': {(0, 31): ('volume', 0), (0, 39): ('volume', 1),
-           (0, 63): ('cross', None),
-           (0, 7): ('eq_high', 0), (0, 11): ('eq_high', 1),
-           (0, 8): ('eq_mid', 0), (0, 12): ('eq_mid', 1),
-           (0, 9): ('eq_low', 0), (0, 13): ('eq_low', 1),
-           (0, 10): ('filter', 0), (0, 14): ('filter', 1)},
-    'note': {(0, 11): ('play', 0), (0, 27): ('play', 1),
-             (0, 12): ('cue_jump', 0), (0, 28): ('cue_jump', 1)},
+DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
+    # message list (DDJ-RB_MIDI_Message_List_E.pdf), NOT hardware-verified.
+    # Channels below are 0-based; the PDF's 1-based channels are:
+    # DECK1=1, DECK2=2, FX DECK1=5, FX DECK2=6, Browser/Global=7,
+    # PERFORMANCE PAD DECK1=8, DECK2=9.
+    # Knobs/faders send 14-bit CC pairs; only the MSB is mapped here
+    # (the LSB is MSB+32). Jog wheels send relative (difference) values,
+    # so a 'jog' command's value is not an absolute position.
+    'cc': {(0, 19): ('volume', 0), (1, 19): ('volume', 1),      # CH FADER
+           (6, 31): ('cross', None),                            # CROSSFADER
+           (6, 8): ('master', None),                            # MASTER LEVEL
+           (0, 4): ('gain', 0), (1, 4): ('gain', 1),            # TRIM
+           (0, 7): ('eq_high', 0), (1, 7): ('eq_high', 1),
+           (0, 11): ('eq_mid', 0), (1, 11): ('eq_mid', 1),
+           (0, 15): ('eq_low', 0), (1, 15): ('eq_low', 1),
+           (6, 23): ('filter', 0), (6, 24): ('filter', 1),      # Filter Parameter (E11)
+           (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider
+           (0, 34): ('jog', 0), (1, 34): ('jog', 1),            # JOG platter (relative)
+           (0, 33): ('jog', 0), (1, 33): ('jog', 1)},           # JOG wheel side (relative)
+    'note': {(0, 11): ('play', 0), (1, 11): ('play', 1),        # PLAY/PAUSE = Note 11
+             (0, 12): ('cue_jump', 0), (1, 12): ('cue_jump', 1),
+             (0, 88): ('sync', 0), (1, 88): ('sync', 1),
+             (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
+             (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
+             (6, 70): ('load', 0), (6, 71): ('load', 1),        # LOAD buttons
+             # PERFORMANCE PADs in HOT CUE mode (pad channels 8/9 in the
+             # PDF = 7/8 here), notes 0-7 = pads 1-8. Like the APC40
+             # profile, dispatch does not pass the pad index yet.
+             **{(7, n): ('hotcue_jump', 0) for n in range(8)},
+             **{(8, n): ('hotcue_jump', 1) for n in range(8)}},
 }
 PROFILES = {'APC40': APC40, 'APC40 mkII': APC40_MKII, 'DDJ-RB': DDJ_RB}
 
