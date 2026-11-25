@@ -11,6 +11,28 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from engine import Engine, Journal, RATE, load_track
 from audio_config import resolve_output
 
+# ---------------------------------------------------------------------------
+# UI palette — club-dark theme. Deck A = orange, Deck B = cyan; shared
+# surfaces stay neutral so the two deck accents carry the identity.
+# ---------------------------------------------------------------------------
+COLOR_BG = '#101014'          # window base
+COLOR_PANEL = '#17171d'       # panel surface (decks / mixer band)
+COLOR_PANEL_HI = '#1e1e26'    # raised surface (inputs, slider grooves)
+COLOR_BUTTON = '#23232c'
+COLOR_BUTTON_HOVER = '#2d2d38'
+COLOR_BORDER = '#2b2b36'      # hairline borders
+COLOR_BORDER_HI = '#3a3a46'
+COLOR_TEXT = '#f4f4f6'
+COLOR_TEXT_SUB = '#a9a9b4'
+COLOR_TEXT_MUTE = '#6f6f7c'
+COLOR_DECK_A = '#ff7a1a'      # Deck A accent (orange)
+COLOR_DECK_B = '#22b8e6'      # Deck B accent (cyan)
+COLOR_METER = '#3ddc84'       # level meter accent
+COLOR_WAVE_BG = '#0b0b0f'
+COLOR_WAVE_GRID = '#23232e'
+FONT_STACK = '"Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
+SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-size:11px;font-weight:700'
+
 class Result(QObject):
     ready = Signal(int, object, str)
 
@@ -24,8 +46,8 @@ class Waveform(QWidget):
         self.setMinimumHeight(120)
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor('#10151f'))
-        p.setPen(QColor('#253043'))
+        p.fillRect(self.rect(), QColor(COLOR_WAVE_BG))
+        p.setPen(QColor(COLOR_WAVE_GRID))
         for x in range(0, self.width(), 40): p.drawLine(x, 0, x, self.height())
         mid = self.height()/2
         p.drawLine(0, int(mid), self.width(), int(mid))
@@ -39,7 +61,7 @@ class Waveform(QWidget):
             p.setPen(QPen(QColor('#ffffff'), 2))
             p.drawLine(x, 0, x, self.height())
         else:
-            p.setPen(QColor('#8391a8'))
+            p.setPen(QColor(COLOR_TEXT_MUTE))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'DROP AUDIO HERE  /  音声ファイルをドロップ')
     def mousePressEvent(self, event):
         if self.track: self.seek.emit(event.position().x()/self.width())
@@ -51,23 +73,29 @@ class Deck(QFrame):
         self.setAcceptDrops(True)
         self.setObjectName('deck')
         lay = QVBoxLayout(self)
-        color = '#55d9cf' if index == 0 else '#b69bff'
+        color = COLOR_DECK_A if index == 0 else COLOR_DECK_B
+        slider_qss = (f'QSlider::groove:horizontal {{height:5px;background:{COLOR_PANEL_HI};border-radius:2px}}'
+                      f'QSlider::sub-page:horizontal {{background:{color};border-radius:2px}}'
+                      f'QSlider::handle:horizontal {{width:15px;height:15px;margin:-5px 0;background:{COLOR_TEXT};border:1px solid {COLOR_BG};border-radius:4px}}')
+        self.slider_qss = slider_qss
         top = QHBoxLayout()
         label = QLabel('DECK '+('A' if index == 0 else 'B'))
-        label.setStyleSheet(f'color:{color};font-size:23px;font-weight:700')
+        label.setStyleSheet(f'color:{COLOR_BG};background:{color};font-size:16px;font-weight:800;padding:5px 12px;border-radius:4px')
         top.addWidget(label)
         top.addStretch()
         self.bpm = QLabel('— BPM')
-        self.bpm.setStyleSheet('font-size:25px')
+        self.bpm.setStyleSheet(f'color:{COLOR_TEXT};font-size:24px;font-weight:700')
         top.addWidget(self.bpm)
         lay.addLayout(top)
         self.name = QLabel('No track loaded / 未読込')
+        self.name.setStyleSheet(f'color:{COLOR_TEXT_SUB}')
         self.name.setWordWrap(True)
         lay.addWidget(self.name)
         self.wave = Waveform(color)
         self.wave.seek.connect(lambda x: window.engine.command('seek', index, int(x*len(self.wave.track.audio))))
         lay.addWidget(self.wave)
         self.clock = QLabel('00:00 / 00:00')
+        self.clock.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-family:Consolas,"Courier New",monospace')
         lay.addWidget(self.clock)
         row = QHBoxLayout()
         self.load = QPushButton('Load / 読込')
@@ -78,8 +106,11 @@ class Deck(QFrame):
         self.cue.clicked.connect(self.reset)
         for button in [self.load, self.play, self.cue]: row.addWidget(button)
         lay.addLayout(row)
-        lay.addWidget(QLabel('CHANNEL VOLUME'))
+        volume_label = QLabel('CHANNEL VOLUME')
+        volume_label.setStyleSheet(SECTION_LABEL_QSS)
+        lay.addWidget(volume_label)
         slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setStyleSheet(slider_qss)
         slider.setValue(80)
         slider.setRange(0,100)
         slider.setValue(80)
@@ -92,9 +123,11 @@ class Deck(QFrame):
                                        ('FILTER', 'filter', 50)]:
             control_row = QHBoxLayout()
             control_label = QLabel(label)
+            control_label.setStyleSheet(SECTION_LABEL_QSS)
             control_label.setFixedWidth(80)
             control_row.addWidget(control_label)
             s = QSlider(Qt.Orientation.Horizontal)
+            s.setStyleSheet(slider_qss)
             s.setRange(0, 100); s.setValue(default)
             if action == 'gain':
                 s.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
@@ -161,25 +194,35 @@ class Window(QMainWindow):
         self.setCentralWidget(scroll)
         layout = QVBoxLayout(root)
         header = QHBoxLayout()
-        title = QLabel('MIXCRAFT  <span style="color:#55d9cf">DJ STUDIO</span>')
-        title.setStyleSheet('font-size:27px;font-weight:800')
+        title = QLabel(f'MIXCRAFT  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
+        title.setStyleSheet('font-size:26px;font-weight:800')
         header.addWidget(title)
         header.addStretch()
-        header.addWidget(QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial'))
+        brand = QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial')
+        brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:12px')
+        header.addWidget(brand)
         layout.addLayout(header)
-        layout.addWidget(QLabel('DJ MODE     •     2 DECK PERFORMANCE                                        PHASE 2 / 試遊版'))
+        mode_label = QLabel('DJ MODE     •     2 DECK PERFORMANCE                                        PHASE 2 / 試遊版')
+        mode_label.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-size:12px;font-weight:600')
+        layout.addWidget(mode_label)
         decks = QHBoxLayout()
         self.decks = [Deck(self,i) for i in range(2)]
         for deck in self.decks: decks.addWidget(deck)
         layout.addLayout(decks)
-        mix = QHBoxLayout()
-        mix.addWidget(QLabel('A'))
+        mixer = QFrame()
+        mixer.setObjectName('mixer')
+        mix = QHBoxLayout(mixer)
+        deck_a_label = QLabel('A')
+        deck_a_label.setStyleSheet(f'color:{COLOR_DECK_A};font-size:15px;font-weight:800')
+        mix.addWidget(deck_a_label)
         self.cross = QSlider(Qt.Orientation.Horizontal)
         self.cross.setRange(0,1000)
         self.cross.setValue(500)
         self.cross.valueChanged.connect(lambda v:self.engine.command('cross',value=v/1000))
         mix.addWidget(self.cross,3)
-        mix.addWidget(QLabel('B      MASTER'))
+        deck_b_label = QLabel(f'<span style="color:{COLOR_DECK_B};font-weight:800">B</span>      MASTER')
+        deck_b_label.setStyleSheet('font-size:15px')
+        mix.addWidget(deck_b_label)
         master = QSlider(Qt.Orientation.Horizontal)
         master.setRange(0,100)
         master.setValue(80)
@@ -189,8 +232,10 @@ class Window(QMainWindow):
         self.meter.setRange(0,100)
         self.meter.setMaximumWidth(130)
         mix.addWidget(self.meter)
-        layout.addLayout(mix)
-        layout.addWidget(QLabel('TRANSITION AUDITION / ミックス試聴  —  Aの末尾 → Bの先頭（テンポ同期なし）'))
+        layout.addWidget(mixer)
+        transition_label = QLabel('TRANSITION AUDITION / ミックス試聴  —  Aの末尾 → Bの先頭（テンポ同期なし）')
+        transition_label.setStyleSheet(SECTION_LABEL_QSS)
+        layout.addWidget(transition_label)
         preview = QHBoxLayout()
         self.duration = QComboBox()
         for seconds in [8,16,32,64]: self.duration.addItem(f'{seconds} seconds / 秒',seconds)
@@ -206,7 +251,9 @@ class Window(QMainWindow):
         preview.addWidget(export)
         layout.addLayout(preview)
         settings = QHBoxLayout()
-        settings.addWidget(QLabel('AUDIO OUTPUT / 出力'))
+        output_label = QLabel('AUDIO OUTPUT / 出力')
+        output_label.setStyleSheet(SECTION_LABEL_QSS)
+        settings.addWidget(output_label)
         self.devices = QComboBox()
         self.devices.addItem('Automatic / WASAPI優先', 'auto')
         self.devices.addItem('System default / システム既定', None)
@@ -221,8 +268,10 @@ class Window(QMainWindow):
         settings.addWidget(apply)
         layout.addLayout(settings)
         self.status = QLabel('Ready / 準備完了')
+        self.status.setObjectName('status')
         layout.addWidget(self.status)
         notice = QLabel('BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。MIDI入出力・ALS未対応。元ファイルは変更しません。')
+        notice.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:12px')
         notice.setWordWrap(True)
         layout.addWidget(notice)
         self.timer = QTimer(self)
@@ -321,16 +370,35 @@ class Window(QMainWindow):
         self.journal.file.close()
         event.accept()
 
-STYLE = '''
-QWidget { background:#171d28; color:#e4eaf4; font-family:"Segoe UI"; font-size:13px; }
-QMainWindow { background:#111722; } QFrame#deck { border:1px solid #303b4d; border-radius:10px; padding:12px; }
-QPushButton { background:#2b374c; border:1px solid #40506a; border-radius:5px; padding:9px; }
-QPushButton:hover { background:#3b4c63; } QPushButton:disabled { color:#6c7789; }
-QPushButton:checked { background:#26655f; border-color:#55d9cf; }
-QComboBox { background:#253044; padding:8px; } QSlider::groove:horizontal { height:5px; background:#35425a; }
-QSlider::handle:horizontal { width:16px; margin:-7px 0; background:#6bded3; border-radius:4px; }
-QProgressBar { background:#10151f; border:0; } QProgressBar::chunk { background:#55d9cf; }
-'''
+STYLE = (
+    f'QWidget {{ background:{COLOR_BG}; color:{COLOR_TEXT}; font-family:{FONT_STACK}; font-size:13px; }}'
+    f'QMainWindow {{ background:{COLOR_BG}; }}'
+    f'QScrollArea {{ background:{COLOR_BG}; border:none; }}'
+    f'QLabel {{ background:transparent; }}'
+    f'QFrame#deck {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:10px; padding:12px; }}'
+    f'QFrame#mixer {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:10px; padding:10px 12px; }}'
+    f'QPushButton {{ background:{COLOR_BUTTON}; border:1px solid {COLOR_BORDER_HI}; border-radius:6px; padding:8px 10px; }}'
+    f'QPushButton:hover {{ background:{COLOR_BUTTON_HOVER}; border-color:#4a4a58; }}'
+    f'QPushButton:pressed {{ background:#1b1b22; }}'
+    f'QPushButton:disabled {{ background:#1a1a20; border-color:{COLOR_BORDER}; color:#5d5d68; }}'
+    f'QPushButton:checked {{ background:#3a2410; border-color:{COLOR_DECK_A}; color:#ffb27a; }}'
+    f'QComboBox {{ background:{COLOR_PANEL_HI}; border:1px solid {COLOR_BORDER_HI}; border-radius:6px; padding:7px 9px; }}'
+    f'QComboBox:hover {{ border-color:#4a4a58; }}'
+    f'QComboBox QAbstractItemView {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; selection-background-color:{COLOR_BUTTON_HOVER}; }}'
+    f'QSlider::groove:horizontal {{ height:5px; background:{COLOR_PANEL_HI}; border-radius:2px; }}'
+    f'QSlider::sub-page:horizontal {{ background:#4d4d5a; border-radius:2px; }}'
+    f'QSlider::handle:horizontal {{ width:15px; height:15px; margin:-5px 0; background:{COLOR_TEXT}; border:1px solid {COLOR_BG}; border-radius:4px; }}'
+    f'QProgressBar {{ background:{COLOR_WAVE_BG}; border:1px solid {COLOR_BORDER}; border-radius:4px; min-height:12px; }}'
+    f'QProgressBar::chunk {{ background:{COLOR_METER}; border-radius:3px; }}'
+    f'QLabel#status {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:6px; padding:8px 10px; color:#d8d8de; }}'
+    f'QToolTip {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; padding:4px 6px; }}'
+    f'QScrollBar:vertical {{ background:{COLOR_BG}; width:10px; margin:0; }}'
+    f'QScrollBar::handle:vertical {{ background:#33333e; border-radius:5px; min-height:30px; }}'
+    f'QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}'
+    f'QScrollBar:horizontal {{ background:{COLOR_BG}; height:10px; margin:0; }}'
+    f'QScrollBar::handle:horizontal {{ background:#33333e; border-radius:5px; min-width:30px; }}'
+    f'QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}'
+)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
