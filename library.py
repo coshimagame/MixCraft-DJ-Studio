@@ -42,10 +42,33 @@ def import_rekordbox_xml(path):
         if loc.startswith('file://localhost/'): loc = loc[len('file://localhost/'):]
         elif loc.startswith('file://'): loc = loc[len('file://'):]
         from urllib.parse import unquote
+        cues = []
+        for mark in node.iter('POSITION_MARK'):
+            cues.append(dict(name=mark.get('Name') or '',
+                             type=mark.get('Type'),            # 0=cue, 4=loop (rekordbox)
+                             start=float(mark.get('Start')) if mark.get('Start') else 0.0,
+                             end=float(mark.get('End')) if mark.get('End') else None,
+                             num=int(mark.get('Num')) if mark.get('Num') is not None else -1))
+            # Num: -1 = memory cue, 0.. = hot cue A, B, C...
         out.append(dict(path=unquote(loc), title=node.get('Name'),
                         bpm=float(node.get('AverageBpm')) if node.get('AverageBpm') else None,
-                        key=node.get('Tonality')))
+                        key=node.get('Tonality'), cues=cues))
     return [t for t in out if t['path']]
+
+def cues_to_clip_plan(track):
+    """Convert rekordbox cues into a Live clip plan (user decision 2026-11-25).
+
+    Live has no hot-cue concept, so each hot cue becomes its own Session clip
+    that starts at the cue point; memory cues become Arrangement locators.
+    Returns dict(clips=[...], locators=[...]) with times in seconds.
+    """
+    clips, locators = [], []
+    for cue in track.get('cues', []):
+        label = cue['name'] or (f"Hot Cue {'ABCDEFGH'[cue['num']]}" if cue['num'] >= 0 else 'Memory Cue')
+        entry = dict(name=f"{track.get('title') or ''} – {label}".strip(' –'),
+                     start_seconds=cue['start'], loop_end_seconds=cue['end'] if cue['type'] == '4' else None)
+        (clips if cue['num'] >= 0 else locators).append(entry)
+    return dict(clips=clips, locators=locators)
 
 def export_playlist_json(library, name, path):
     Path(path).write_text(json.dumps(library.playlist(name), ensure_ascii=False, indent=2), encoding='utf-8')

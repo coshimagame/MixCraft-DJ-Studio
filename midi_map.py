@@ -11,12 +11,19 @@ from pathlib import Path
 
 # (channel, number) -> action.  CC = continuous, NOTE = button.
 APC40 = {  # original APC40, clip-launch grid repurposed as hot cues
+    # Knob layout (user decision 2026-11-25): the top 8 knobs (Track Control
+    # section, CC 16-23) belong to Deck A, the bottom 8 knobs (Device Control
+    # section, CC 24-31) belong to Deck B. Per deck: HIGH/MID/LOW/FILTER on
+    # the section's top row, GAIN first on its bottom row; CC 21-23 and
+    # CC 29-31 stay unassigned as spares for MIDI Learn.
     'cc': {(0, 48): ('volume', 0), (0, 49): ('volume', 1),
            (0, 55): ('master', None), (0, 56): ('cross', None),
-           (0, 16): ('eq_high', 0), (0, 20): ('eq_high', 1),
-           (0, 17): ('eq_mid', 0), (0, 21): ('eq_mid', 1),
-           (0, 18): ('eq_low', 0), (0, 22): ('eq_low', 1),
-           (0, 19): ('filter', 0), (0, 23): ('filter', 1)},
+           (0, 16): ('eq_high', 0), (0, 17): ('eq_mid', 0),
+           (0, 18): ('eq_low', 0), (0, 19): ('filter', 0),
+           (0, 20): ('gain', 0),
+           (0, 24): ('eq_high', 1), (0, 25): ('eq_mid', 1),
+           (0, 26): ('eq_low', 1), (0, 27): ('filter', 1),
+           (0, 28): ('gain', 1)},
     'note': {(0, 50): ('play', 0), (0, 49): ('play', 1),
              (0, 52): ('cue_jump', 0), (0, 51): ('cue_jump', 1),
              (0, 32): ('hotcue_jump', 0), (0, 33): ('hotcue_jump', 0)},
@@ -24,10 +31,12 @@ APC40 = {  # original APC40, clip-launch grid repurposed as hot cues
 APC40_MKII = {
     'cc': {(0, 48): ('volume', 0), (0, 49): ('volume', 1),
            (0, 55): ('master', None), (0, 56): ('cross', None),
-           (0, 16): ('eq_high', 0), (0, 20): ('eq_high', 1),
-           (0, 17): ('eq_mid', 0), (0, 21): ('eq_mid', 1),
-           (0, 18): ('eq_low', 0), (0, 22): ('eq_low', 1),
-           (0, 19): ('filter', 0), (0, 23): ('filter', 1)},
+           (0, 16): ('eq_high', 0), (0, 17): ('eq_mid', 0),
+           (0, 18): ('eq_low', 0), (0, 19): ('filter', 0),
+           (0, 20): ('gain', 0),
+           (0, 24): ('eq_high', 1), (0, 25): ('eq_mid', 1),
+           (0, 26): ('eq_low', 1), (0, 27): ('filter', 1),
+           (0, 28): ('gain', 1)},
     'note': {(0, 50): ('play', 0), (0, 49): ('play', 1),
              (0, 52): ('cue_jump', 0), (0, 51): ('cue_jump', 1)},
 }
