@@ -407,6 +407,100 @@ def setlist_from_manifest(manifest, set_bpm=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 表示用整形 (PC アプリのセットリストパネル用。Qt 非依存の純粋ロジック)
+# ---------------------------------------------------------------------------
+
+STATUS_LABELS = {
+    "played": "PLAYED / 済",
+    "playing": "NOW / 再生中",
+    "next": "NEXT / 次",
+    "queued": "QUEUED / 待機",
+}
+
+
+def display_rows(setlist) -> list:
+    """セットリストを表示用の行 dict のリストに整形する。
+
+    各行: number (1 始まり), title, artist, bpm, key, duration_seconds,
+    duration_text ("--:--" は長さ不明), status, status_label, link_url
+    (source_url 優先、無ければ preview_url、どちらも無ければ None),
+    preview_url, source_url, local_preview, note。
+
+    status は played / playing / next / queued の 4 値。曲ごとの status が
+    あればそれを正とし、無ければ started / current_index から導出する。
+    next (再生中の次に控える曲) は明示の status には無いので常に導出する:
+    再生中より後ろで最初の queued が next になる。
+    """
+    data = normalize_setlist(setlist)
+    tracks = data["tracks"]
+    current = data["current_index"]
+    started = data["started"]
+    statuses = []
+    for i, t in enumerate(tracks):
+        s = t.get("status")
+        if s not in ("played", "playing", "queued"):
+            s = None
+        if s is None:
+            if not started:
+                s = "queued"
+            elif i < current:
+                s = "played"
+            elif i == current:
+                s = "playing"
+            else:
+                s = "queued"
+        statuses.append(s)
+    if started and current >= 0:
+        for i in range(current + 1, len(tracks)):
+            if statuses[i] == "queued":
+                statuses[i] = "next"
+                break
+    rows = []
+    for i, t in enumerate(tracks):
+        rows.append({
+            "index": i,
+            "number": i + 1,
+            "title": t["title"],
+            "artist": t["artist"],
+            "bpm": t["bpm"],
+            "key": t["key"],
+            "duration_seconds": t["duration_seconds"],
+            "duration_text": (format_duration(t["duration_seconds"])
+                              if t["duration_seconds"] else "--:--"),
+            "status": statuses[i],
+            "status_label": STATUS_LABELS[statuses[i]],
+            "link_url": t["source_url"] or t["preview_url"],
+            "preview_url": t["preview_url"],
+            "source_url": t["source_url"],
+            "local_preview": t["local_preview"],
+            "note": t["note"],
+        })
+    return rows
+
+
+def display_summary(setlist) -> dict:
+    """セット情報の要約 (セット BPM / 曲数 / 合計時間 / 再生状態)。"""
+    data = normalize_setlist(setlist)
+    total = sum(t.get("duration_seconds") or 0 for t in data["tracks"])
+    current = data["current_index"]
+    if not data["started"]:
+        state_text = "未開始"
+    elif 0 <= current < len(data["tracks"]):
+        state_text = f"再生中 {current + 1} 曲目"
+    else:
+        state_text = "開始済み"
+    return {
+        "set_bpm": data["set_bpm"],
+        "track_count": len(data["tracks"]),
+        "total_seconds": total,
+        "total_text": format_duration(total),
+        "started": data["started"],
+        "current_index": current,
+        "state_text": state_text,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
