@@ -25,6 +25,7 @@ Master Out = 1/2, Cue Out = 3/4 on the DDJ-RB ASIO driver.
 
 Written in Python 2.7 syntax for Live 10's bundled interpreter.
 """
+import Live
 import math
 
 from _Framework.ControlSurface import ControlSurface
@@ -44,6 +45,11 @@ PLAY_NOTE = 11          # per deck channel (0-based 0/1)
 CUE_NOTE = 12           # per deck channel
 PAD_CHANNELS = (7, 8)   # 0-based; PDF channels 8/9
 PAD_COUNT = 8
+
+# 0-based channels the DDJ-RB profile uses: decks (0/1), FX (4/5),
+# global/browser (6), performance pads (7/8).  build_midi_map
+# forwards the full note/CC ranges on exactly these channels.
+FORWARD_CHANNELS = (0, 1, 4, 5, 6, 7, 8)
 
 _EQ_PARAMS = {'eq_three.high': 'High Gain',
               'eq_three.mid': 'Mid Gain',
@@ -97,6 +103,36 @@ class MixCraft(ControlSurface):
     # ------------------------------------------------------------------
     # MIDI input
     # ------------------------------------------------------------------
+    def build_midi_map(self, midi_map_handle):
+        # The parent builds the usual component/parameter map first.
+        ControlSurface.build_midi_map(self, midi_map_handle)
+        # Live delivers MIDI to receive_midi() ONLY for messages that
+        # are explicitly forwarded here — Ableton's own scripts put it
+        # plainly: "when you are not forwarding MIDI, nor mapping
+        # parameters, you will never get any MIDI messages at all."
+        # v1 forwarded nothing, so on real hardware the surface loaded
+        # (and logged that it had) yet never received a single message
+        # (confirmed on Live 10.1.43, 2026-11-25).  The input port is
+        # dedicated to the DDJ-RB, so forward the full note/CC ranges
+        # on every channel the profile uses; future profile additions
+        # on those channels then work without another map change.
+        try:
+            script_handle = self._c_instance.handle()
+            for channel in FORWARD_CHANNELS:
+                for note in range(128):
+                    Live.MidiMap.forward_midi_note(
+                        script_handle, midi_map_handle, channel, note)
+                for cc_number in range(128):
+                    Live.MidiMap.forward_midi_cc(
+                        script_handle, midi_map_handle, channel, cc_number)
+        except Exception as exc:
+            # Forwarding must never take the surface down with it.
+            try:
+                self.log_message('MixCraft: MIDI forwarding failed: %s'
+                                 % (exc,))
+            except Exception:
+                pass
+
     def receive_midi(self, midi_bytes):
         if not midi_bytes or len(midi_bytes) < 3:
             return

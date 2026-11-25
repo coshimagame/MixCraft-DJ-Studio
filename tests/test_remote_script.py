@@ -107,6 +107,9 @@ class FakeCInstance:
     def log_message(self, *args):
         self.log_lines.append(args)
 
+    def handle(self):
+        return 'fake-script-handle'
+
 
 class FakeControlSurface:
     """Minimal stand-in for _Framework.ControlSurface."""
@@ -114,6 +117,10 @@ class FakeControlSurface:
     def __init__(self, c_instance):
         self._c_instance = c_instance
         self.sent_midi = []
+        self.midi_map_builds = []
+
+    def build_midi_map(self, midi_map_handle):
+        self.midi_map_builds.append(midi_map_handle)
 
     def song(self):
         return self._c_instance._song
@@ -135,12 +142,30 @@ class FakeControlSurface:
         pass
 
 
+class FakeMidiMap:
+    """Stand-in for Live.MidiMap: records every forward_* call."""
+
+    forwarded_notes = []  # (script_handle, map_handle, channel, note)
+    forwarded_ccs = []    # (script_handle, map_handle, channel, cc)
+
+    @staticmethod
+    def forward_midi_note(script_handle, midi_map_handle, channel, note):
+        FakeMidiMap.forwarded_notes.append(
+            (script_handle, midi_map_handle, channel, note))
+
+    @staticmethod
+    def forward_midi_cc(script_handle, midi_map_handle, channel, cc):
+        FakeMidiMap.forwarded_ccs.append(
+            (script_handle, midi_map_handle, channel, cc))
+
+
 def _install_fake_live():
     framework = types.ModuleType('_Framework')
     cs_module = types.ModuleType('_Framework.ControlSurface')
     cs_module.ControlSurface = FakeControlSurface
     framework.ControlSurface = cs_module
     live_module = types.ModuleType('Live')
+    live_module.MidiMap = FakeMidiMap
     sys.modules.setdefault('_Framework', framework)
     sys.modules.setdefault('_Framework.ControlSurface', cs_module)
     sys.modules.setdefault('Live', live_module)
@@ -209,6 +234,35 @@ def test_create_instance_returns_surface():
     song = FakeSong([FakeTrack('A'), FakeTrack('B')])
     instance = mixcraft_package.create_instance(FakeCInstance(song))
     assert isinstance(instance, MixCraft)
+
+
+def test_build_midi_map_forwards_all_ddj_rb_channels():
+    # Regression test for the v1 real-hardware failure: Live only
+    # delivers MIDI to receive_midi() for messages forwarded in
+    # build_midi_map(); v1 forwarded nothing and heard nothing.
+    surface, song = _make_surface()
+    FakeMidiMap.forwarded_notes.clear()
+    FakeMidiMap.forwarded_ccs.clear()
+    surface.build_midi_map('fake-map-handle')
+    # The parent's component map build ran, with the handle passed on.
+    assert surface.midi_map_builds == ['fake-map-handle']
+    notes = {(ch, n) for (_s, _m, ch, n) in FakeMidiMap.forwarded_notes}
+    ccs = {(ch, c) for (_s, _m, ch, c) in FakeMidiMap.forwarded_ccs}
+    # Spot-check the profile channels at both range boundaries.
+    for channel in (0, 1, 6, 7, 8):
+        assert (channel, 0) in notes and (channel, 127) in notes
+        assert (channel, 0) in ccs and (channel, 127) in ccs
+    # Full ranges on exactly the seven DDJ-RB channels, nothing else.
+    assert {ch for (ch, _n) in notes} == {0, 1, 4, 5, 6, 7, 8}
+    assert len(FakeMidiMap.forwarded_notes) == 7 * 128
+    assert len(FakeMidiMap.forwarded_ccs) == 7 * 128
+    # Every forward used this surface's own script handle + map handle.
+    assert {(s, m) for (s, m, _c, _n)
+            in FakeMidiMap.forwarded_notes} == {('fake-script-handle',
+                                                 'fake-map-handle')}
+    assert {(s, m) for (s, m, _c, _c2)
+            in FakeMidiMap.forwarded_ccs} == {('fake-script-handle',
+                                               'fake-map-handle')}
 
 
 def test_crossfader_cc_drives_master_crossfader():

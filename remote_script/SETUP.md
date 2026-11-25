@@ -8,9 +8,16 @@
 
 ## 導入手順
 
-1. `remote_script/MixCraft/` フォルダを、Live のユーザーライブラリ
-   内の `Remote Scripts/` フォルダにコピーする
-   （例: `Documents/Ableton/User Library/Remote Scripts/MixCraft/`）。
+1. `remote_script/MixCraft/` フォルダを、Live 本体側の
+   `C:\ProgramData\Ableton\Live 10 Suite\Resources\MIDI Remote Scripts\`
+   にコピーする（貼り付け時に管理者権限の確認ダイアログが出る
+   ので「続行」を押すこと）。
+   ※ Live 10.1.43 実機（2026-11-25）では、ユーザーライブラリ内
+   （`Documents/Ableton/User Library/Remote Scripts/`）に置いても
+   Live が走査せず、コントロールサーフェイスの一覧に一切
+   現れなかった（ログにも記録なし）。本体側フォルダに入れた
+   ところ即座に現れて読み込まれた。新しい Live では
+   User Library 側の置き方でもよいが、Live 10 では本体側が確実。
 2. DDJ-RB を USB で接続し、rekordbox など他のアプリを**完全に
    終了**してから Live 10 を起動する（Windows の MIDI ポートは
    単一クライアントのため、rekordbox が掴んでいると Live に
@@ -19,6 +26,25 @@
    **MixCraft** を選び、入力・出力の両方に **DDJ-RB** を割り当てる。
 4. 下の MIDI Ports で DDJ-RB の入力 **Remote = On**（Track も On で
    よい）、出力 **Remote = On**（LED 送信用）にする。
+
+## v1.1 修正（2026-11-25 実機）: MIDI フォワーディング
+
+Live は Remote Script の `receive_midi()` に対して、
+`build_midi_map()` の中で `Live.MidiMap.forward_midi_note` /
+`forward_midi_cc` により**明示的にフォワードしたメッセージしか
+配送しない**（Ableton 純正スクリプトの仕様:「フォワードも
+パラメータマッピングもしていなければ、MIDI メッセージは
+一切届かない」）。v1 はフォワードを実装していなかったため、
+実機ではスクリプトが読み込まれてログに
+「MixCraft Remote Script v1 loaded」と出るのに、ノブや
+ボタンを操作しても MIDI が 1 件も届かなかった。
+
+v1.1 では `build_midi_map()` を追加し、DDJ-RB が使う
+チャンネル（0-based: デッキ 0/1、FX 4/5、グローバル 6、
+パッド 7/8）について、ノート 0–127 と CC 0–127 の全範囲を
+フォワードする。入力ポートは DDJ-RB 専用なので全範囲
+フォワードで問題なく、将来プロファイルに同チャンネルの
+操作子が増えてもマップ変更なしで届く。
 
 ## テンプレート Set の前提
 
