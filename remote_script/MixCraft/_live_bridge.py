@@ -20,7 +20,8 @@ there.  When the root module's rules change, mirror them here.
 DECK_TRACKS = {0: 1, 1: 2}
 
 # One jog tick = this many beats of nudge.
-NUDGE_BEATS_PER_TICK = 0.01
+# 0.01 -> 0.005 on 2026-11-26 (finer step, user request; mirror of root).
+NUDGE_BEATS_PER_TICK = 0.005
 
 _EQ_TARGETS = {'eq_high': 'eq_three.high',
                'eq_mid': 'eq_three.mid',
@@ -83,9 +84,15 @@ def _clamp01(value):
 
 
 def _jog_delta(normalised):
-    """Recover the signed tick delta from dispatch's raw/127 float."""
+    """Recover the signed tick delta from dispatch's raw/127 float.
+
+    The recovered count is negated — hardware check 2026-11-26: with
+    the original sign the nudge ran opposite to the wheel (mirror of
+    the root module's fix).
+    """
     raw = int(round(_clamp01(normalised) * 127))
-    return raw if raw < 64 else raw - 128
+    ticks = raw if raw < 64 else raw - 128
+    return -ticks
 
 
 def plan_event(action, deck, value, clip_plan=None, cue_index=None):

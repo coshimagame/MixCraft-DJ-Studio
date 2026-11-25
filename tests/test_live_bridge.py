@@ -102,19 +102,21 @@ def test_sync_produces_no_action():
 
 # --- jog -> nudge -------------------------------------------------------------
 
-def test_jog_clockwise_nudges_forward():
-    (action,) = plan_dispatch(_ddj_cc(0, 34, 3))  # +3 ticks
+def test_jog_low_raw_bytes_nudge_backward():
+    # Sign inverted after the 2026-11-26 hardware check (the nudge
+    # ran opposite to the wheel): raw 0x01-0x3F now yields negative.
+    (action,) = plan_dispatch(_ddj_cc(0, 34, 3))  # raw 3 -> -3 ticks
     assert action.kind == 'nudge' and action.track == 1
     assert action.target == 'clip.nudge'
-    assert action.value == 3 * NUDGE_BEATS_PER_TICK
+    assert action.value == -3 * NUDGE_BEATS_PER_TICK
 
 
-def test_jog_counter_clockwise_nudges_backward():
-    (action,) = plan_dispatch(_ddj_cc(1, 34, 127))  # raw 127 = -1 tick
+def test_jog_high_raw_bytes_nudge_forward():
+    (action,) = plan_dispatch(_ddj_cc(1, 34, 127))  # raw 127 -> +1 tick
     assert action.track == 2
-    assert action.value == -NUDGE_BEATS_PER_TICK
-    (action,) = plan_dispatch(_ddj_cc(0, 33, 65))   # raw 65 = -63 ticks
-    assert action.value == -63 * NUDGE_BEATS_PER_TICK
+    assert action.value == NUDGE_BEATS_PER_TICK
+    (action,) = plan_dispatch(_ddj_cc(0, 33, 65))   # raw 65 -> +63 ticks
+    assert action.value == 63 * NUDGE_BEATS_PER_TICK
 
 
 def test_jog_zero_delta_is_noop():

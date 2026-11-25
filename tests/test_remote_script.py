@@ -387,12 +387,14 @@ def test_jog_nudges_the_playing_clip():
     surface, song = _make_surface()
     track = song.tracks[0]
     surface.receive_midi(_note(0, 11))      # start playback
-    surface.receive_midi(_cc(0, 34, 3))     # jog +3 ticks
+    # Sign inverted (hardware 2026-11-26) and step is 0.005 beats:
+    # raw 3 -> -3 ticks -> -0.015 beats.
+    surface.receive_midi(_cc(0, 34, 3))
     clip = track.clip_slots[0].clip
     assert len(clip.nudge_calls) == 1
-    assert abs(clip.nudge_calls[0] - 0.03) < 1e-9
-    surface.receive_midi(_cc(0, 34, 127))   # jog -1 tick
-    assert abs(clip.nudge_calls[1] + 0.01) < 1e-9
+    assert abs(clip.nudge_calls[0] - -0.015) < 1e-9
+    surface.receive_midi(_cc(0, 34, 127))   # raw 127 -> +1 tick
+    assert abs(clip.nudge_calls[1] - 0.005) < 1e-9
 
 
 def test_led_feedback_follows_play_state():
@@ -417,3 +419,143 @@ def test_missing_devices_are_skipped_silently():
     surface.receive_midi(_cc(0, 4, 100))
     surface.receive_midi(_cc(6, 23, 100))
     surface.receive_midi(_cc(0, 34, 5))     # jog with nothing playing
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics (LOW-band investigation, 2026-11-26)
+# ---------------------------------------------------------------------------
+
+
+def _log_lines(surface):
+    return [args[0] for args in surface._c_instance.log_lines
+            if args and isinstance(args[0], str)]
+
+
+def _diag_lines(surface):
+    return [line for line in _log_lines(surface)
+            if line.startswith('MixCraft DIAG')]
+
+
+def test_diag_device_dump_happens_once():
+    # Construction triggers the first clip-plan refresh, which must
+    # dump each deck track's devices + parameter names exactly once.
+    surface, song = _make_surface(eq_factory=_eq_three_lom)
+    device_lines = [l for l in _diag_lines(surface) if ' device ' in l]
+    assert len(device_lines) == 6           # 3 devices x 2 deck tracks
+    # The dump exposes the real object environment: class + params.
+    assert any('track 1' in l and "class='Eq3'" in l
+               and 'GainLow' in l and 'GainMid' in l and 'GainHi' in l
+               for l in device_lines)
+    assert any('track 2' in l and "class='Utility'" in l
+               and "'Gain'" in l for l in device_lines)
+    assert any('track 1' in l and "class='AutoFilter'" in l
+               and 'Frequency' in l for l in device_lines)
+    # Later plan refreshes (init + periodic) must not dump again.
+    surface._refresh_clip_plans()
+    surface._refresh_clip_plans()
+    device_lines = [l for l in _diag_lines(surface) if ' device ' in l]
+    assert len(device_lines) == 6
+
+
+def test_diag_eq_failure_logged_once():
+    song = FakeSong([FakeTrack('Bare A', clips=[FakeClip('X')]),
+                     FakeTrack('Bare B')])
+    surface = MixCraft(FakeCInstance(song))
+    surface.receive_midi(_cc(0, 7, 100))    # EQ HI, no EQ device
+    surface.receive_midi(_cc(0, 7, 40))     # again: still one line
+    failures = [l for l in _diag_lines(surface)
+                if l == 'MixCraft DIAG no param for eq_three.high '
+                        'on track 1']
+    assert len(failures) == 1
+    # A different band on the same track logs its own failure line.
+    surface.receive_midi(_cc(0, 15, 100))   # EQ LOW
+    failures = [l for l in _diag_lines(surface)
+                if l == 'MixCraft DIAG no param for eq_three.low '
+                        'on track 1']
+    assert len(failures) == 1
+
+
+def test_diag_eq_success_logged_once_with_matched_name():
+    surface, song = _make_surface(eq_factory=_eq_three_lom)
+    surface.receive_midi(_cc(0, 15, 127))   # LOW deck A
+    surface.receive_midi(_cc(0, 15, 0))     # again: still one line
+    surface.receive_midi(_cc(1, 11, 90))    # MID deck B
+    matched = [l for l in _diag_lines(surface)
+               if l.startswith('MixCraft DIAG matched')]
+    low = [l for l in matched if 'eq_three.low' in l
+           and 'track 1' in l]
+    assert len(low) == 1 and 'GainLow' in low[0]
+    mid_b = [l for l in matched if 'eq_three.mid' in l
+             and 'track 2' in l]
+    assert len(mid_b) == 1 and 'GainMid' in mid_b[0]
+    # No failure lines when every band resolves.
+    assert not [l for l in _diag_lines(surface) if 'no param' in l]
+
+
+def test_diag_transport_play_logged_once():
+    surface, song = _make_surface()
+    surface.receive_midi(_note(0, 11))      # PLAY from stopped
+    surface.receive_midi(_note(0, 11))      # PLAY again (stops it)
+    play = [l for l in _diag_lines(surface)
+            if 'clip.toggle_play' in l]
+    assert len(play) == 1                   # once per (track, target)
+    assert 'track 1' in play[0]
+    assert 'playing_slot_index=-1' in play[0]
+    assert 'fired start slot' in play[0]
+
+
+def test_diag_transport_play_stop_outcome():
+    surface, song = _make_surface()
+    song.tracks[0].clip_slots[0].fire()     # already playing
+    surface.receive_midi(_note(0, 11))      # PLAY -> stop
+    play = [l for l in _diag_lines(surface)
+            if 'clip.toggle_play' in l]
+    assert len(play) == 1
+    assert 'playing_slot_index=0' in play[0]
+    assert 'stopped playback' in play[0]
+
+
+def test_diag_transport_cue_from_stopped():
+    surface, song = _make_surface()
+    surface.receive_midi(_note(0, 12))      # CUE from stopped
+    surface.receive_midi(_note(0, 12))      # again: still one line
+    cue = [l for l in _diag_lines(surface) if 'clip.cue_jump' in l]
+    assert len(cue) == 1
+    assert 'playing_slot_index=-1' in cue[0]
+    assert 'fired start slot' in cue[0]
+
+
+def test_diag_transport_cue_refire_and_no_slot():
+    surface, song = _make_surface()
+    song.tracks[0].clip_slots[0].fire()     # playing
+    surface.receive_midi(_note(0, 12))      # CUE while playing
+    cue = [l for l in _diag_lines(surface) if 'clip.cue_jump' in l]
+    assert len(cue) == 1
+    assert 'playing_slot_index=0' in cue[0]
+    assert 're-fired playing slot' in cue[0]
+    # Deck B track holds no clips at all: CUE finds no slot.
+    surface2, song2 = _make_surface(deck_b_clips=(None,))
+    surface2.receive_midi(_note(1, 12))     # CUE deck B
+    cue_b = [l for l in _diag_lines(surface2)
+             if 'clip.cue_jump' in l and 'track 2' in l]
+    assert len(cue_b) == 1
+    assert 'no slot found' in cue_b[0]
+
+
+def test_diag_jog_logged_once_per_deck():
+    surface, song = _make_surface()
+    surface.receive_midi(_note(0, 11))      # start deck A playback
+    surface.receive_midi(_cc(0, 34, 3))     # first jog deck A
+    surface.receive_midi(_cc(0, 34, 5))     # again: no second line
+    jog = [l for l in _diag_lines(surface) if ' jog ' in l]
+    assert len(jog) == 1
+    assert 'track 1' in jog[0]
+    assert '0.0236' in jog[0]               # raw normalised = 3/127
+    assert 'ticks=-3' in jog[0]             # inverted sign
+    assert '-0.015' in jog[0]               # -3 ticks x 0.005 beats
+    surface.receive_midi(_note(1, 11))      # start deck B playback
+    surface.receive_midi(_cc(1, 34, 127))   # first jog deck B
+    jog = [l for l in _diag_lines(surface) if ' jog ' in l]
+    assert len(jog) == 2
+    assert 'track 2' in jog[1]
+    assert 'ticks=1' in jog[1]

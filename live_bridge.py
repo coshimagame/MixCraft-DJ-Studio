@@ -57,11 +57,13 @@ Value normalisation:
 
 Jog -> nudge: DDJ-RB jog wheels send *relative* values, but dispatch
 normalises every CC to raw / 127.0, so the raw byte is recovered as
-round(v * 127).  The DDJ-RB relative encoding is 0x01-0x3F = clockwise
-(+1..+63 ticks) and 0x7F-0x41 = counter-clockwise (-1..-63 ticks),
-i.e. delta = raw if raw < 64 else raw - 128.  One tick is
-NUDGE_BEATS_PER_TICK beats of temporary position correction — a nudge,
-never a tempo change (the set BPM is fixed).  delta == 0 yields [].
+round(v * 127).  The recovered tick count is raw if raw < 64 else
+raw - 128 — and then NEGATED: the first hardware check (2026-11-26)
+showed the nudge moved opposite to the wheel's rotation with the
+original sign, so 0x01-0x3F now yields -1..-63 ticks and 0x7F-0x41
+yields +1..+63.  One tick is NUDGE_BEATS_PER_TICK beats of temporary
+position correction — a nudge, never a tempo change (the set BPM is
+fixed).  delta == 0 yields [].
 
 Hot Cue pads: `midi_map.dispatch` does not pass the pad index (a known
 limitation shared by the APC40 and DDJ-RB profiles — every pad maps to
@@ -78,7 +80,8 @@ DECK_TRACKS = {0: 1, 1: 2}
 
 # One jog tick = this many beats of nudge.  Small on purpose: the jog is
 # for nudging a warped clip back into phase, not for beat-jumping.
-NUDGE_BEATS_PER_TICK = 0.01
+# 0.01 -> 0.005 on 2026-11-26: the user asked for a finer step.
+NUDGE_BEATS_PER_TICK = 0.005
 
 _EQ_TARGETS = {'eq_high': 'eq_three.high',
                'eq_mid': 'eq_three.mid',
@@ -119,9 +122,14 @@ def _clamp01(value):
 
 
 def _jog_delta(normalised):
-    """Recover the signed tick delta from dispatch's raw/127 float."""
+    """Recover the signed tick delta from dispatch's raw/127 float.
+
+    The recovered count is negated — hardware check 2026-11-26: with
+    the original sign the nudge ran opposite to the wheel.
+    """
     raw = round(_clamp01(normalised) * 127)
-    return raw if raw < 64 else raw - 128
+    ticks = raw if raw < 64 else raw - 128
+    return -ticks
 
 
 def plan_event(action, deck, value, clip_plan=None, cue_index=None):
