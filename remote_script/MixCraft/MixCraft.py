@@ -30,6 +30,22 @@ clip_edit / song_edit actions against the LOM — every property
 write guarded, a missing property degrades to a log line — and
 drives the pad LEDs from the bridge's pad_leds().
 
+v1.6 adds BROWSE-knob track selection (user request 2026-11-26 —
+"track selection by knob would be great"): turning the knob moves
+the bridge's selection cursor on the standby deck, the adapter
+points Live's session highlight at the cursor's slot (the knob has
+no LED, so the on-screen highlight is the feedback), and pushing
+the knob fires the selected clip through the same fire_clip path
+as the pads.  LOAD 1/2 pin the browse target deck.  The adapter
+reports each deck's playing clip to the bridge on its display
+tick (note_deck_playing) so the standby rule can work.  CAVEAT:
+the browse turn/push MIDI numbers are placeholders — the repo's
+documented DDJ-RB map has no browse encoder message (see
+_midi_map.py).  To make the hardware probe painless, this adapter
+logs every UNMAPPED message on the browser channel once per
+(kind, number): if the placeholder numbers are wrong, turning /
+pushing the real knob prints its real numbers into Live's Log.txt.
+
 Template assumptions (see SETUP.md): Track 1 = Deck A, Track 2 =
 Deck B; each deck track carries a Utility (TRIM), an EQ Three and an
 Auto Filter; crossfader assignment A/B is pre-set in the template;
@@ -58,6 +74,7 @@ CUE_NOTE = 12           # per deck channel
 HP_CUE_NOTE = 84        # HEADPHONES CUE 1/2, per deck channel
 PAD_CHANNELS = (7, 8)   # 0-based; PDF channels 8/9
 PAD_COUNT = 8
+BROWSER_CHANNEL = 6     # 0-based; PDF channel 7 (Browser/Global)
 
 # 0-based channels the DDJ-RB profile uses: decks (0/1), FX (4/5),
 # global/browser (6), performance pads (7/8).  build_midi_map
@@ -108,11 +125,15 @@ class MixCraft(ControlSurface):
         # clip property names already reported as unsupported, so a
         # missing LOM property logs once instead of on every pad press
         self._edit_warned = set()
+        # (kind, number) of unmapped browser-channel messages already
+        # logged — the browse-knob probe (see the module docstring)
+        self._unmapped_seen = set()
+        self._view_warned = False
         self._tick = 0
         self._refresh_clip_plans()
         try:
-            self.log_message('MixCraft Remote Script v1.5 loaded '
-                             '(DDJ-RB companion, performance pads)')
+            self.log_message('MixCraft Remote Script v1.6 loaded '
+                             '(DDJ-RB companion, pads + browse knob)')
         except Exception:
             pass
 
@@ -186,6 +207,7 @@ class MixCraft(ControlSurface):
             pad_context = self._pad_context(PAD_CHANNELS.index(channel))
         command = midi_mod.dispatch(PROFILE, kind, channel, number, value)
         if command is None:
+            self._note_unmapped(channel, kind, number, value)
             return
         try:
             actions = self._bridge.handle_dispatch(
@@ -194,6 +216,32 @@ class MixCraft(ControlSurface):
             return
         for action in actions:
             self._execute(action)
+
+    def _note_unmapped(self, channel, kind, number, value):
+        """Log unmapped browser-channel messages once per control.
+
+        The browse knob's real MIDI numbers are not in the repo's
+        documented map (the turn/push bindings are placeholders), so
+        this is the hardware probe: whatever the knob actually sends
+        shows up here, in Live's Log.txt, the first time it moves.
+        Other channels are not logged — their unmapped messages are
+        controls the profile deliberately leaves out, and the FX
+        channels would flood the log.
+        """
+        if channel != BROWSER_CHANNEL:
+            return
+        key = (kind, number)
+        if key in self._unmapped_seen:
+            return
+        self._unmapped_seen.add(key)
+        try:
+            self.log_message(
+                'MixCraft: unmapped browser-channel %s %d (value %d) '
+                'on channel 7 — if this was the BROWSE knob, these '
+                'are its real numbers; tell the developer or fix '
+                '_midi_map.py' % (kind, number, value))
+        except Exception:
+            pass
 
     def _pad_context(self, deck):
         """Observed state of the deck's playing clip, for pad actions.
@@ -239,6 +287,8 @@ class MixCraft(ControlSurface):
                 self._execute_clip_edit(action)
             elif action.kind == 'song_edit':
                 self._execute_song_edit(action)
+            elif action.kind == 'highlight':
+                self._execute_highlight(action)
         except Exception:
             # A single bad target must never take the surface down.
             pass
@@ -306,6 +356,45 @@ class MixCraft(ControlSurface):
             return
         try:
             self.song().clip_trigger_quantization = enum
+        except Exception:
+            pass
+
+    def _execute_highlight(self, action):
+        """Point Live's session highlight at the browse cursor's slot.
+
+        The LOM exposes the highlight as song.view.highlighted_clip_
+        slot (assignable to a ClipSlot); the selected track is moved
+        along so the highlight is visible in context.  Guarded like
+        every other write: a build without the property degrades to
+        one log line and the knob simply shows nothing.
+        """
+        track = self._deck_track(action.track)
+        if track is None or action.clip_index is None:
+            return
+        slot = self._clip_bearing_slot(track, action.clip_index)
+        if slot is None:
+            return
+        try:
+            view = self.song().view
+        except Exception:
+            return
+        try:
+            view.selected_track = track
+        except Exception:
+            pass
+        if not hasattr(view, 'highlighted_clip_slot'):
+            if not self._view_warned:
+                self._view_warned = True
+                try:
+                    self.log_message(
+                        'MixCraft: song.view has no highlighted_clip_'
+                        'slot; browse highlight is a no-op in this '
+                        'build')
+                except Exception:
+                    pass
+            return
+        try:
+            view.highlighted_clip_slot = slot
         except Exception:
             pass
 
@@ -659,13 +748,19 @@ class MixCraft(ControlSurface):
         # Pad LEDs: the bridge decides (v1.5 layout) — hot-cue pads
         # light while their clip plays, CUE SET while anything plays,
         # QUANTIZE with the toggle state, LOOP IN/OUT with the loop
-        # state machine's phase.
+        # state machine's phase.  The same observation feeds the
+        # bridge's browse targeting (v1.6): which clip is playing on
+        # each deck decides the standby deck.
         for deck in DECKS:
             track = self._deck_track(deck + 1)
             playing_ordinal = None
             if track is not None and track.playing_slot_index >= 0:
                 playing_ordinal = self._ordinal_of_slot(
                     track, track.playing_slot_index)
+            try:
+                self._bridge.note_deck_playing(deck, playing_ordinal)
+            except Exception:
+                pass
             try:
                 states = self._bridge.pad_leds(deck, playing_ordinal)
             except Exception:

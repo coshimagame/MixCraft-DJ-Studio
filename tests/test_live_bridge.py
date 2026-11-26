@@ -385,3 +385,142 @@ def test_pad_leds_reflect_play_quantize_and_loop_state():
     assert leds[6] is False and leds[7] is True   # loop set
     # Nothing playing: CUE SET's LED goes dark too.
     assert bridge.pad_leds(0, playing_ordinal=None)[4] is False
+
+
+# --- browse knob (v1.6) ------------------------------------------------------
+
+def _browse_bridge():
+    plan_a = {'clips': [{'name': 'A1'}, {'name': 'A2'}, {'name': 'A3'}],
+              'locators': []}
+    plan_b = {'clips': [{'name': 'B1'}, {'name': 'B2'}, {'name': 'B3'},
+                        {'name': 'B4'}], 'locators': []}
+    return LiveBridge(clip_plans={0: plan_a, 1: plan_b})
+
+
+def _turn(bridge, raw):
+    return bridge.handle_dispatch(_ddj_cc(6, 64, raw))
+
+
+def _push(bridge):
+    return bridge.handle_dispatch(_ddj_note(6, 65))
+
+
+def test_browse_dispatch_bindings():
+    # Turn = CC on the browser channel, push = note on the browser
+    # channel.  PLACEHOLDER numbers (see midi_map.py): the repo's
+    # documented DDJ-RB map has no browse encoder message, so these
+    # pin the wiring, not an official fact.  LOAD 1/2 (notes 70/71)
+    # ARE documented.
+    assert _ddj_cc(6, 64, 1) == ('browse_turn', None, 1 / 127.0)
+    assert _ddj_note(6, 65) == ('browse_push', None, True)
+    assert dispatch(DDJ_RB, 'note', 6, 65, 0) is None  # push note-off
+    assert _ddj_note(6, 70) == ('load', 0, True)
+    assert _ddj_note(6, 71) == ('load', 1, True)
+
+
+def test_plan_event_stays_stateless_for_browse():
+    # The cursor/target state is LiveBridge's; the stateless layer
+    # must not plan browse actions on its own.
+    assert plan_event('browse_turn', None, 1 / 127.0) == []
+    assert plan_event('browse_push', None, True) == []
+
+
+def test_browse_turn_targets_the_standby_deck():
+    bridge = _browse_bridge()
+    bridge.note_deck_playing(0, 0)  # Deck A is playing Song A1
+    # The knob now browses Deck B: cursor 0 -> 1, highlight follows.
+    assert _turn(bridge, 1) == [
+        LiveAction('highlight', 2, 'view.highlighted_clip_slot', True,
+                   clip_index=1, clip_name='B2')]
+    assert _turn(bridge, 1) == [
+        LiveAction('highlight', 2, 'view.highlighted_clip_slot', True,
+                   clip_index=2, clip_name='B3')]
+    assert bridge.browse_cursor(1) == 2
+    assert bridge.browse_target_deck() == 1
+
+
+def test_browse_turn_decodes_the_relative_direction():
+    bridge = _browse_bridge()
+    bridge.note_deck_playing(0, 0)
+    _turn(bridge, 2)  # raw 0x02 = +2 detents
+    assert bridge.browse_cursor(1) == 2
+    _turn(bridge, 0x7F)  # raw 0x7F = -1 detent
+    assert bridge.browse_cursor(1) == 1
+    _turn(bridge, 0x41)  # raw 0x41 = -63 detents (fast spin back)
+    assert bridge.browse_cursor(1) == 0
+
+
+def test_browse_turn_clamps_at_the_first_and_last_clip():
+    bridge = _browse_bridge()
+    bridge.note_deck_playing(0, 0)  # target = Deck B (4 clips)
+    assert _turn(bridge, 0x7F) == []  # already at the first clip
+    assert bridge.browse_cursor(1) == 0
+    _turn(bridge, 10)  # spin past the end: clamps to the last clip
+    assert bridge.browse_cursor(1) == 3
+    assert _turn(bridge, 1) == []  # no wrap-around
+    assert bridge.browse_cursor(1) == 3
+
+
+def test_browse_initial_target_prefers_the_deck_with_clips():
+    only_b = LiveBridge(clip_plans={
+        1: {'clips': [{'name': 'B1'}, {'name': 'B2'}], 'locators': []}})
+    assert only_b.browse_target_deck() == 1
+    both = _browse_bridge()  # neither playing: Deck A (sets start on A)
+    assert both.browse_target_deck() == 0
+
+
+def test_browse_keeps_the_last_target_when_standby_is_undecidable():
+    bridge = _browse_bridge()
+    bridge.note_deck_playing(0, 0)
+    assert bridge.browse_target_deck() == 1
+    bridge.note_deck_playing(1, 0)  # both playing now
+    assert bridge.browse_target_deck() == 1
+    bridge.note_deck_playing(0, None)
+    bridge.note_deck_playing(1, None)  # neither playing
+    assert bridge.browse_target_deck() == 1
+
+
+def test_browse_push_fires_the_cursor_clip():
+    bridge = _browse_bridge()
+    bridge.note_deck_playing(0, 0)  # standby = Deck B
+    _turn(bridge, 2)
+    assert _push(bridge) == [
+        LiveAction('fire_clip', 2, 'clip.fire', True,
+                   clip_index=2, clip_name='B3')]
+
+
+def test_browse_load_overrides_the_target_until_the_deck_fires():
+    bridge = _browse_bridge()
+    bridge.note_deck_playing(0, 0)  # standby rule would pick Deck B
+    # LOAD 1 pins Deck A instead; the plan highlights A's cursor.
+    assert bridge.handle_dispatch(_ddj_note(6, 70)) == [
+        LiveAction('highlight', 1, 'view.highlighted_clip_slot', True,
+                   clip_index=0, clip_name='A1')]
+    assert bridge.browse_target_deck() == 0
+    assert _turn(bridge, 1) == [
+        LiveAction('highlight', 1, 'view.highlighted_clip_slot', True,
+                   clip_index=1, clip_name='A2')]
+    # Firing a clip on the pinned deck clears the override: the
+    # standby rule takes over again (A playing -> browse B).
+    bridge.note_clip_fired(0, 1)
+    assert bridge.browse_target_deck() == 1
+
+
+def test_browse_cursor_defaults_to_the_last_fired_clip():
+    bridge = _browse_bridge()
+    bridge.note_clip_fired(1, 2)  # Deck B last fired its third clip
+    bridge.note_deck_playing(0, 0)  # standby = Deck B
+    assert bridge.browse_cursor(1) == 2
+    assert _turn(bridge, 1) == [
+        LiveAction('highlight', 2, 'view.highlighted_clip_slot', True,
+                   clip_index=3, clip_name='B4')]
+
+
+def test_browse_without_clips_plans_nothing():
+    bridge = LiveBridge()
+    assert _turn(bridge, 1) == []
+    assert _push(bridge) == []
+    # LOAD still pins the (empty) deck; there is just nothing to
+    # highlight or fire there.
+    assert bridge.handle_dispatch(_ddj_note(6, 71)) == []
+    assert bridge.browse_target_deck() == 1

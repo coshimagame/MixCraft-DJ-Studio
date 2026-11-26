@@ -95,6 +95,14 @@ class FakeTrack:
                 slot.clip.is_playing = False
 
 
+class FakeView:
+    """Live's Song.View: the session highlight the browse knob moves."""
+
+    def __init__(self):
+        self.highlighted_clip_slot = None
+        self.selected_track = None
+
+
 class FakeSong:
     def __init__(self, tracks):
         self.tracks = tracks
@@ -103,6 +111,7 @@ class FakeSong:
         # Live.Song.clip_trigger_quantization, holding the fake enum
         # values from FakeQuantization below.
         self.clip_trigger_quantization = 'Q_1_BAR'
+        self.view = FakeView()
 
 
 class FakeCInstance:
@@ -552,3 +561,71 @@ def test_pad_edits_without_a_playing_clip_are_noops():
     surface.receive_midi(_note(7, 7))       # LOOP OUT
     assert clip.start_marker == 0.0
     assert clip.looping is False
+
+
+# ---------------------------------------------------------------------------
+# Browse knob (v1.6): turn = session highlight, push = fire
+# ---------------------------------------------------------------------------
+
+
+def test_browse_turn_highlights_and_push_fires():
+    surface, song = _make_surface(deck_a_clips=('A1', 'A2', 'A3'),
+                                  deck_b_clips=('B1', 'B2'))
+    track_a = song.tracks[0]
+    # Nothing playing: the initial target is Deck A (sets start
+    # there).  One detent clockwise moves the highlight to A2.
+    surface.receive_midi(_cc(6, 64, 1))
+    assert song.view.highlighted_clip_slot is track_a.clip_slots[1]
+    assert song.view.selected_track is track_a
+    # Push fires the highlighted clip through the fire_clip path.
+    surface.receive_midi(_note(6, 65))
+    assert track_a.clip_slots[1].fire_count == 1
+
+
+def test_browse_targets_the_standby_deck_once_a_plays():
+    surface, song = _make_surface(deck_a_clips=('A1', 'A2'),
+                                  deck_b_clips=('B1', 'B2', 'B3'))
+    track_b = song.tracks[1]
+    surface.receive_midi(_note(0, 11))      # PLAY on Deck A
+    surface.update_display()                # playing state reported
+    # The knob now browses Deck B (the standby deck).
+    surface.receive_midi(_cc(6, 64, 1))
+    assert song.view.highlighted_clip_slot is track_b.clip_slots[1]
+    assert song.view.selected_track is track_b
+    surface.receive_midi(_note(6, 65))      # push fires B2
+    assert track_b.clip_slots[1].fire_count == 1
+
+
+def test_browse_load_button_pins_the_target_deck():
+    surface, song = _make_surface(deck_a_clips=('A1', 'A2'),
+                                  deck_b_clips=('B1', 'B2'))
+    track_a, track_b = song.tracks
+    surface.receive_midi(_note(0, 11))      # PLAY on Deck A
+    surface.update_display()
+    # LOAD 1 (documented note 70) pins Deck A despite A playing:
+    # the highlight jumps to A's cursor and LOAD itself fires
+    # nothing.
+    surface.receive_midi(_note(6, 70))
+    assert song.view.highlighted_clip_slot is track_a.clip_slots[0]
+    assert track_a.clip_slots[0].fire_count == 1  # from PLAY only
+    assert track_b.clip_slots[0].fire_count == 0
+    surface.receive_midi(_cc(6, 64, 1))
+    assert song.view.highlighted_clip_slot is track_a.clip_slots[1]
+
+
+def test_unmapped_browser_channel_message_logs_once():
+    # The browse probe: an unknown control on the browser channel
+    # (e.g. the real BROWSE knob, if the placeholder numbers are
+    # wrong) identifies itself in the log — once, not per message.
+    surface, song = _make_surface()
+    surface.receive_midi(_cc(6, 99, 5))
+    surface.receive_midi(_cc(6, 99, 6))
+    lines = [' '.join(str(a) for a in entry)
+             for entry in surface._c_instance.log_lines]
+    hits = [line for line in lines if 'unmapped' in line and '99' in line]
+    assert len(hits) == 1
+    # Other channels stay silent (the FX channels would flood).
+    surface.receive_midi(_cc(4, 99, 5))
+    lines = [' '.join(str(a) for a in entry)
+             for entry in surface._c_instance.log_lines]
+    assert len([line for line in lines if 'unmapped' in line]) == 1

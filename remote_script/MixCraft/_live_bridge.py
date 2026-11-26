@@ -16,6 +16,11 @@ state machine, pad LEDs) are mirrored identically; the name
 separators are written as unicode escapes so Python 2 compares them
 as unicode, never as bytes, against clip names coming from Live.
 
+The v1.6 browse-knob rules (selection cursor, standby-deck target,
+LOAD override, highlight plans) are mirrored identically too —
+including the caveat that the browse turn/push MIDI numbers are
+placeholders, not from the documented map (see ``_midi_map.py``).
+
 The full design rationale (conversion table, fixed-BPM rule, jog
 encoding assumption) lives in the root module's docstring — read it
 there.  When the root module's rules change, mirror them here.
@@ -39,6 +44,11 @@ LOOP_PROVISIONAL_BEATS = 4.0
 QUANTIZATION_BAR = 'bar'
 QUANTIZATION_NONE = 'none'
 
+# Browse knob (v1.6, mirror of root): sign applied to the decoded
+# encoder delta.  +1 assumes clockwise = next clip; flip to -1 if
+# the real knob runs reversed.
+BROWSE_TURN_SIGN = 1
+
 _EQ_TARGETS = {'eq_high': 'eq_three.high',
                'eq_mid': 'eq_three.mid',
                'eq_low': 'eq_three.low'}
@@ -58,17 +68,17 @@ class LiveAction(object):
     """One planned operation against Live.  Pure data, no Live objects.
 
     kind:   'set_parameter' | 'transport' | 'fire_clip' | 'nudge' |
-            'clip_edit' | 'song_edit'
+            'clip_edit' | 'song_edit' | 'highlight'
     track:  1-based Live track number, or None for global (mixer) targets
     target: dotted name of what to touch, e.g. 'eq_three.high';
             'clip.start_marker' / 'clip.loop_start' / 'clip.loop_end' /
             'clip.looping' for clip_edit, 'clip_trigger_quantization'
-            for song_edit
+            for song_edit, 'view.highlighted_clip_slot' for highlight
     value:  normalised float for set_parameter, signed beats for nudge,
-            True for transport / fire_clip, beats or bool for
-            clip_edit, 'bar' / 'none' for song_edit
-    clip_index / clip_name: set for fire_clip (index into the deck's
-            clip plan clips list)
+            True for transport / fire_clip / highlight, beats or bool
+            for clip_edit, 'bar' / 'none' for song_edit
+    clip_index / clip_name: set for fire_clip and highlight (index
+            into the deck's clip plan clips list)
     """
 
     def __init__(self, kind, track, target, value=None,
@@ -115,6 +125,18 @@ def _jog_delta(normalised):
     raw = int(round(_clamp01(normalised) * 127))
     ticks = raw if raw < 64 else raw - 128
     return -ticks
+
+
+def _browse_delta(normalised):
+    """Signed detents from a browse-encoder CC (mirror of root).
+
+    Same relative encoding as the jog (raw 0x01-0x3F = +,
+    0x7F-0x41 = -) but NOT negated — the jog's flip was specific
+    to the jog hardware path.
+    """
+    raw = int(round(_clamp01(normalised) * 127))
+    ticks = raw if raw < 64 else raw - 128
+    return BROWSE_TURN_SIGN * ticks
 
 
 # Clip-name separators (mirror of root): main clips are
@@ -268,6 +290,8 @@ def plan_event(action, deck, value, clip_plan=None, cue_index=None,
                            position)]
     if action in ('pad_loop_in', 'pad_loop_out'):
         return []  # state machine: LiveBridge.handle owns these
+    if action in ('browse_turn', 'browse_push'):
+        return []  # cursor state: LiveBridge.handle owns these
     return []
 
 
@@ -296,6 +320,12 @@ class LiveBridge(object):
     (starts True, Live's 1-bar factory default); `_loop_state[deck]`
     is the LOOP IN/OUT state machine ('idle' -> 'open' -> 'set' ->
     'idle').
+
+    v1.6 browse state (mirror of root): `_playing[deck]` is the
+    playing clip ordinal reported via `note_deck_playing` (None =
+    stopped); `_browse_cursor[deck]` is the selection cursor;
+    `_browse_explicit` is the LOAD-pinned target deck (clears when
+    a clip fires on it); `_browse_last` is the last resolved target.
     """
 
     def __init__(self, clip_plans=None, set_bpm=None):
@@ -305,6 +335,11 @@ class LiveBridge(object):
         self._loop_state = {}   # deck -> {'phase': str, 'start': float}
         self._group_main = {}   # deck -> main clip ordinal of the song
         self._groups_cache = {}  # deck -> (names tuple, groups)
+        self._playing = {}      # deck -> playing clip ordinal or None
+        self._last_fired = {}   # deck -> last clip ordinal fired
+        self._browse_cursor = {}  # deck -> selection cursor (ordinal)
+        self._browse_explicit = None  # deck pinned by LOAD 1/2
+        self._browse_last = None      # last resolved browse target
 
     @property
     def quantize_on(self):
@@ -344,11 +379,25 @@ class LiveBridge(object):
         """Learn the current song from a clip the adapter fired."""
         if ordinal is None or ordinal < 0:
             return
+        self._last_fired[deck] = ordinal
+        if self._browse_explicit == deck:
+            # The LOAD-pinned deck just got its clip: the override
+            # has done its job, standby targeting resumes.
+            self._browse_explicit = None
         for group in self._groups_for(deck):
             if ordinal in group:
                 self._group_main[deck] = group[0]
                 return
         self._group_main[deck] = ordinal
+
+    def note_deck_playing(self, deck, ordinal):
+        """Record which clip is playing on a deck (None = stopped).
+
+        Reported by the adapter from its display tick; the browse
+        target rule reads it to find the standby deck.
+        """
+        if deck in DECK_TRACKS:
+            self._playing[deck] = ordinal
 
     def _hotcue_target(self, deck, cue_index):
         """Clip ordinal pad (cue_index + 1) would fire, or None."""
@@ -465,6 +514,99 @@ class LiveBridge(object):
         leds[7] = phase == 'set'
         return leds
 
+    # -- browse knob (v1.6) ----------------------------------------------
+
+    def _browse_clip_count(self, deck):
+        plan = self.clip_plans.get(deck) or {}
+        return len(plan.get('clips', []))
+
+    def browse_target_deck(self):
+        """The deck the browse knob currently addresses (mirror of
+        root): LOAD-pinned deck first, else the standby deck (the
+        one not playing), else the last target; initially the deck
+        with clips that is not playing, Deck A preferred."""
+        playing = [deck for deck in (0, 1)
+                   if self._playing.get(deck) is not None]
+        if self._browse_explicit is not None:
+            target = self._browse_explicit
+        elif len(playing) == 1:
+            target = 1 - playing[0]
+        elif self._browse_last is not None:
+            target = self._browse_last
+        elif self._browse_clip_count(0):
+            target = 0
+        elif self._browse_clip_count(1):
+            target = 1
+        else:
+            target = 0
+        self._browse_last = target
+        return target
+
+    def browse_cursor(self, deck):
+        """The deck's selection cursor (clip ordinal), or None when
+        the deck has no clips.  Defaults to the last clip fired on
+        the deck, else the first clip; clamped into the current
+        plan on every read."""
+        count = self._browse_clip_count(deck)
+        if count == 0:
+            return None
+        cursor = self._browse_cursor.get(deck)
+        if cursor is None:
+            cursor = self._last_fired.get(deck, 0)
+        cursor = min(max(int(cursor), 0), count - 1)
+        self._browse_cursor[deck] = cursor
+        return cursor
+
+    def _highlight_action(self, deck):
+        track = DECK_TRACKS.get(deck)
+        cursor = self.browse_cursor(deck)
+        if track is None or cursor is None:
+            return []
+        clips = self.clip_plans[deck].get('clips', [])
+        return [LiveAction('highlight', track,
+                           'view.highlighted_clip_slot', True,
+                           clip_index=cursor,
+                           clip_name=clips[cursor].get('name'))]
+
+    def _plan_browse_turn(self, value):
+        delta = _browse_delta(value)
+        if delta == 0:
+            return []
+        deck = self.browse_target_deck()
+        count = self._browse_clip_count(deck)
+        if count == 0:
+            return []
+        cursor = self.browse_cursor(deck)
+        moved = min(max(cursor + delta, 0), count - 1)
+        if moved == cursor:
+            return []  # at the first/last clip: no wrap, no plan
+        self._browse_cursor[deck] = moved
+        return self._highlight_action(deck)
+
+    def _plan_browse_push(self):
+        deck = self.browse_target_deck()
+        track = DECK_TRACKS.get(deck)
+        cursor = self.browse_cursor(deck)
+        if track is None or cursor is None:
+            return []
+        clips = self.clip_plans[deck].get('clips', [])
+        return [LiveAction('fire_clip', track, 'clip.fire', True,
+                           clip_index=cursor,
+                           clip_name=clips[cursor].get('name'))]
+
+    def _plan_load(self, deck):
+        """LOAD 1/2: pin the browse target to this deck (no firing).
+
+        Supersedes plan_event's plain track.load conversion for the
+        script path (mirror of root — see its docstring).  The plan
+        is the highlight for the newly targeted deck.
+        """
+        if deck not in DECK_TRACKS:
+            return []
+        self._browse_explicit = deck
+        self._browse_last = deck
+        return self._highlight_action(deck)
+
     # -- entry points -----------------------------------------------------
 
     def handle(self, action, deck, value, cue_index=None, pad_context=None):
@@ -474,6 +616,12 @@ class LiveBridge(object):
             return self._plan_pad_loop_in(deck, pad_context)
         if action == 'pad_loop_out':
             return self._plan_pad_loop_out(deck, pad_context)
+        if action == 'browse_turn':
+            return self._plan_browse_turn(value)
+        if action == 'browse_push':
+            return self._plan_browse_push()
+        if action == 'load':
+            return self._plan_load(deck)
         actions = plan_event(action, deck, value,
                              clip_plan=self.clip_plans.get(deck),
                              cue_index=cue_index, pad_context=pad_context,
