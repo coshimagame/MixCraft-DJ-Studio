@@ -68,12 +68,22 @@ def _build_ddj_rb():
             (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
             (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
             (6, 70): ('load', 0), (6, 71): ('load', 1)}        # LOAD buttons
-    # PERFORMANCE PADs in HOT CUE mode (pad channels 8/9 in the PDF =
-    # 7/8 here), notes 0-7 = pads 1-8.  dispatch does not pass the pad
-    # index; the adapter supplies it as cue_index (see MixCraft.py).
-    for n in range(8):
+    # PERFORMANCE PADs (pad channels 8/9 in the PDF = 7/8 here),
+    # notes 0-7 = pads 1-8.  v1.5 layout (mirror of the root module):
+    # pads 1-4 = Hot Cue A-D, pad 5 = CUE SET, pad 6 = QUANTIZE,
+    # pad 7 = LOOP IN, pad 8 = LOOP OUT.  dispatch does not pass the
+    # pad index; the adapter supplies it as cue_index (MixCraft.py).
+    for n in range(4):
         note[(7, n)] = ('hotcue_jump', 0)
         note[(8, n)] = ('hotcue_jump', 1)
+    note[(7, 4)] = ('cue_set', 0)
+    note[(8, 4)] = ('cue_set', 1)
+    note[(7, 5)] = ('quantize', 0)
+    note[(8, 5)] = ('quantize', 1)
+    note[(7, 6)] = ('pad_loop_in', 0)
+    note[(8, 6)] = ('pad_loop_in', 1)
+    note[(7, 7)] = ('pad_loop_out', 0)
+    note[(8, 7)] = ('pad_loop_out', 1)
     return {'cc': cc, 'note': note}
 
 

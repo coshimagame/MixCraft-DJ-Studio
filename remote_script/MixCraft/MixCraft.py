@@ -18,6 +18,18 @@ silently (one log line at most), never an exception that would kill
 the control surface.  Tempo/SYNC input is ignored by the bridge
 (fixed set BPM, user decision 2026-11-25).
 
+v1.5 adds the performance pads (user request 2026-11-26 — try the
+assignment on the real DDJ-RB; he avoids mouse operation, so the
+functions live on the hardware): pads 1-4 fire the current song's
+hot-cue clips, pad 5 sets the playing clip's cue point
+(start_marker), pad 6 toggles the song's clip launch quantization,
+pads 7/8 run the bridge's loop in/out state machine on the playing
+clip.  All decisions stay in the bridge; this adapter only reports
+the playing clip's observed state (pad_context), executes the
+clip_edit / song_edit actions against the LOM — every property
+write guarded, a missing property degrades to a log line — and
+drives the pad LEDs from the bridge's pad_leds().
+
 Template assumptions (see SETUP.md): Track 1 = Deck A, Track 2 =
 Deck B; each deck track carries a Utility (TRIM), an EQ Three and an
 Auto Filter; crossfader assignment A/B is pre-set in the template;
@@ -93,11 +105,14 @@ class MixCraft(ControlSurface):
         # deck -> last filter side (-1 LP, +1 HP) so the type parameter
         # is only rewritten when the knob crosses the centre
         self._filter_side = dict((deck, 0) for deck in DECKS)
+        # clip property names already reported as unsupported, so a
+        # missing LOM property logs once instead of on every pad press
+        self._edit_warned = set()
         self._tick = 0
         self._refresh_clip_plans()
         try:
-            self.log_message('MixCraft Remote Script v1 loaded '
-                             '(DDJ-RB companion)')
+            self.log_message('MixCraft Remote Script v1.5 loaded '
+                             '(DDJ-RB companion, performance pads)')
         except Exception:
             pass
 
@@ -162,19 +177,50 @@ class MixCraft(ControlSurface):
         # dispatch drops the pad index (known constraint): remember the
         # note number of pad-channel notes so the bridge can select the
         # hot-cue clip.  Pad notes are 0-7 by construction of the profile.
+        # Pad actions that edit the playing clip also need its observed
+        # state (the bridge is pure logic and cannot see positions).
         cue_index = None
+        pad_context = None
         if kind == 'note' and channel in PAD_CHANNELS:
             cue_index = number
+            pad_context = self._pad_context(PAD_CHANNELS.index(channel))
         command = midi_mod.dispatch(PROFILE, kind, channel, number, value)
         if command is None:
             return
         try:
-            actions = self._bridge.handle_dispatch(command,
-                                                   cue_index=cue_index)
+            actions = self._bridge.handle_dispatch(
+                command, cue_index=cue_index, pad_context=pad_context)
         except Exception:
             return
         for action in actions:
             self._execute(action)
+
+    def _pad_context(self, deck):
+        """Observed state of the deck's playing clip, for pad actions.
+
+        Returns None when nothing is playing (the clip-editing pads
+        then plan nothing; quantize needs no clip and still works).
+        Every read is guarded — a clip lacking a property reports the
+        default instead of raising.
+        """
+        track = self._deck_track(deck + 1)
+        if track is None:
+            return None
+        clip = self._playing_clip(track)
+        if clip is None:
+            return None
+
+        def _num(name):
+            try:
+                return float(getattr(clip, name, 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        return {'playing_position': _num('playing_position'),
+                'looping': bool(getattr(clip, 'looping', False)),
+                'loop_start': _num('loop_start'),
+                'loop_end': _num('loop_end'),
+                'length': _num('length')}
 
     # ------------------------------------------------------------------
     # Action execution
@@ -189,8 +235,78 @@ class MixCraft(ControlSurface):
                 self._execute_fire_clip(action)
             elif action.kind == 'nudge':
                 self._execute_nudge(action)
+            elif action.kind == 'clip_edit':
+                self._execute_clip_edit(action)
+            elif action.kind == 'song_edit':
+                self._execute_song_edit(action)
         except Exception:
             # A single bad target must never take the surface down.
+            pass
+
+    # Clip properties the pad actions may write (LOM Clip attributes).
+    _CLIP_EDIT_PROPS = ('start_marker', 'loop_start', 'loop_end',
+                        'looping')
+
+    def _execute_clip_edit(self, action):
+        """Write one property on the deck's playing clip (pads 5/7/8).
+
+        Guarded throughout: no playing clip, an unknown target or a
+        property the build does not expose all degrade to at most one
+        log line — never an exception out of the pad press.
+        """
+        track = self._deck_track(action.track)
+        if track is None:
+            return
+        clip = self._playing_clip(track)
+        if clip is None:
+            return
+        target = action.target
+        prop = target[len('clip.'):] if target.startswith('clip.') else target
+        if prop not in self._CLIP_EDIT_PROPS:
+            return
+        if not hasattr(clip, prop):
+            if prop not in self._edit_warned:
+                self._edit_warned.add(prop)
+                try:
+                    self.log_message(
+                        'MixCraft: clip has no %s property; pad edits '
+                        'for it are skipped' % (prop,))
+                except Exception:
+                    pass
+            return
+        try:
+            setattr(clip, prop, action.value)
+        except Exception:
+            pass
+
+    def _execute_song_edit(self, action):
+        """Apply a song-level edit (pad 6: launch quantization).
+
+        The bridge speaks 'bar' / 'none'; the LOM wants the
+        Live.Song.Quantization enum (q_1_bar / q_no_q).  If the enum
+        cannot be found the press degrades to a log line.
+        """
+        if action.target != 'clip_trigger_quantization':
+            return
+        enum = None
+        song_type = getattr(Live, 'Song', None)
+        quantization = (getattr(song_type, 'Quantization', None)
+                        if song_type is not None else None)
+        if quantization is not None:
+            enum = getattr(quantization,
+                           'q_1_bar' if action.value == 'bar' else 'q_no_q',
+                           None)
+        if enum is None:
+            try:
+                self.log_message(
+                    'MixCraft: Live.Song.Quantization enum not found; '
+                    'quantize pad is a no-op in this build')
+            except Exception:
+                pass
+            return
+        try:
+            self.song().clip_trigger_quantization = enum
+        except Exception:
             pass
 
     def _execute_set_parameter(self, action):
@@ -263,6 +379,12 @@ class MixCraft(ControlSurface):
             if candidate is slot:
                 self._loaded_slot[action.track - 1] = i
                 break
+        # The bridge tracks the current song group from what fires.
+        try:
+            self._bridge.note_clip_fired(action.track - 1,
+                                         action.clip_index)
+        except Exception:
+            pass
 
     def _execute_nudge(self, action):
         track = self._deck_track(action.track)
@@ -289,6 +411,10 @@ class MixCraft(ControlSurface):
         slot = self._start_slot(track, deck)
         if slot is not None:
             slot.fire()
+            for i, candidate in enumerate(track.clip_slots):
+                if candidate is slot:
+                    self._note_slot_fired(track, deck, i)
+                    break
 
     def _cue_jump(self, track, deck):
         # v1 approximation of the DDJ-RB CUE button: while a clip is
@@ -299,10 +425,40 @@ class MixCraft(ControlSurface):
         if index >= 0:
             track.clip_slots[index].fire()
             self._loaded_slot[deck] = index
+            self._note_slot_fired(track, deck, index)
             return
         slot = self._start_slot(track, deck)
         if slot is not None:
             slot.fire()
+            for i, candidate in enumerate(track.clip_slots):
+                if candidate is slot:
+                    self._note_slot_fired(track, deck, i)
+                    break
+
+    def _ordinal_of_slot(self, track, slot_index):
+        """Clip-bearing ordinal of a Session slot index (or None).
+
+        The bridge counts clips, not slots (empty slots are skipped
+        in its plans), so slot indices are converted through the
+        same counting _clip_bearing_slot uses in reverse.
+        """
+        ordinal = -1
+        for i, slot in enumerate(track.clip_slots):
+            if slot.has_clip:
+                ordinal += 1
+                if i == slot_index:
+                    return ordinal
+        return None
+
+    def _note_slot_fired(self, track, deck, slot_index):
+        """Report a directly-fired slot to the bridge's song tracker."""
+        ordinal = self._ordinal_of_slot(track, slot_index)
+        if ordinal is None:
+            return
+        try:
+            self._bridge.note_clip_fired(deck, ordinal)
+        except Exception:
+            pass
 
     def _start_slot(self, track, deck):
         """The slot PLAY should fire: last fired, else first with a clip."""
@@ -438,7 +594,6 @@ class MixCraft(ControlSurface):
         lay hot-cue clips out (see SETUP.md).  Empty slots are skipped
         here and again when firing, so gaps never misalign the pads.
         """
-        plans = {}
         for deck in DECKS:
             track = self._deck_track(deck + 1)
             if track is None:
@@ -447,9 +602,11 @@ class MixCraft(ControlSurface):
             for slot in track.clip_slots:
                 if slot.has_clip:
                     clips.append({'name': slot.clip.name})
-            if clips:
-                plans[deck] = {'clips': clips, 'locators': []}
-        self._bridge.clip_plans = plans
+            plan = {'clips': clips, 'locators': []} if clips else None
+            try:
+                self._bridge.set_clip_plan(deck, plan)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # LED feedback
@@ -499,13 +656,23 @@ class MixCraft(ControlSurface):
             cued = bool(track is not None
                         and getattr(track, 'solo', False))
             self._send_led(deck, HP_CUE_NOTE, 127 if cued else 0)
-        # Pad LEDs: lit for pads whose slot holds a clip.
+        # Pad LEDs: the bridge decides (v1.5 layout) — hot-cue pads
+        # light while their clip plays, CUE SET while anything plays,
+        # QUANTIZE with the toggle state, LOOP IN/OUT with the loop
+        # state machine's phase.
         for deck in DECKS:
-            plan = self._bridge.clip_plans.get(deck) or {}
-            count = len(plan.get('clips', []))
+            track = self._deck_track(deck + 1)
+            playing_ordinal = None
+            if track is not None and track.playing_slot_index >= 0:
+                playing_ordinal = self._ordinal_of_slot(
+                    track, track.playing_slot_index)
+            try:
+                states = self._bridge.pad_leds(deck, playing_ordinal)
+            except Exception:
+                states = [False] * PAD_COUNT
             for n in range(PAD_COUNT):
                 self._send_led(PAD_CHANNELS[deck], n,
-                               127 if n < count else 0)
+                               127 if states[n] else 0)
 
     def _send_led(self, channel, note, velocity):
         key = (channel, note)

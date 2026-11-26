@@ -69,11 +69,20 @@ DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
              (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
              (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
              (6, 70): ('load', 0), (6, 71): ('load', 1),        # LOAD buttons
-             # PERFORMANCE PADs in HOT CUE mode (pad channels 8/9 in the
-             # PDF = 7/8 here), notes 0-7 = pads 1-8. Like the APC40
-             # profile, dispatch does not pass the pad index yet.
-             **{(7, n): ('hotcue_jump', 0) for n in range(8)},
-             **{(8, n): ('hotcue_jump', 1) for n in range(8)}},
+             # PERFORMANCE PADs (pad channels 8/9 in the PDF = 7/8
+             # here), notes 0-7 = pads 1-8.  v1.5 layout (user
+             # decision 2026-11-26 — everything on the hardware, no
+             # mouse): pads 1-4 = Hot Cue A-D, pad 5 = CUE SET,
+             # pad 6 = QUANTIZE toggle, pad 7 = LOOP IN, pad 8 =
+             # LOOP OUT.  Like the APC40 profile, dispatch does not
+             # pass the pad index; the Remote Script adapter supplies
+             # the note number as cue_index (see live_bridge).
+             **{(7, n): ('hotcue_jump', 0) for n in range(4)},
+             **{(8, n): ('hotcue_jump', 1) for n in range(4)},
+             (7, 4): ('cue_set', 0), (8, 4): ('cue_set', 1),
+             (7, 5): ('quantize', 0), (8, 5): ('quantize', 1),
+             (7, 6): ('pad_loop_in', 0), (8, 6): ('pad_loop_in', 1),
+             (7, 7): ('pad_loop_out', 0), (8, 7): ('pad_loop_out', 1)},
 }
 PROFILES = {'APC40': APC40, 'APC40 mkII': APC40_MKII, 'DDJ-RB': DDJ_RB}
 

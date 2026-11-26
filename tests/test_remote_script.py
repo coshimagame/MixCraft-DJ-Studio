@@ -37,6 +37,8 @@ class FakeClip:
         self.looping = False
         self.loop_start = 0.0
         self.loop_end = 0.0
+        self.start_marker = 0.0
+        self.length = 0.0
         self.playing_position = 0.0
         self.nudge_calls = []
 
@@ -98,6 +100,9 @@ class FakeSong:
         self.tracks = tracks
         self.master_track = FakeTrack('Master')
         self.master_track.mixer_device = FakeMixerDevice(is_master=True)
+        # Live.Song.clip_trigger_quantization, holding the fake enum
+        # values from FakeQuantization below.
+        self.clip_trigger_quantization = 'Q_1_BAR'
 
 
 class FakeCInstance:
@@ -160,6 +165,16 @@ class FakeMidiMap:
             (script_handle, midi_map_handle, channel, cc))
 
 
+class FakeQuantization:
+    """Stand-in for Live.Song.Quantization (enum members as sentinels)."""
+    q_1_bar = 'Q_1_BAR'
+    q_no_q = 'Q_NO_Q'
+
+
+class FakeSongType:
+    Quantization = FakeQuantization
+
+
 def _install_fake_live():
     framework = types.ModuleType('_Framework')
     cs_module = types.ModuleType('_Framework.ControlSurface')
@@ -167,6 +182,7 @@ def _install_fake_live():
     framework.ControlSurface = cs_module
     live_module = types.ModuleType('Live')
     live_module.MidiMap = FakeMidiMap
+    live_module.Song = FakeSongType
     sys.modules.setdefault('_Framework', framework)
     sys.modules.setdefault('_Framework.ControlSurface', cs_module)
     sys.modules.setdefault('Live', live_module)
@@ -462,3 +478,77 @@ def test_hp_cue_led_follows_solo_state():
     surface.receive_midi(_note(0, 84))      # cue deck A off again
     surface.update_display()
     assert (0x90, 84, 0) in surface.sent_midi
+
+
+# ---------------------------------------------------------------------------
+# Performance pads (v1.5): CUE SET / QUANTIZE / LOOP IN / LOOP OUT
+# ---------------------------------------------------------------------------
+
+
+def test_pad_cue_set_writes_the_playing_clips_start_marker():
+    surface, song = _make_surface()
+    track = song.tracks[0]
+    surface.receive_midi(_note(0, 11))      # PLAY deck A
+    clip = track.clip_slots[0].clip
+    clip.playing_position = 12.3
+    surface.receive_midi(_note(7, 4))       # pad 5 = CUE SET
+    # Quantize starts on (Live's 1-bar default): snapped to the beat.
+    assert clip.start_marker == 12.0
+    surface.receive_midi(_note(7, 5))       # pad 6 = QUANTIZE off
+    clip.playing_position = 20.3
+    surface.receive_midi(_note(7, 4))
+    assert clip.start_marker == 20.3
+
+
+def test_pad_quantize_toggles_the_song_launch_quantization():
+    surface, song = _make_surface()
+    assert song.clip_trigger_quantization == 'Q_1_BAR'
+    surface.receive_midi(_note(7, 5))       # pad 6 on deck A
+    assert song.clip_trigger_quantization == 'Q_NO_Q'
+    surface.receive_midi(_note(8, 5))       # pad 6 on deck B: same switch
+    assert song.clip_trigger_quantization == 'Q_1_BAR'
+
+
+def test_pad_loop_in_out_cycle_on_the_playing_clip():
+    surface, song = _make_surface()
+    track = song.tracks[0]
+    surface.receive_midi(_note(0, 11))      # PLAY deck A
+    clip = track.clip_slots[0].clip
+    clip.length = 64.0
+    clip.playing_position = 8.0
+    surface.receive_midi(_note(7, 6))       # pad 7 = LOOP IN
+    assert clip.loop_start == 8.0
+    assert clip.loop_end == 12.0            # provisional +4 beats
+    assert clip.looping is True
+    clip.playing_position = 16.0
+    surface.receive_midi(_note(7, 7))       # pad 8 = LOOP OUT
+    assert clip.loop_end == 16.0
+    assert clip.looping is True
+    surface.receive_midi(_note(7, 7))       # pad 8 again = loop off
+    assert clip.looping is False
+
+
+def test_pad_hotcue_fires_the_current_songs_hot_cue_clip():
+    surface, song = _make_surface(
+        deck_a_clips=('Song 1 - Artist', 'Song 1 – Hot Cue A',
+                      'Song 2 - Other'))
+    track = song.tracks[0]
+    surface.receive_midi(_note(0, 11))      # PLAY: Song 1's main clip
+    assert track.clip_slots[0].fire_count == 1
+    surface.receive_midi(_note(7, 0))       # pad 1 = Hot Cue A
+    assert track.clip_slots[1].fire_count == 1
+    surface.update_display()
+    assert (0x97, 0, 127) in surface.sent_midi  # pad 1 lit while it plays
+    # Song 1 has no Hot Cue B clip: pad 2 must not fire Song 2's clip.
+    surface.receive_midi(_note(7, 1))
+    assert track.clip_slots[2].fire_count == 0
+
+
+def test_pad_edits_without_a_playing_clip_are_noops():
+    surface, song = _make_surface()
+    clip = song.tracks[0].clip_slots[0].clip
+    surface.receive_midi(_note(7, 4))       # CUE SET, nothing playing
+    surface.receive_midi(_note(7, 6))       # LOOP IN
+    surface.receive_midi(_note(7, 7))       # LOOP OUT
+    assert clip.start_marker == 0.0
+    assert clip.looping is False

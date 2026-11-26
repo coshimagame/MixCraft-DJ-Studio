@@ -6,7 +6,7 @@ of both modules, not just live_bridge in isolation.
 """
 from library import cues_to_clip_plan
 from live_bridge import (LiveAction, LiveBridge, NUDGE_BEATS_PER_TICK,
-                         plan_dispatch, plan_event)
+                         compute_clip_groups, plan_dispatch, plan_event)
 from midi_map import DDJ_RB, dispatch
 
 
@@ -184,3 +184,204 @@ def test_unknown_action_and_deckless_deck_action():
     assert plan_event('bogus', 0, 1.0) == []
     assert plan_event('volume', None, 0.5) == []
     assert plan_event('volume', 7, 0.5) == []  # no such deck in the template
+
+
+# --- performance pads (v1.5) -------------------------------------------------
+#
+# Layout (user decision 2026-11-26): pads 1-4 = Hot Cue A-D, pad 5 =
+# CUE SET, pad 6 = QUANTIZE, pad 7 = LOOP IN, pad 8 = LOOP OUT.
+# Pad actions that edit a clip need the adapter's observation of the
+# playing clip (pad_context, positions in beats).
+
+
+def _pad_ctx(position, **overrides):
+    ctx = {'playing_position': position, 'looping': False,
+           'loop_start': 0.0, 'loop_end': 0.0, 'length': 0.0}
+    ctx.update(overrides)
+    return ctx
+
+
+def _pad(channel, note):
+    return dispatch(DDJ_RB, 'note', channel, note, 127)
+
+
+def test_pad_dispatch_layout():
+    expected = ['hotcue_jump'] * 4 + ['cue_set', 'quantize',
+                                      'pad_loop_in', 'pad_loop_out']
+    for channel, deck in ((7, 0), (8, 1)):
+        for note in range(8):
+            assert _pad(channel, note) == (expected[note], deck, True)
+
+
+def test_cue_set_snaps_to_the_beat_while_quantize_is_on():
+    bridge = LiveBridge()
+    assert bridge.handle_dispatch(_pad(7, 4), cue_index=4,
+                                  pad_context=_pad_ctx(12.3)) == [
+        LiveAction('clip_edit', 1, 'clip.start_marker', 12.0)]
+    # Deck B routes to Track 2.
+    assert bridge.handle_dispatch(_pad(8, 4), cue_index=4,
+                                  pad_context=_pad_ctx(16.6)) == [
+        LiveAction('clip_edit', 2, 'clip.start_marker', 17.0)]
+
+
+def test_cue_set_keeps_the_position_when_quantize_is_off():
+    bridge = LiveBridge()
+    bridge.handle_dispatch(_pad(7, 5), cue_index=5)  # QUANTIZE off
+    assert bridge.handle_dispatch(_pad(7, 4), cue_index=4,
+                                  pad_context=_pad_ctx(12.3)) == [
+        LiveAction('clip_edit', 1, 'clip.start_marker', 12.3)]
+
+
+def test_cue_set_needs_a_playing_clip_context():
+    bridge = LiveBridge()
+    assert bridge.handle_dispatch(_pad(7, 4), cue_index=4) == []
+    assert plan_event('cue_set', 0, True, pad_context=None) == []
+
+
+def test_quantize_pad_toggles_bar_and_none():
+    bridge = LiveBridge()
+    assert bridge.quantize_on is True  # Live's 1-bar factory default
+    assert bridge.handle_dispatch(_pad(7, 5), cue_index=5) == [
+        LiveAction('song_edit', None, 'clip_trigger_quantization', 'none')]
+    assert bridge.quantize_on is False
+    # The other deck's pad 6 flips the same song-level switch back.
+    assert bridge.handle_dispatch(_pad(8, 5), cue_index=5) == [
+        LiveAction('song_edit', None, 'clip_trigger_quantization', 'bar')]
+    assert bridge.quantize_on is True
+
+
+def test_pad_loop_in_arms_a_provisional_loop():
+    bridge = LiveBridge()
+    actions = bridge.handle_dispatch(
+        _pad(7, 6), cue_index=6, pad_context=_pad_ctx(8.0, length=64.0))
+    assert actions == [
+        LiveAction('clip_edit', 1, 'clip.loop_start', 8.0),
+        LiveAction('clip_edit', 1, 'clip.loop_end', 12.0),  # +4 beats
+        LiveAction('clip_edit', 1, 'clip.looping', True)]
+    assert bridge.loop_phase(0) == 'open'
+
+
+def test_pad_loop_out_finalises_then_toggles_off():
+    bridge = LiveBridge()
+    bridge.handle_dispatch(_pad(7, 6), cue_index=6,
+                           pad_context=_pad_ctx(8.0, length=64.0))
+    assert bridge.handle_dispatch(_pad(7, 7), cue_index=7,
+                                  pad_context=_pad_ctx(16.0)) == [
+        LiveAction('clip_edit', 1, 'clip.loop_end', 16.0),
+        LiveAction('clip_edit', 1, 'clip.looping', True)]
+    assert bridge.loop_phase(0) == 'set'
+    # A loop is active and set: the next LOOP OUT turns it off.
+    assert bridge.handle_dispatch(_pad(7, 7), cue_index=7,
+                                  pad_context=_pad_ctx(20.0)) == [
+        LiveAction('clip_edit', 1, 'clip.looping', False)]
+    assert bridge.loop_phase(0) == 'idle'
+
+
+def test_pad_loop_out_from_idle_sets_the_end():
+    bridge = LiveBridge()
+    assert bridge.handle_dispatch(
+        _pad(8, 7), cue_index=7,
+        pad_context=_pad_ctx(20.0, loop_start=4.0)) == [
+        LiveAction('clip_edit', 2, 'clip.loop_end', 20.0),
+        LiveAction('clip_edit', 2, 'clip.looping', True)]
+    assert bridge.loop_phase(1) == 'set'
+
+
+def test_pad_loop_in_clamps_the_provisional_end_to_the_clip():
+    bridge = LiveBridge()
+    actions = bridge.handle_dispatch(
+        _pad(7, 6), cue_index=6, pad_context=_pad_ctx(63.0, length=64.0))
+    assert actions[1] == LiveAction('clip_edit', 1, 'clip.loop_end', 64.0)
+    # At the very end of the clip there is nothing to loop.
+    bridge = LiveBridge()
+    assert bridge.handle_dispatch(
+        _pad(7, 6), cue_index=6,
+        pad_context=_pad_ctx(64.0, length=64.0)) == []
+
+
+def test_pad_loop_actions_need_a_playing_clip_context():
+    bridge = LiveBridge()
+    assert bridge.handle_dispatch(_pad(7, 6), cue_index=6) == []
+    assert bridge.handle_dispatch(_pad(7, 7), cue_index=7) == []
+    # The state machine lives in LiveBridge, not in plan_event.
+    assert plan_event('pad_loop_in', 0, True,
+                      pad_context=_pad_ctx(1.0)) == []
+
+
+def _grouped_plan():
+    return {'clips': [{'name': 'Song 1 - Artist'},
+                      {'name': 'Song 1 – Hot Cue A'},
+                      {'name': 'Song 1 – Hot Cue B'},
+                      {'name': 'Song 2 - Artist'},
+                      {'name': 'Song 2 – Hot Cue A'}],
+            'locators': []}
+
+
+def test_compute_clip_groups_from_names():
+    assert compute_clip_groups(_grouped_plan()['clips']) == [[0, 1, 2],
+                                                             [3, 4]]
+    # Identical names never merge; separator-less names stand alone.
+    clips = [{'name': 'Same - A'}, {'name': 'Same - A'}, {'name': 'Plain'}]
+    assert compute_clip_groups(clips) == [[0], [1], [2]]
+
+
+def test_hotcue_pads_fire_the_current_songs_hot_cues():
+    bridge = LiveBridge(clip_plans={0: _grouped_plan()})
+    bridge.note_clip_fired(0, 0)  # PLAY fired Song 1's main clip
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=0) == [
+        LiveAction('fire_clip', 1, 'clip.fire', True,
+                   clip_index=1, clip_name='Song 1 – Hot Cue A')]
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=1) == [
+        LiveAction('fire_clip', 1, 'clip.fire', True,
+                   clip_index=2, clip_name='Song 1 – Hot Cue B')]
+    # Song 1 has no Hot Cue C: firing Song 2's clip would be wrong.
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=2) == []
+    bridge.note_clip_fired(0, 3)  # Song 2 becomes the current song
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=0) == [
+        LiveAction('fire_clip', 1, 'clip.fire', True,
+                   clip_index=4, clip_name='Song 2 – Hot Cue A')]
+
+
+def test_hotcue_group_without_a_main_clip_addresses_from_zero():
+    # A bare cues_to_clip_plan list: every clip is a hot-cue clip, so
+    # pad 1 is the group's first clip (no main clip to skip over).
+    plan = {'clips': [{'name': 'Song X – Intro'},
+                      {'name': 'Song X – Hot Cue B'}], 'locators': []}
+    bridge = LiveBridge(clip_plans={0: plan})
+    bridge.note_clip_fired(0, 0)
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=0) == [
+        LiveAction('fire_clip', 1, 'clip.fire', True,
+                   clip_index=0, clip_name='Song X – Intro')]
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=1) == [
+        LiveAction('fire_clip', 1, 'clip.fire', True,
+                   clip_index=1, clip_name='Song X – Hot Cue B')]
+
+
+def test_hotcue_fallback_fires_clip_by_pad_when_ungrouped():
+    plan = {'clips': [{'name': 'Alpha'}, {'name': 'Beta'},
+                      {'name': 'Gamma'}], 'locators': []}
+    bridge = LiveBridge(clip_plans={0: plan})
+    bridge.note_clip_fired(0, 0)
+    # No grouping detectable anywhere: v1.4 behaviour (pad n -> clip #n).
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=1) == [
+        LiveAction('fire_clip', 1, 'clip.fire', True,
+                   clip_index=1, clip_name='Beta')]
+    assert bridge.handle('hotcue_jump', 0, True, cue_index=3) == []
+
+
+def test_pad_leds_reflect_play_quantize_and_loop_state():
+    bridge = LiveBridge(clip_plans={0: _grouped_plan()})
+    bridge.note_clip_fired(0, 0)
+    # Hot Cue A (clip 1) is playing; quantize starts on.
+    leds = bridge.pad_leds(0, playing_ordinal=1)
+    assert leds == [True, False, False, False, True, True, False, False]
+    bridge.handle_dispatch(_pad(7, 6), cue_index=6,
+                           pad_context=_pad_ctx(8.0, length=64.0))
+    leds = bridge.pad_leds(0, playing_ordinal=0)
+    assert leds[6] is True and leds[7] is False   # loop open
+    bridge.handle_dispatch(_pad(7, 7), cue_index=7,
+                           pad_context=_pad_ctx(16.0))
+    leds = bridge.pad_leds(0, playing_ordinal=0)
+    assert leds[6] is False and leds[7] is True   # loop set
+    # Nothing playing: CUE SET's LED goes dark too.
+    assert bridge.pad_leds(0, playing_ordinal=None)[4] is False
