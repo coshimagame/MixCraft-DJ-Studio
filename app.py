@@ -334,11 +334,18 @@ class Deck(QFrame):
         # maximum) as the sub-page, so the deck colour goes on the
         # add-page — the fill then rises from the bottom up to the
         # handle, like a level. The handle is a wide bar with a centre
-        # grip line.
-        fader_qss = (f'QSlider::groove:vertical {{width:8px;background:#0c0d0e;border:1px solid {COLOR_BORDER};border-radius:2px}}'
-                     f'QSlider::sub-page:vertical {{background:#0c0d0e;border-radius:2px}}'
-                     f'QSlider::add-page:vertical {{background:{color};border-radius:2px}}'
-                     f'QSlider::handle:vertical {{height:16px;width:30px;margin:0 -12px;background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8);border:2px solid #000000;border-radius:2px}}')
+        # grip line. Pass 6 (user direction, 2026-11-26): the fader is
+        # about 3x thicker than the pass-3 original — groove 8 -> 24px,
+        # handle 30 -> 84px wide — a fat track that reads and grabs
+        # easily. The slider also gets an explicit 84px width below:
+        # the stylesheet's negative handle margins alone do not widen
+        # the widget (verified in the pass-6 render — the handle was
+        # clipped to the groove), so the width is reserved in code and
+        # the handle paints across it.
+        fader_qss = (f'QSlider::groove:vertical {{width:24px;background:#0c0d0e;border:1px solid {COLOR_BORDER};border-radius:3px}}'
+                     f'QSlider::sub-page:vertical {{background:#0c0d0e;border-radius:3px}}'
+                     f'QSlider::add-page:vertical {{background:{color};border-radius:3px}}'
+                     f'QSlider::handle:vertical {{height:20px;width:84px;margin:0 -30px;background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8);border:2px solid #000000;border-radius:3px}}')
         self.fader_qss = fader_qss
         # Deck info strip, rekordbox-style: small deck chip, big title
         # with a sub line under it, then BPM and time readouts right.
@@ -405,6 +412,7 @@ class Deck(QFrame):
         self.volume.setStyleSheet(fader_qss)
         self.volume.setRange(0, 100)
         self.volume.setValue(80)
+        self.volume.setFixedWidth(84)
         self.volume.setFixedHeight(312)
         self.volume.valueChanged.connect(lambda v: window.engine.command('volume', index, v/100))
         fader_box.addWidget(self.volume)
@@ -465,20 +473,23 @@ class Deck(QFrame):
         # Mixer-centre symmetry (user direction, 2026-11-26, pass 5 —
         # this CORRECTS pass 4, which mirrored the wrong way): like a
         # DJ mixer standing between two decks, the mixer parts gather
-        # at the centre. Deck A reads [pads | knobs | fader] and
-        # Deck B [fader | knobs | pads], so the two channel faders
-        # flank the centre mixer column with the EQ knob columns just
-        # outside them — one unified mixer block in the middle — and
-        # the pads sit at the outer sides. Layout only: same widgets,
-        # values and engine wiring on both decks; the knob column's
-        # vertical order (GAIN top -> FILTER bottom) does not mirror.
+        # at the centre and the pads sit at the outer sides. Pass 6
+        # (user direction, same day): the channel fader moves one step
+        # OUTWARD, to the outside of its EQ knob column — the side of
+        # the knobs away from the centre. Deck A now reads
+        # [pads | fader | knobs] and Deck B [knobs | fader | pads], so
+        # the two knob columns flank the centre mixer column and each
+        # fader stands directly beside its own knobs. Layout only:
+        # same widgets, values and engine wiring on both decks; the
+        # knob column's vertical order (GAIN top -> FILTER bottom)
+        # does not mirror.
         if index == 0:
             strip.addLayout(perf_box, 1)
-            strip.addLayout(knob_column)
             strip.addLayout(fader_box)
+            strip.addLayout(knob_column)
         else:
-            strip.addLayout(fader_box)
             strip.addLayout(knob_column)
+            strip.addLayout(fader_box)
             strip.addLayout(perf_box, 1)
         lay.addLayout(strip)
     def reset(self):
@@ -550,6 +561,38 @@ class Window(QMainWindow):
         mixer_label.setStyleSheet(SECTION_LABEL_QSS)
         mixer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mix.addWidget(mixer_label)
+        # Centre column order (pass 6, user direction 2026-11-26):
+        # SET BPM dial up top, then the level meter, then MASTER as a
+        # rotary knob, and the CROSSFADER at the very bottom — like a
+        # real DJ mixer, where the crossfader sits under the channel
+        # faders at the bottom of the mixer section. The stretch above
+        # the crossfader pins it to the bottom of the column, roughly
+        # level with the bottom of the deck channel strips.
+        # One SET BPM dial for the whole set (pass 5, user direction
+        # 2026-11-26): both decks run at the fixed set BPM, so the
+        # jog-style dial moved here from the decks. Display only —
+        # refresh_set_bpm_dial() feeds it from the loaded set list,
+        # falling back to Deck A's track BPM.
+        set_bpm_label = QLabel('SET BPM / セットBPM')
+        set_bpm_label.setStyleSheet(SECTION_LABEL_QSS)
+        set_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mix.addWidget(set_bpm_label)
+        self.set_dial = JogDial(caption='SET BPM')
+        mix.addWidget(self.set_dial, 0, Qt.AlignmentFlag.AlignCenter)
+        self.meter = QProgressBar()
+        self.meter.setRange(0,100)
+        self.meter.setTextVisible(False)
+        mix.addWidget(self.meter)
+        # MASTER volume as a knob (pass 6): same Knob widget and the
+        # same wiring the horizontal slider had — range 0-100, default
+        # 80, 'master' command with v/100. The label is the knob's own.
+        # A neutral grey arc: the master belongs to neither deck.
+        self.master = Knob('MASTER', COLOR_TEXT_SUB, bipolar=False)
+        self.master.setRange(0, 100)
+        self.master.setValue(80)
+        self.master.valueChanged.connect(lambda v: self.engine.command('master', value=v/100))
+        mix.addWidget(self.master, 0, Qt.AlignmentFlag.AlignCenter)
+        mix.addStretch()
         cross_head = QHBoxLayout()
         deck_a_label = QLabel('A')
         deck_a_label.setStyleSheet(f'color:{COLOR_DECK_A};font-size:15px;font-weight:800')
@@ -568,31 +611,6 @@ class Window(QMainWindow):
         self.cross.setValue(500)
         self.cross.valueChanged.connect(lambda v:self.engine.command('cross',value=v/1000))
         mix.addWidget(self.cross)
-        master_label = QLabel('MASTER')
-        master_label.setStyleSheet(SECTION_LABEL_QSS)
-        master_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mix.addWidget(master_label)
-        master = QSlider(Qt.Orientation.Horizontal)
-        master.setRange(0,100)
-        master.setValue(80)
-        master.valueChanged.connect(lambda v:self.engine.command('master',value=v/100))
-        mix.addWidget(master)
-        self.meter = QProgressBar()
-        self.meter.setRange(0,100)
-        self.meter.setTextVisible(False)
-        mix.addWidget(self.meter)
-        # One SET BPM dial for the whole set (pass 5, user direction
-        # 2026-11-26): both decks run at the fixed set BPM, so the
-        # jog-style dial moved here from the decks. Display only —
-        # refresh_set_bpm_dial() feeds it from the loaded set list,
-        # falling back to Deck A's track BPM.
-        set_bpm_label = QLabel('SET BPM / セットBPM')
-        set_bpm_label.setStyleSheet(SECTION_LABEL_QSS)
-        set_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mix.addWidget(set_bpm_label)
-        self.set_dial = JogDial(caption='SET BPM')
-        mix.addWidget(self.set_dial, 0, Qt.AlignmentFlag.AlignCenter)
-        mix.addStretch()
         perf.addWidget(mixer, 2)
         perf.addWidget(self.decks[1], 5)
         layout.addLayout(perf)
@@ -620,7 +638,9 @@ class Window(QMainWindow):
         # Browser-style column header for the track rows below.
         columns = QHBoxLayout()
         columns.setContentsMargins(6, 2, 6, 2)
-        columns.addSpacing(6 + 34)
+        # Offset matching the row layout: deck bar 5 + chip 22 +
+        # status bar 6 + number 34 + the four 6px gaps between them.
+        columns.addSpacing(5 + 6 + 22 + 6 + 6 + 6 + 34 + 6)
         head_title = QLabel('TITLE / ARTIST')
         head_title.setStyleSheet(SECTION_LABEL_QSS)
         columns.addWidget(head_title, 1)
@@ -795,8 +815,31 @@ class Window(QMainWindow):
                   'next': COLOR_STATE_NEXT, 'queued': COLOR_STATE_QUEUED}
         for row_index, row in enumerate(display_rows(self.setlist_data)):
             color = colors[row['status']]
+            # Deck indicator (pass 6, user direction 2026-11-26): the
+            # decks are colour-coded (A blue / B red-orange) and the
+            # track list now shows the same coding, so the deck a track
+            # belongs to reads at a glance. Assignment follows the
+            # established alternation (live_plan.py): odd positions
+            # (1,3,5...) -> Deck A, even (2,4,6...) -> Deck B, from the
+            # row's position in the list. This is a COMPLEMENT to the
+            # status colours, not a replacement: the status bar, number
+            # and badge below keep the fixed played / playing / next /
+            # queued colours exactly as they are — the deck channel is
+            # separate: a deck-coloured bar at the row's left edge plus
+            # an 'A' / 'B' letter chip.
+            deck_color = COLOR_DECK_A if row['number'] % 2 == 1 else COLOR_DECK_B
+            deck_letter = 'A' if row['number'] % 2 == 1 else 'B'
             line = QHBoxLayout()
             line.setContentsMargins(6, 4, 6, 4)
+            deck_bar = QFrame()
+            deck_bar.setFixedWidth(5)
+            deck_bar.setStyleSheet(f'background:{deck_color};border:none')
+            line.addWidget(deck_bar)
+            chip = QLabel(deck_letter)
+            chip.setFixedWidth(22)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setStyleSheet(f'color:{deck_color};background:{COLOR_PANEL_HI};border:1px solid {deck_color};border-radius:2px;font-size:11px;font-weight:800')
+            line.addWidget(chip)
             bar = QFrame()
             bar.setFixedWidth(6)
             bar.setStyleSheet(f'background:{color};border:none')
