@@ -1,4 +1,7 @@
-# MixCraft DJ Studio
+# MixAble DJ Studio
+
+> 2026-11-26 に **MixCraft** から **MixAble** へ改名しました。旧名 MixCraft で書かれた
+> 文書・記録も、同じ製品を指します。
 
 Mw-fActory — オフラインで動作するWindows向け2デッキDJ試遊版 v0.2.0-trial (Phase 2)。
 

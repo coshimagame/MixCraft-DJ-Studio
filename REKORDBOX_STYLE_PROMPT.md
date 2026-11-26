@@ -1,10 +1,10 @@
-# MixCraft を rekordbox の見た目・操作性に近づけるための指示書
+# MixAble を rekordbox の見た目・操作性に近づけるための指示書
 
 （2026-11-26 むぅちゃんの依頼で作成。元は Codex 向けに書いたが、Codex が利用上限に達したため、かまはげたが引き継いで実行する。Codex 復帰後も同じ指示書として使える。）
 
 ## 目的
-MixCraft（PC アプリ `app.py`、PySide6）の見た目と操作性を、Pioneer rekordbox（現行版）の
-画面設計に近づける。MixCraft は Ableton Live 相棒型という役割は変えない。
+MixAble（PC アプリ `app.py`、PySide6）の見た目と操作性を、Pioneer rekordbox（現行版）の
+画面設計に近づける。MixAble は Ableton Live 相棒型という役割は変えない。
 「rekordbox っぽく操作できる Live 相棒」がゴール。
 
 ## やること
@@ -19,7 +19,7 @@ MixCraft（PC アプリ `app.py`、PySide6）の見た目と操作性を、Pione
   - フォントの傾向（数字の見せ方、太さ、サイズ感）
   - ブラウザ／ライブラリの見せ方（リスト、検索、プレイリスト）
 ### 2. 対応表（マッピング）の作成
-- rekordbox の要素 → MixCraft `app.py` のどの部品にどう反映するかの一覧。
+- rekordbox の要素 → MixAble `app.py` のどの部品にどう反映するかの一覧。
 - 残すもの: セットリスト読み込み（SET LIST パネル）、解析結果表示、ライブラリ機能、
   既存の LCD 風味は「rekordbox のダーク基調」に統合する方向で再評価する。
 ### 3. 実装（第一弾）

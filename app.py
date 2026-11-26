@@ -302,7 +302,7 @@ class Deck(QFrame):
 class Window(QMainWindow):
     def __init__(self, audio=True):
         super().__init__()
-        self.setWindowTitle('MixCraft DJ Studio • Mw-fActory • Phase 2 Trial')
+        self.setWindowTitle('MixAble DJ Studio • Mw-fActory • Phase 2 Trial')
         self.resize(1280,900)
         self.engine = Engine()
         self.stream = None
@@ -331,7 +331,7 @@ class Window(QMainWindow):
         header_bar.setObjectName('headerbar')
         header = QHBoxLayout(header_bar)
         header.setContentsMargins(10, 5, 10, 5)
-        title = QLabel(f'MIXCRAFT  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
+        title = QLabel(f'MixAble  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
         title.setStyleSheet('font-size:15px;font-weight:800')
         header.addWidget(title)
         mode_label = QLabel('DJ MODE  •  2 DECK PERFORMANCE  •  PHASE 2 / 試遊版')
