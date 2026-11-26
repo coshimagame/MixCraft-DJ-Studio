@@ -130,11 +130,18 @@ class JogDial(QWidget):
     """Display-only circular BPM dial echoing the rekordbox jog ring:
     grey ring, thin blue inner line, red position marker, huge BPM in
     the centre with the pitch % and range under it. It shows state
-    only — MixCraft has no jog control, so it takes no input."""
-    def __init__(self):
+    only — MixCraft has no jog control, so it takes no input.
+
+    Pass 5 (user direction, 2026-11-26): both decks run at the set
+    BPM, so there is ONE dial, in the centre mixer column, showing
+    the SET BPM. With a caption ('SET BPM') the rotating position
+    marker and the pitch % / range lines are replaced by the
+    caption — a set tempo has no platter position or pitch range."""
+    def __init__(self, caption=None):
         super().__init__()
         self.bpm = None
         self.fraction = 0.0
+        self.caption = caption
         self.setFixedSize(118, 118)
     def set_bpm(self, bpm):
         self.bpm = bpm
@@ -153,13 +160,14 @@ class JogDial(QWidget):
         p.setPen(QPen(QColor(COLOR_WAVE_BLUE), 2))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(inner)
-        cx, cy = rect.center().x(), rect.center().y()
-        radius = rect.width()/2 - 3
-        angle = -math.pi/2 + self.fraction*2*math.pi
-        mx, my = cx + radius*math.cos(angle), cy + radius*math.sin(angle)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(COLOR_WAVEFORM_LOW))
-        p.drawEllipse(int(mx)-3, int(my)-3, 6, 6)
+        if self.caption is None:
+            cx, cy = rect.center().x(), rect.center().y()
+            radius = rect.width()/2 - 3
+            angle = -math.pi/2 + self.fraction*2*math.pi
+            mx, my = cx + radius*math.cos(angle), cy + radius*math.sin(angle)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(COLOR_WAVEFORM_LOW))
+            p.drawEllipse(int(mx)-3, int(my)-3, 6, 6)
         bpm_text = f'{self.bpm:.2f}' if self.bpm else '--.--'
         p.setPen(QColor(COLOR_TEXT))
         mono = QFont()
@@ -171,6 +179,10 @@ class JogDial(QWidget):
         mono.setPointSize(9)
         mono.setBold(False)
         p.setFont(mono)
+        if self.caption is not None:
+            p.setPen(QColor(COLOR_TEXT_SUB))
+            p.drawText(inner.adjusted(0, 22, 0, 0), Qt.AlignmentFlag.AlignCenter, self.caption)
+            return
         p.setPen(QColor(COLOR_TEXT_SUB))
         p.drawText(inner.adjusted(0, 22, 0, 0), Qt.AlignmentFlag.AlignCenter, '0.0%')
         p.setPen(QColor(COLOR_METER))
@@ -376,7 +388,7 @@ class Deck(QFrame):
         lay.addLayout(row)
         # Channel strip (user direction, 2026-11-26): the channel
         # volume becomes a VERTICAL fader and GAIN / EQ / FILTER become
-        # rotary KNOBS in a column beside the pad grid and jog dial,
+        # rotary KNOBS in a column beside the pad grid,
         # like a hardware mixer channel strip. Only the widgets and
         # layout changed — the value domain (0-100), the defaults
         # (volume 80, parameters 50 = neutral) and every engine command
@@ -414,16 +426,21 @@ class Deck(QFrame):
             knob_column.addWidget(knob)
         knob_column.addStretch()
         # (Added to `strip` at the end, in mirror order — see below.)
-        # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC — laid out as
-        # a dark performance-pad grid (3x3) beside the jog-style dial,
-        # like the rekordbox pad + jog block. Same buttons, same wiring.
+        # Phase 2: CUE / HOT CUE / QUANTIZE / SYNC — laid out as a
+        # dark performance-pad grid (3x2). Same buttons, same wiring.
+        # (Pass 5: the jog-style BPM dial left the decks — both decks
+        # run at the set BPM, so the single dial lives in the centre
+        # mixer column showing the SET BPM; see Window. The Loop In /
+        # Out / Exit pads also left in pass 5, by the user's ruling:
+        # they are standalone-era leftovers that are NOT connected to
+        # the Live / hardware performance path — the DDJ-RB's own loop
+        # buttons are not assigned in the Remote Script either — so
+        # they do not belong on screen. The engine's loop commands
+        # stay in the engine, unpresented.)
         cue_set = QPushButton('Cue Set'); cue_set.clicked.connect(lambda: window.engine.command('cue_set', index))
         cue_jump = QPushButton('Cue'); cue_jump.clicked.connect(lambda: window.engine.command('cue_jump', index))
         hot1 = QPushButton('Hot 1'); hot1.clicked.connect(lambda: window.engine.command('hotcue_jump', index, 1))
         hot1s = QPushButton('Hot1 Set'); hot1s.clicked.connect(lambda: window.engine.command('hotcue_set', index, 1))
-        loop_in = QPushButton('Loop In'); loop_in.clicked.connect(lambda: window.engine.command('loop_in', index))
-        loop_out = QPushButton('Loop Out'); loop_out.clicked.connect(lambda: window.engine.command('loop_out', index))
-        loop_off = QPushButton('Loop Exit'); loop_off.clicked.connect(lambda: window.engine.command('loop_exit', index))
         quant = QPushButton('Quantize'); quant.setCheckable(True)
         self.quant = quant
         quant.toggled.connect(lambda on, i=index: window.engine.command('quantize', i, on))
@@ -431,47 +448,38 @@ class Deck(QFrame):
         self.sync = sync
         sync.setToolTip('Tempo match only / テンポのみ一致。音程も変わります。ビート位相同期なし。')
         sync.toggled.connect(lambda on, i=index: window.engine.command('sync', i, on))
-        perf_row = QHBoxLayout()
         pads = QGridLayout()
         pads.setSpacing(5)
         for i, button in enumerate([cue_set, cue_jump, hot1,
-                                    hot1s, loop_in, loop_out,
-                                    loop_off, quant, sync]):
+                                    hot1s, quant, sync]):
             button.setProperty('pad', True)
             pads.addWidget(button, i // 3, i % 3)
-        self.jog = JogDial()
-        # On Deck A the jog is the innermost element (right side, next
-        # to the centre mixer); on Deck B it mirrors to the left side
-        # of the pad grid, so both jogs face the centre. The pad grid's
-        # internal order stays identical on both decks, so pad
-        # positions are consistent deck to deck (as on real gear).
-        if index == 0:
-            perf_row.addLayout(pads, 1)
-            perf_row.addWidget(self.jog)
-        else:
-            perf_row.addWidget(self.jog)
-            perf_row.addLayout(pads, 1)
-        # Pads + jog sit alongside the fader / knob strip, centred
+        # The pad grid sits alongside the fader / knob strip, centred
         # vertically; the strip's height is set by the knob column.
+        # With the jog dial gone (pass 5) the grid takes the freed
+        # outer space and stretches to fill it.
         perf_box = QVBoxLayout()
         perf_box.addStretch()
-        perf_box.addLayout(perf_row)
+        perf_box.addLayout(pads)
         perf_box.addStretch()
-        # Mirror symmetry (user direction, 2026-11-26): Deck B's whole
-        # channel strip is Deck A's mirror image about the centre
-        # mixer column — [jog | pads | knobs | fader] — so the faders
-        # sit at the outer edges and the knob columns flank the pads,
-        # like a hardware mixer. Layout only: same widgets, values
-        # and engine wiring on both decks; the knob column's vertical
-        # order (GAIN top -> FILTER bottom) does not mirror.
+        # Mixer-centre symmetry (user direction, 2026-11-26, pass 5 —
+        # this CORRECTS pass 4, which mirrored the wrong way): like a
+        # DJ mixer standing between two decks, the mixer parts gather
+        # at the centre. Deck A reads [pads | knobs | fader] and
+        # Deck B [fader | knobs | pads], so the two channel faders
+        # flank the centre mixer column with the EQ knob columns just
+        # outside them — one unified mixer block in the middle — and
+        # the pads sit at the outer sides. Layout only: same widgets,
+        # values and engine wiring on both decks; the knob column's
+        # vertical order (GAIN top -> FILTER bottom) does not mirror.
         if index == 0:
-            strip.addLayout(fader_box)
-            strip.addLayout(knob_column)
             strip.addLayout(perf_box, 1)
+            strip.addLayout(knob_column)
+            strip.addLayout(fader_box)
         else:
-            strip.addLayout(perf_box, 1)
-            strip.addLayout(knob_column)
             strip.addLayout(fader_box)
+            strip.addLayout(knob_column)
+            strip.addLayout(perf_box, 1)
         lay.addLayout(strip)
     def reset(self):
         self.window.engine.command('play', self.index, False)
@@ -503,6 +511,7 @@ class Window(QMainWindow):
         self.loading = set()
         self.setlist_data = None   # loaded set list (normalized dict)
         self.clip_tracks = []      # setlist_to_clip_tracks() result, for the Live hand-off
+        self.deck_a_bpm = None     # Deck A track BPM — fallback for the centre SET BPM dial
         data = Path(os.getenv('LOCALAPPDATA', str(Path.home()/'.local/share'))) / 'MixCraftDJStudio'
         self.journal = Journal(data/'sessions'/f'{time.time_ns()}.jsonl')
         root = QWidget()
@@ -572,6 +581,17 @@ class Window(QMainWindow):
         self.meter.setRange(0,100)
         self.meter.setTextVisible(False)
         mix.addWidget(self.meter)
+        # One SET BPM dial for the whole set (pass 5, user direction
+        # 2026-11-26): both decks run at the fixed set BPM, so the
+        # jog-style dial moved here from the decks. Display only —
+        # refresh_set_bpm_dial() feeds it from the loaded set list,
+        # falling back to Deck A's track BPM.
+        set_bpm_label = QLabel('SET BPM / セットBPM')
+        set_bpm_label.setStyleSheet(SECTION_LABEL_QSS)
+        set_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mix.addWidget(set_bpm_label)
+        self.set_dial = JogDial(caption='SET BPM')
+        mix.addWidget(self.set_dial, 0, Qt.AlignmentFlag.AlignCenter)
         mix.addStretch()
         perf.addWidget(mixer, 2)
         perf.addWidget(self.decks[1], 5)
@@ -722,7 +742,9 @@ class Window(QMainWindow):
         deck.sub.setText(f'Key {track.key} ({track.camelot})' if track.key else '—')
         deck.bpm.setText(f'{track.bpm or "—"} BPM ≈')
         deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
-        deck.jog.set_bpm(track.bpm)
+        if index == 0:
+            self.deck_a_bpm = track.bpm
+            self.refresh_set_bpm_dial()
     def preview(self):
         if not all(d['track'] for d in self.engine.decks):
             self.status.setText('Load both decks first / 両デッキに音声を読み込んでください')
@@ -745,8 +767,20 @@ class Window(QMainWindow):
         self.setlist_data = data
         self.clip_tracks = setlist_to_clip_tracks(data)
         self.render_setlist()
+        self.refresh_set_bpm_dial()
         summary = display_summary(data)
         self.status.setText(f'セットリスト読込 / Setlist loaded: {Path(path).name} • {summary["track_count"]} 曲 • 合計 {summary["total_text"]} • クリップ変換 {len(self.clip_tracks)} 件を保持中')
+    def refresh_set_bpm_dial(self):
+        """Feed the centre SET BPM dial: the loaded set list's set
+        BPM wins (the set runs at that fixed tempo); without a set
+        list, fall back to Deck A's track BPM; with neither, the
+        dial shows its neutral placeholder."""
+        bpm = None
+        if self.setlist_data is not None:
+            bpm = display_summary(self.setlist_data)['set_bpm']
+        if bpm is None:
+            bpm = self.deck_a_bpm
+        self.set_dial.set_bpm(bpm)
     def render_setlist(self):
         while self.setlist_rows.count():
             item = self.setlist_rows.takeAt(0)
@@ -829,7 +863,6 @@ class Window(QMainWindow):
             elapsed = d['position']/RATE
             # rekordbox shows remaining time big, elapsed beside it.
             widget.clock.setText(f'-{clock(length-elapsed)}  {clock(elapsed)}')
-            if length > 0: widget.jog.set_fraction(elapsed/length)
         self.meter.setValue(int(self.engine.peak*100))
         self.meter.setToolTip(f'Limiter: {self.engine.overloads} / Audio status: {self.audio_status_count}')
         self.cross.setEnabled(self.engine.preview is None)
