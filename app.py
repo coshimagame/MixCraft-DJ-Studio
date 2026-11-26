@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import time
@@ -5,8 +6,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sounddevice as sd
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl
-from PySide6.QtGui import QColor, QPainter, QPen, QDesktopServices
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QDesktopServices
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
 from engine import Engine, Journal, RATE, load_track
 from audio_config import resolve_output
@@ -14,34 +15,37 @@ from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
 
 # ---------------------------------------------------------------------------
-# UI palette — rekordbox-style dark theme (first pass, 2026-11-26).
-# Values come from REKORDBOX_UI_ANALYSIS.md: layout/roles follow the
-# rekordbox PERFORMANCE screen (player panel over browser panel, deck 1
-# blue / deck 2 red accents, flat thin borders, near-black background).
-# Hex values are estimates observed from public screenshots (the analysis
-# doc says so too) — to be checked against the real thing on Windows.
-# The rugged amber-LCD identity is retired to one place only: the set
+# UI palette — rekordbox-style dark theme (second pass, 2026-11-26).
+# Ground truth is now the user's OWN rekordbox screenshot (PERFORMANCE,
+# 2Deck Horizontal): near-black background, hairline borders, blue
+# waveforms on both decks, grey jog rings with a blue inner line and a
+# huge BPM readout in the centre, dark pad cells, striped browser rows.
+# Where that screenshot and the earlier REKORDBOX_UI_ANALYSIS.md
+# estimates disagree (background warmth, panel tone, deck-2 waveform
+# colour), the screenshot wins. Features rekordbox has but MixCraft
+# does not (FX units, sampler, LINK, ratings...) are omitted, not faked.
+# The rugged amber-LCD identity survives in one place only: the set
 # list's "queued" state colour, which is a fixed user decision.
 # ---------------------------------------------------------------------------
 THEME = {
-    'bg': '#101215',           # window background (near-black, blue-grey cast)
-    'panel': '#1b1e23',        # deck / mixer / browser panel surface
-    'panel_hi': '#262a31',     # raised surface (inputs, slider grooves)
-    'border': '#33373e',       # flat thin borders
-    'border_hi': '#454b54',
-    'text': '#f2f3f5',
-    'text_sub': '#b9bdc4',
-    'text_mute': '#7c828b',
-    'deck_a': '#0e9bff',       # deck 1 blue family (estimate)
-    'deck_b': '#ff4a2d',       # deck 2 red family (estimate; seen orange-red)
-    'display_bg': '#0a0c0e',   # numeric readout glass
-    'wave_grid': '#232830',
+    'bg': '#0a0a0c',           # window background (near-black, neutral)
+    'panel': '#131418',        # deck / mixer / browser panel surface
+    'panel_hi': '#1d1f26',     # raised surface (inputs, slider grooves)
+    'border': '#23252b',       # hairline borders
+    'border_hi': '#33363f',
+    'text': '#edeef0',
+    'text_sub': '#9aa0a8',
+    'text_mute': '#6d7278',
+    'deck_a': '#0e9bff',       # deck 1 blue accent (his FX/SYNC blue)
+    'deck_b': '#ff4a2d',       # deck 2 red-orange accent (slider fills / chip only)
+    'display_bg': '#050506',   # numeric readout / waveform glass
+    'wave_grid': '#17191d',
 }
 COLOR_BG = THEME['bg']
 COLOR_PANEL = THEME['panel']
 COLOR_PANEL_HI = THEME['panel_hi']
 COLOR_BUTTON = THEME['panel_hi']
-COLOR_BUTTON_HOVER = '#31363e'
+COLOR_BUTTON_HOVER = '#262932'
 COLOR_BORDER = THEME['border']
 COLOR_BORDER_HI = THEME['border_hi']
 COLOR_TEXT = THEME['text']
@@ -50,8 +54,10 @@ COLOR_TEXT_MUTE = THEME['text_mute']
 COLOR_DECK_A = THEME['deck_a']   # Deck A accent (blue, rekordbox deck 1)
 COLOR_DECK_B = THEME['deck_b']   # Deck B accent (red, rekordbox deck 2)
 COLOR_DISPLAY_BG = THEME['display_bg']
-COLOR_DISPLAY_FG = '#f2f3f5'     # numeric readouts: white on dark glass
-COLOR_DISPLAY_DIM = '#9ba1a9'    # secondary readouts
+COLOR_DISPLAY_FG = '#edeef0'     # numeric readouts: white on dark glass
+COLOR_DISPLAY_DIM = '#9aa0a8'    # secondary readouts
+COLOR_WAVE_BLUE = '#2e9bff'      # waveform body (his rekordbox blue, both decks)
+COLOR_WAVE_LIGHT = '#7fc4ff'     # waveform inner / peak light
 COLOR_LCD_BG = COLOR_DISPLAY_BG
 COLOR_LCD_FG = '#ffb000'      # legacy name; now only the set-list queued amber
 COLOR_LCD_DIM = COLOR_DISPLAY_DIM
@@ -68,16 +74,16 @@ COLOR_WAVEFORM_MID = '#2ee66b'
 COLOR_WAVEFORM_HIGH = '#2e9bff'
 FONT_STACK = '"Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
 MONO_STACK = 'Consolas, "DejaVu Sans Mono", "Courier New", monospace'
-SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:11px;font-weight:700'
+SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:10px;font-weight:700'
 LCD_GRADIENT = ('qlineargradient(x1:0, y1:0, x2:0, y2:1, '
-                'stop:0 #11151a, stop:0.45 #0a0c0e, stop:1 #0c0e11)')
+                'stop:0 #0a0a0c, stop:0.45 #050506, stop:1 #070708)')
 
 def lcd_qss(size, bold=True, fg=None):
     """Dark-glass numeric readout style for display-only labels."""
     return (f'background:{LCD_GRADIENT};color:{fg or COLOR_DISPLAY_FG};'
             f'font-family:{MONO_STACK};font-size:{size}px;'
             f'font-weight:{700 if bold else 400};'
-            'border:1px solid #000000;border-radius:2px;padding:4px 10px')
+            f'border:1px solid {COLOR_BORDER};border-radius:2px;padding:4px 10px')
 
 class Result(QObject):
     ready = Signal(int, object, str)
@@ -89,28 +95,86 @@ class Waveform(QWidget):
         self.track = None
         self.position = 0
         self.color = color
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(104)
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(COLOR_WAVE_BG))
         p.setPen(QColor(COLOR_WAVE_GRID))
         for x in range(0, self.width(), 40): p.drawLine(x, 0, x, self.height())
         mid = self.height()/2
+        p.setPen(QColor(COLOR_BORDER))
         p.drawLine(0, int(mid), self.width(), int(mid))
         if self.track:
-            p.setPen(QPen(QColor(self.color), 1))
+            # rekordbox blue scheme: deep blue body, lighter core —
+            # the same on both decks, like the real thing.
+            body = QPen(QColor(self.color), 1)
+            core = QPen(QColor(COLOR_WAVE_LIGHT), 1)
             for i, peak in enumerate(self.track.peaks):
                 x = int(i*self.width()/len(self.track.peaks))
-                y = int(peak*(mid-10))
+                y = int(peak*(mid-8))
+                p.setPen(body)
                 p.drawLine(x, int(mid)-y, x, int(mid)+y)
+                inner = int(y*0.45)
+                p.setPen(core)
+                p.drawLine(x, int(mid)-inner, x, int(mid)+inner)
             x = int(self.position/max(1,len(self.track.audio))*self.width())
             p.setPen(QPen(QColor('#ffffff'), 2))
             p.drawLine(x, 0, x, self.height())
         else:
-            p.setPen(QColor(COLOR_LCD_DIM))
+            p.setPen(QColor(COLOR_TEXT_MUTE))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'DROP AUDIO HERE  /  音声ファイルをドロップ')
     def mousePressEvent(self, event):
         if self.track: self.seek.emit(event.position().x()/self.width())
+
+class JogDial(QWidget):
+    """Display-only circular BPM dial echoing the rekordbox jog ring:
+    grey ring, thin blue inner line, red position marker, huge BPM in
+    the centre with the pitch % and range under it. It shows state
+    only — MixCraft has no jog control, so it takes no input."""
+    def __init__(self):
+        super().__init__()
+        self.bpm = None
+        self.fraction = 0.0
+        self.setFixedSize(118, 118)
+    def set_bpm(self, bpm):
+        self.bpm = bpm
+        self.update()
+    def set_fraction(self, fraction):
+        self.fraction = fraction % 1.0
+        self.update()
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(5, 5, -5, -5)
+        p.setPen(QPen(QColor(COLOR_BORDER_HI), 3))
+        p.setBrush(QColor('#0b0b0d'))
+        p.drawEllipse(rect)
+        inner = rect.adjusted(8, 8, -8, -8)
+        p.setPen(QPen(QColor(COLOR_WAVE_BLUE), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(inner)
+        cx, cy = rect.center().x(), rect.center().y()
+        radius = rect.width()/2 - 3
+        angle = -math.pi/2 + self.fraction*2*math.pi
+        mx, my = cx + radius*math.cos(angle), cy + radius*math.sin(angle)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(COLOR_WAVEFORM_LOW))
+        p.drawEllipse(int(mx)-3, int(my)-3, 6, 6)
+        bpm_text = f'{self.bpm:.2f}' if self.bpm else '--.--'
+        p.setPen(QColor(COLOR_TEXT))
+        mono = QFont()
+        mono.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New', 'monospace'])
+        mono.setPointSize(19)
+        mono.setBold(True)
+        p.setFont(mono)
+        p.drawText(inner.adjusted(0, -16, 0, 0), Qt.AlignmentFlag.AlignCenter, bpm_text)
+        mono.setPointSize(9)
+        mono.setBold(False)
+        p.setFont(mono)
+        p.setPen(QColor(COLOR_TEXT_SUB))
+        p.drawText(inner.adjusted(0, 22, 0, 0), Qt.AlignmentFlag.AlignCenter, '0.0%')
+        p.setPen(QColor(COLOR_METER))
+        p.drawText(inner.adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignCenter, '±6')
 
 class Deck(QFrame):
     def __init__(self, window, index):
@@ -124,25 +188,37 @@ class Deck(QFrame):
                       f'QSlider::sub-page:horizontal {{background:{color};border-radius:2px}}'
                       f'QSlider::handle:horizontal {{width:14px;height:24px;margin:-9px 0;background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8);border:2px solid #000000;border-radius:2px}}')
         self.slider_qss = slider_qss
+        # Deck info strip, rekordbox-style: small deck chip, big title
+        # with a sub line under it, then BPM and time readouts right.
         top = QHBoxLayout()
         label = QLabel('DECK '+('A' if index == 0 else 'B'))
-        label.setStyleSheet(f'color:{color};background:{COLOR_PANEL_HI};font-size:16px;font-weight:800;padding:5px 12px 5px 8px;border:1px solid {COLOR_BORDER};border-left:8px solid {color};border-radius:2px')
+        label.setStyleSheet(f'color:{color};background:{COLOR_PANEL_HI};font-size:12px;font-weight:800;padding:4px 8px;border:1px solid {COLOR_BORDER};border-left:6px solid {color};border-radius:2px')
         top.addWidget(label)
-        top.addStretch()
-        self.bpm = QLabel('— BPM')
-        self.bpm.setStyleSheet(lcd_qss(26))
-        top.addWidget(self.bpm)
-        lay.addLayout(top)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
         self.name = QLabel('No track loaded / 未読込')
-        self.name.setStyleSheet(lcd_qss(12, bold=False, fg=COLOR_DISPLAY_DIM))
+        self.name.setStyleSheet(f'color:{COLOR_TEXT};font-size:16px;font-weight:700')
         self.name.setWordWrap(True)
-        lay.addWidget(self.name)
-        self.wave = Waveform(color)
+        title_box.addWidget(self.name)
+        self.sub = QLabel('—')
+        self.sub.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-size:11px')
+        title_box.addWidget(self.sub)
+        top.addLayout(title_box, 1)
+        # Readouts stacked on the right so the title keeps its width
+        # (side-by-side, the filename wrapped to three lines).
+        readouts = QVBoxLayout()
+        readouts.setSpacing(3)
+        self.bpm = QLabel('— BPM')
+        self.bpm.setStyleSheet(lcd_qss(20))
+        readouts.addWidget(self.bpm)
+        self.clock = QLabel('-00:00.0  00:00.0')
+        self.clock.setStyleSheet(lcd_qss(13))
+        readouts.addWidget(self.clock)
+        top.addLayout(readouts)
+        lay.addLayout(top)
+        self.wave = Waveform(COLOR_WAVE_BLUE)
         self.wave.seek.connect(lambda x: window.engine.command('seek', index, int(x*len(self.wave.track.audio))))
         lay.addWidget(self.wave)
-        self.clock = QLabel('00:00 / 00:00')
-        self.clock.setStyleSheet(lcd_qss(15))
-        lay.addWidget(self.clock)
         row = QHBoxLayout()
         self.load = QPushButton('Load / 読込')
         self.load.clicked.connect(self.choose)
@@ -182,15 +258,13 @@ class Deck(QFrame):
             self.controls[action] = s
             control_row.addWidget(s)
             lay.addLayout(control_row)
-        # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC
-        row2 = QHBoxLayout()
+        # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC — laid out as
+        # a dark performance-pad grid (3x3) beside the jog-style dial,
+        # like the rekordbox pad + jog block. Same buttons, same wiring.
         cue_set = QPushButton('Cue Set'); cue_set.clicked.connect(lambda: window.engine.command('cue_set', index))
         cue_jump = QPushButton('Cue'); cue_jump.clicked.connect(lambda: window.engine.command('cue_jump', index))
         hot1 = QPushButton('Hot 1'); hot1.clicked.connect(lambda: window.engine.command('hotcue_jump', index, 1))
         hot1s = QPushButton('Hot1 Set'); hot1s.clicked.connect(lambda: window.engine.command('hotcue_set', index, 1))
-        for b in [cue_set, cue_jump, hot1s, hot1]: row2.addWidget(b)
-        lay.addLayout(row2)
-        row3 = QHBoxLayout()
         loop_in = QPushButton('Loop In'); loop_in.clicked.connect(lambda: window.engine.command('loop_in', index))
         loop_out = QPushButton('Loop Out'); loop_out.clicked.connect(lambda: window.engine.command('loop_out', index))
         loop_off = QPushButton('Loop Exit'); loop_off.clicked.connect(lambda: window.engine.command('loop_exit', index))
@@ -201,8 +275,18 @@ class Deck(QFrame):
         self.sync = sync
         sync.setToolTip('Tempo match only / テンポのみ一致。音程も変わります。ビート位相同期なし。')
         sync.toggled.connect(lambda on, i=index: window.engine.command('sync', i, on))
-        for b in [loop_in, loop_out, loop_off, quant, sync]: row3.addWidget(b)
-        lay.addLayout(row3)
+        perf_row = QHBoxLayout()
+        pads = QGridLayout()
+        pads.setSpacing(5)
+        for i, button in enumerate([cue_set, cue_jump, hot1,
+                                    hot1s, loop_in, loop_out,
+                                    loop_off, quant, sync]):
+            button.setProperty('pad', True)
+            pads.addWidget(button, i // 3, i % 3)
+        perf_row.addLayout(pads, 1)
+        self.jog = JogDial()
+        perf_row.addWidget(self.jog)
+        lay.addLayout(perf_row)
     def reset(self):
         self.window.engine.command('play', self.index, False)
         self.window.engine.command('seek', self.index, 0)
@@ -241,18 +325,23 @@ class Window(QMainWindow):
         scroll.setWidget(root)
         self.setCentralWidget(scroll)
         layout = QVBoxLayout(root)
-        header = QHBoxLayout()
+        # Slim dark header bar (rekordbox toolbar style) — product name
+        # and version stay, the big light title block is gone.
+        header_bar = QFrame()
+        header_bar.setObjectName('headerbar')
+        header = QHBoxLayout(header_bar)
+        header.setContentsMargins(10, 5, 10, 5)
         title = QLabel(f'MIXCRAFT  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
-        title.setStyleSheet('font-size:26px;font-weight:800')
+        title.setStyleSheet('font-size:15px;font-weight:800')
         header.addWidget(title)
+        mode_label = QLabel('DJ MODE  •  2 DECK PERFORMANCE  •  PHASE 2 / 試遊版')
+        mode_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px;font-weight:600')
+        header.addWidget(mode_label)
         header.addStretch()
         brand = QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial')
-        brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:12px')
+        brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:11px')
         header.addWidget(brand)
-        layout.addLayout(header)
-        mode_label = QLabel('DJ MODE     •     2 DECK PERFORMANCE                                        PHASE 2 / 試遊版')
-        mode_label.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-size:12px;font-weight:600')
-        layout.addWidget(mode_label)
+        layout.addWidget(header_bar)
         # Performance area (rekordbox layout): Deck A | centre mixer
         # column | Deck B, roughly 5:2:5 like the rekordbox player panel.
         self.decks = [Deck(self,i) for i in range(2)]
@@ -317,10 +406,31 @@ class Window(QMainWindow):
         setlist_head.addWidget(self.setlist_open)
         setlist_layout.addLayout(setlist_head)
         self.setlist_summary = QLabel('未読込 — スマホの下ごしらえページで書き出した JSON を開いてください')
-        self.setlist_summary.setStyleSheet(lcd_qss(13))
+        self.setlist_summary.setStyleSheet(
+            f'background:{COLOR_PANEL_HI};color:{COLOR_TEXT};font-family:{MONO_STACK};'
+            f'font-size:12px;border:1px solid {COLOR_BORDER};border-radius:2px;padding:6px 10px')
         self.setlist_summary.setWordWrap(True)
         setlist_layout.addWidget(self.setlist_summary)
+        # Browser-style column header for the track rows below.
+        columns = QHBoxLayout()
+        columns.setContentsMargins(6, 2, 6, 2)
+        columns.addSpacing(6 + 34)
+        head_title = QLabel('TITLE / ARTIST')
+        head_title.setStyleSheet(SECTION_LABEL_QSS)
+        columns.addWidget(head_title, 1)
+        for text, width, align in [('BPM', 64, Qt.AlignmentFlag.AlignRight),
+                                   ('KEY', 56, Qt.AlignmentFlag.AlignCenter),
+                                   ('TIME', 52, Qt.AlignmentFlag.AlignRight),
+                                   ('STATUS', 84, Qt.AlignmentFlag.AlignCenter)]:
+            head = QLabel(text)
+            head.setStyleSheet(SECTION_LABEL_QSS)
+            head.setFixedWidth(width)
+            head.setAlignment(align)
+            columns.addWidget(head)
+        columns.addSpacing(70)
+        setlist_layout.addLayout(columns)
         self.setlist_rows = QVBoxLayout()
+        self.setlist_rows.setSpacing(0)
         setlist_layout.addLayout(self.setlist_rows)
         # Added to the window layout further down: the set list is the
         # browser panel, so it sits at the bottom (rekordbox layout).
@@ -423,10 +533,10 @@ class Window(QMainWindow):
         self.engine.command('load',index,track)
         deck.wave.track = track
         deck.name.setText(Path(track.path).name)
+        deck.sub.setText(f'Key {track.key} ({track.camelot})' if track.key else '—')
         deck.bpm.setText(f'{track.bpm or "—"} BPM ≈')
         deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
-        key_text = f' • Key {track.key} ({track.camelot})' if track.key else ''
-        deck.name.setText(Path(track.path).name + key_text)
+        deck.jog.set_bpm(track.bpm)
     def preview(self):
         if not all(d['track'] for d in self.engine.decks):
             self.status.setText('Load both decks first / 両デッキに音声を読み込んでください')
@@ -463,15 +573,16 @@ class Window(QMainWindow):
             f'SET BPM {bpm_text}  •  {summary["track_count"]} TRACKS  •  TOTAL {summary["total_text"]}  •  {summary["state_text"]}')
         colors = {'played': COLOR_STATE_PLAYED, 'playing': COLOR_STATE_PLAYING,
                   'next': COLOR_STATE_NEXT, 'queued': COLOR_STATE_QUEUED}
-        for row in display_rows(self.setlist_data):
+        for row_index, row in enumerate(display_rows(self.setlist_data)):
             color = colors[row['status']]
             line = QHBoxLayout()
+            line.setContentsMargins(6, 4, 6, 4)
             bar = QFrame()
             bar.setFixedWidth(6)
             bar.setStyleSheet(f'background:{color};border:none')
             line.addWidget(bar)
             number = QLabel(f'{row["number"]:02d}')
-            number.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:15px;font-weight:700')
+            number.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:14px;font-weight:700')
             number.setFixedWidth(34)
             line.addWidget(number)
             title_text = row['title'] or '(無題)'
@@ -479,23 +590,41 @@ class Window(QMainWindow):
             title = QLabel(title_text)
             title.setStyleSheet(f'color:{COLOR_STATE_PLAYED if row["status"]=="played" else COLOR_TEXT};font-size:13px;font-weight:600')
             title.setWordWrap(True)
-            line.addWidget(title,1)
-            meta_parts = []
-            if row['bpm'] is not None: meta_parts.append(f'{row["bpm"]:g} BPM')
-            if row['key']: meta_parts.append(f'Key {row["key"]}')
-            meta_parts.append(row['duration_text'])
-            meta = QLabel('  •  '.join(meta_parts))
-            meta.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-family:{MONO_STACK};font-size:12px')
-            line.addWidget(meta)
+            line.addWidget(title, 1)
+            meta_qss = f'color:{COLOR_TEXT_SUB};font-family:{MONO_STACK};font-size:12px'
+            bpm = QLabel(f'{row["bpm"]:g}' if row['bpm'] is not None else '—')
+            bpm.setStyleSheet(meta_qss)
+            bpm.setFixedWidth(64)
+            bpm.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            line.addWidget(bpm)
+            key = QLabel(row['key'] or '—')
+            key.setStyleSheet(meta_qss)
+            key.setFixedWidth(56)
+            key.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            line.addWidget(key)
+            duration = QLabel(row['duration_text'])
+            duration.setStyleSheet(meta_qss)
+            duration.setFixedWidth(52)
+            duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            line.addWidget(duration)
             badge = QLabel(row['status_label'])
-            badge.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:11px;font-weight:700;border:1px solid {color};border-radius:2px;padding:2px 6px')
+            badge.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:11px;font-weight:700')
+            badge.setFixedWidth(84)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             line.addWidget(badge)
+            link_slot = QWidget()
+            link_slot.setFixedWidth(70)
             if row['link_url']:
+                link_layout = QHBoxLayout(link_slot)
+                link_layout.setContentsMargins(0, 0, 0, 0)
                 link_button = QPushButton('試聴 ↗')
                 link_button.setToolTip(row['link_url'])
                 link_button.clicked.connect(lambda _checked=False, url=row['link_url']: QDesktopServices.openUrl(QUrl(url)))
-                line.addWidget(link_button)
-            container = QWidget()
+                link_layout.addWidget(link_button)
+            line.addWidget(link_slot)
+            # Striped browser rows, like his collection table.
+            container = QFrame()
+            container.setObjectName(f'setrow{row_index % 2}')
             container.setLayout(line)
             self.setlist_rows.addWidget(container)
     def tick(self):
@@ -508,8 +637,13 @@ class Window(QMainWindow):
             widget.wave.update()
             widget.play.setText('Ⅱ Pause / 一時停止' if d['playing'] else '▶ Play / 再生')
             length = len(d['track'].audio)/RATE if d['track'] else 0
-            def clock(s): return f'{int(s)//60:02}:{int(s)%60:02}'
-            widget.clock.setText(f'{clock(d["position"]/RATE)} / {clock(length)}')
+            def clock(s):
+                s = max(0.0, s)
+                return f'{int(s)//60:02}:{s%60:04.1f}'
+            elapsed = d['position']/RATE
+            # rekordbox shows remaining time big, elapsed beside it.
+            widget.clock.setText(f'-{clock(length-elapsed)}  {clock(elapsed)}')
+            if length > 0: widget.jog.set_fraction(elapsed/length)
         self.meter.setValue(int(self.engine.peak*100))
         self.meter.setToolTip(f'Limiter: {self.engine.overloads} / Audio status: {self.audio_status_count}')
         self.cross.setEnabled(self.engine.preview is None)
@@ -523,33 +657,45 @@ class Window(QMainWindow):
         event.accept()
 
 STYLE = (
+    # Global dark theme — every stock widget is covered so nothing
+    # renders in the light system palette (the first pass missed the
+    # app-level stylesheet in some paths; this is the single source).
     f'QWidget {{ background:{COLOR_BG}; color:{COLOR_TEXT}; font-family:{FONT_STACK}; font-size:13px; }}'
     f'QMainWindow {{ background:{COLOR_BG}; }}'
     f'QScrollArea {{ background:{COLOR_BG}; border:none; }}'
     f'QLabel {{ background:transparent; }}'
-    f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e2126, stop:1 #17191d); border:1px solid {COLOR_BORDER_HI}; border-radius:3px; padding:12px; }}'
-    f'QFrame#mixer {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e2126, stop:1 #17191d); border:1px solid {COLOR_BORDER_HI}; border-radius:3px; padding:10px 12px; }}'
-    f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e2126, stop:1 #17191d); border:1px solid {COLOR_BORDER_HI}; border-radius:3px; padding:10px 12px; }}'
-    f'QPushButton {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2a2e35, stop:1 #22252b); border:1px solid {COLOR_BORDER_HI}; border-radius:3px; padding:8px 10px; font-weight:600; }}'
-    f'QPushButton:hover {{ background:{COLOR_BUTTON_HOVER}; border-color:#5c636e; }}'
-    f'QPushButton:pressed {{ background:#14161a; }}'
-    f'QPushButton:disabled {{ background:#1b1c1e; border-color:{COLOR_BORDER}; color:#5d5d68; }}'
-    f'QPushButton:checked {{ background:#0d2f4d; border-color:{COLOR_DECK_A}; color:{COLOR_DECK_A}; font-weight:800; }}'
-    f'QComboBox {{ background:{COLOR_PANEL_HI}; border:1px solid {COLOR_BORDER_HI}; border-radius:3px; padding:7px 9px; }}'
-    f'QComboBox:hover {{ border-color:#5c636e; }}'
-    f'QComboBox QAbstractItemView {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; selection-background-color:{COLOR_BUTTON_HOVER}; }}'
-    f'QSlider::groove:horizontal {{ height:8px; background:#0c0d0e; border:1px solid {COLOR_BORDER}; border-radius:2px; }}'
-    f'QSlider::sub-page:horizontal {{ background:{COLOR_BORDER_HI}; border-radius:2px; }}'
+    f'QFrame#headerbar {{ background:#101114; border:1px solid {COLOR_BORDER}; border-radius:3px; }}'
+    f'QFrame#deck {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:3px; padding:10px; }}'
+    f'QFrame#mixer {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:3px; padding:10px 12px; }}'
+    f'QFrame#setlist {{ background:{COLOR_PANEL}; border:1px solid {COLOR_BORDER}; border-radius:3px; padding:10px 12px; }}'
+    f'QFrame#setrow0 {{ background:#101114; border:none; border-bottom:1px solid {COLOR_BORDER}; }}'
+    f'QFrame#setrow1 {{ background:#16171c; border:none; border-bottom:1px solid {COLOR_BORDER}; }}'
+    f'QPushButton {{ background:#17181d; border:1px solid #2a2c33; border-radius:3px; padding:7px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
+    f'QPushButton:hover {{ background:{COLOR_BUTTON_HOVER}; border-color:#3a3d46; }}'
+    f'QPushButton:pressed {{ background:#0c0c0f; }}'
+    f'QPushButton:disabled {{ background:#121317; border-color:#1d1f24; color:#565b63; }}'
+    f'QPushButton:checked {{ background:#0a2e4d; border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; font-weight:800; }}'
+    # Performance pads: near-black cells, hairline borders, small caps.
+    f'QPushButton[pad="true"] {{ background:#0e0f12; border:1px solid #26282f; border-radius:2px; padding:9px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
+    f'QPushButton[pad="true"]:hover {{ background:#14151a; border-color:#3f434e; }}'
+    f'QPushButton[pad="true"]:pressed {{ background:#060607; }}'
+    f'QPushButton[pad="true"]:checked {{ background:#0a2e4d; border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; }}'
+    f'QComboBox {{ background:#17181d; border:1px solid #2a2c33; border-radius:3px; padding:6px 9px; color:{COLOR_TEXT}; }}'
+    f'QComboBox:hover {{ border-color:#3a3d46; }}'
+    f'QComboBox::drop-down {{ border:none; width:18px; }}'
+    f'QComboBox QAbstractItemView {{ background:#17181d; color:{COLOR_TEXT}; border:1px solid #2a2c33; selection-background-color:#0a2e4d; }}'
+    f'QSlider::groove:horizontal {{ height:8px; background:#060607; border:1px solid {COLOR_BORDER}; border-radius:2px; }}'
+    f'QSlider::sub-page:horizontal {{ background:#3a3d46; border-radius:2px; }}'
     f'QSlider::handle:horizontal {{ width:14px; height:24px; margin:-9px 0; background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8); border:2px solid #000000; border-radius:2px; }}'
-    f'QProgressBar {{ background:{COLOR_DISPLAY_BG}; border:1px solid #000000; border-radius:2px; min-height:14px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; }}'
+    f'QProgressBar {{ background:{COLOR_DISPLAY_BG}; border:1px solid {COLOR_BORDER}; border-radius:2px; min-height:12px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; }}'
     f'QProgressBar::chunk {{ background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1fa34a, stop:0.75 #2ee66b, stop:0.92 #ffc233, stop:1 #ff3838); border-radius:1px; }}'
-    f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid #000000; border-radius:2px; padding:8px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
+    f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid {COLOR_BORDER}; border-radius:2px; padding:8px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
     f'QToolTip {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; padding:4px 6px; }}'
     f'QScrollBar:vertical {{ background:{COLOR_BG}; width:12px; margin:0; }}'
-    f'QScrollBar::handle:vertical {{ background:#3a3d40; border-radius:2px; min-height:30px; }}'
+    f'QScrollBar::handle:vertical {{ background:#2c2f36; border-radius:2px; min-height:30px; }}'
     f'QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}'
     f'QScrollBar:horizontal {{ background:{COLOR_BG}; height:12px; margin:0; }}'
-    f'QScrollBar::handle:horizontal {{ background:#3a3d40; border-radius:2px; min-width:30px; }}'
+    f'QScrollBar::handle:horizontal {{ background:#2c2f36; border-radius:2px; min-width:30px; }}'
     f'QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}'
 )
 
