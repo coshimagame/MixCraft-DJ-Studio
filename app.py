@@ -366,7 +366,13 @@ class Deck(QFrame):
         self.play.clicked.connect(lambda: window.engine.command('play', index, not window.engine.decks[index]['playing']))
         self.cue = QPushButton('■ Reset / 先頭')
         self.cue.clicked.connect(self.reset)
-        for button in [self.load, self.play, self.cue]: row.addWidget(button)
+        # Mirror symmetry (user direction, 2026-11-26): Deck B's
+        # transport row mirrors Deck A's about the window centre —
+        # Reset innermost, Load at the outer edge — like the PLAY/CUE
+        # placement on dual-deck gear. Same buttons, same wiring.
+        for button in ([self.load, self.play, self.cue] if index == 0
+                        else [self.cue, self.play, self.load]):
+            row.addWidget(button)
         lay.addLayout(row)
         # Channel strip (user direction, 2026-11-26): the channel
         # volume becomes a VERTICAL fader and GAIN / EQ / FILTER become
@@ -390,7 +396,7 @@ class Deck(QFrame):
         self.volume.setFixedHeight(312)
         self.volume.valueChanged.connect(lambda v: window.engine.command('volume', index, v/100))
         fader_box.addWidget(self.volume)
-        strip.addLayout(fader_box)
+        # (Added to `strip` at the end, in mirror order — see below.)
         # Phase 2: GAIN / 3-band EQ / FILTER as knobs (centre = neutral)
         knob_column = QVBoxLayout()
         knob_column.setSpacing(2)
@@ -407,7 +413,7 @@ class Deck(QFrame):
             self.controls[action] = knob
             knob_column.addWidget(knob)
         knob_column.addStretch()
-        strip.addLayout(knob_column)
+        # (Added to `strip` at the end, in mirror order — see below.)
         # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC — laid out as
         # a dark performance-pad grid (3x3) beside the jog-style dial,
         # like the rekordbox pad + jog block. Same buttons, same wiring.
@@ -433,16 +439,39 @@ class Deck(QFrame):
                                     loop_off, quant, sync]):
             button.setProperty('pad', True)
             pads.addWidget(button, i // 3, i % 3)
-        perf_row.addLayout(pads, 1)
         self.jog = JogDial()
-        perf_row.addWidget(self.jog)
+        # On Deck A the jog is the innermost element (right side, next
+        # to the centre mixer); on Deck B it mirrors to the left side
+        # of the pad grid, so both jogs face the centre. The pad grid's
+        # internal order stays identical on both decks, so pad
+        # positions are consistent deck to deck (as on real gear).
+        if index == 0:
+            perf_row.addLayout(pads, 1)
+            perf_row.addWidget(self.jog)
+        else:
+            perf_row.addWidget(self.jog)
+            perf_row.addLayout(pads, 1)
         # Pads + jog sit alongside the fader / knob strip, centred
         # vertically; the strip's height is set by the knob column.
         perf_box = QVBoxLayout()
         perf_box.addStretch()
         perf_box.addLayout(perf_row)
         perf_box.addStretch()
-        strip.addLayout(perf_box, 1)
+        # Mirror symmetry (user direction, 2026-11-26): Deck B's whole
+        # channel strip is Deck A's mirror image about the centre
+        # mixer column — [jog | pads | knobs | fader] — so the faders
+        # sit at the outer edges and the knob columns flank the pads,
+        # like a hardware mixer. Layout only: same widgets, values
+        # and engine wiring on both decks; the knob column's vertical
+        # order (GAIN top -> FILTER bottom) does not mirror.
+        if index == 0:
+            strip.addLayout(fader_box)
+            strip.addLayout(knob_column)
+            strip.addLayout(perf_box, 1)
+        else:
+            strip.addLayout(perf_box, 1)
+            strip.addLayout(knob_column)
+            strip.addLayout(fader_box)
         lay.addLayout(strip)
     def reset(self):
         self.window.engine.command('play', self.index, False)
