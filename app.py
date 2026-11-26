@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sounddevice as sd
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QDesktopServices
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
@@ -176,6 +176,139 @@ class JogDial(QWidget):
         p.setPen(QColor(COLOR_METER))
         p.drawText(inner.adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignCenter, '±6')
 
+class Knob(QWidget):
+    """Rotary mixer knob (user direction, 2026-11-26: the EQ / GAIN /
+    FILTER parameters read far better as knobs like a normal DJ mixer
+    than as horizontal sliders). It keeps the exact contract of the
+    QSlider it replaces — integer value in a set range and a
+    valueChanged(int) signal — so the Deck's engine wiring (commands,
+    ranges, defaults) is untouched; only the widget changed.
+    Interaction: vertical mouse drag, mouse wheel, arrow keys.
+    Bipolar controls (EQ bands, FILTER) draw the value arc from the
+    centre detent and snap softly onto it; GAIN is unipolar and its
+    arc runs from minimum."""
+    valueChanged = Signal(int)
+    SWEEP = 135.0    # pointer travel: ±135° from top (270° total)
+    DETENT = 3       # ±value units around centre that snap (bipolar)
+    DIAMETER = 44
+
+    def __init__(self, label, color, bipolar=True):
+        super().__init__()
+        self.label = label
+        self.color = QColor(color)
+        self.bipolar = bipolar
+        self._min, self._max, self._value = 0, 100, 0
+        self._drag_start = None
+        self.setFixedSize(72, 66)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    # --- QSlider-compatible subset (Deck wiring and smoke.py) ---
+    def setRange(self, minimum, maximum):
+        self._min, self._max = minimum, maximum
+        self.setValue(self._value)
+    def setValue(self, value):
+        value = max(self._min, min(self._max, int(round(value))))
+        if value != self._value:
+            self._value = value
+            self.valueChanged.emit(value)
+            self.update()
+    def value(self):
+        return self._value
+
+    def _fraction(self):
+        span = self._max - self._min
+        return (self._value - self._min) / span if span else 0.0
+    def _centre(self):
+        return (self._min + self._max) / 2
+    def _angle(self, fraction):
+        """Pointer angle in degrees, clockwise from 12 o'clock."""
+        return -self.SWEEP + fraction * 2 * self.SWEEP
+    @staticmethod
+    def _point(cx, cy, radius, angle_deg):
+        a = math.radians(angle_deg)
+        return cx + radius * math.sin(a), cy - radius * math.cos(a)
+    def _snapped(self, value):
+        if self.bipolar and abs(value - self._centre()) <= self.DETENT:
+            return self._centre()
+        return value
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = (event.position().y(), self._value)
+            self.setFocus()
+            event.accept()
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None:
+            start_y, start_value = self._drag_start
+            span = self._max - self._min
+            dragged = start_value + (start_y - event.position().y()) * span / 150.0
+            self.setValue(self._snapped(dragged))
+            event.accept()
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        event.accept()
+    def wheelEvent(self, event):
+        steps = event.angleDelta().y() / 120.0
+        if steps:
+            self.setValue(self._snapped(self._value + steps * 4))
+            event.accept()
+    def keyPressEvent(self, event):
+        step = {Qt.Key.Key_Up: 2, Qt.Key.Key_Right: 2,
+                Qt.Key.Key_Down: -2, Qt.Key.Key_Left: -2}.get(event.key())
+        if step is None:
+            super().keyPressEvent(event)
+        else:
+            self.setValue(self._snapped(self._value + step))
+            event.accept()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = self.width() / 2
+        cy = 8 + self.DIAMETER / 2
+        radius = self.DIAMETER / 2
+        arc_r = radius + 5
+        def arc(f_from, f_to, pen):
+            p.setPen(pen)
+            steps = max(2, int(abs(f_to - f_from) * 90))
+            pts = [self._point(cx, cy, arc_r, self._angle(f_from + (f_to - f_from) * i / steps))
+                   for i in range(steps + 1)]
+            for a, b in zip(pts, pts[1:]):
+                p.drawLine(int(a[0]), int(a[1]), int(b[0]), int(b[1]))
+        # Full-sweep track, then the value arc in the deck colour.
+        arc(0.0, 1.0, QPen(QColor(COLOR_BORDER_HI), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        fraction = self._fraction()
+        arc(0.5 if self.bipolar else 0.0, fraction,
+            QPen(self.color, 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        # Min / max end ticks, plus a bright centre tick for bipolar.
+        p.setPen(QPen(QColor(COLOR_TEXT_MUTE), 2))
+        for frac in (0.0, 1.0):
+            x1, y1 = self._point(cx, cy, arc_r - 4, self._angle(frac))
+            x2, y2 = self._point(cx, cy, arc_r + 4, self._angle(frac))
+            p.drawLine(int(x1), int(y1), int(x2), int(y2))
+        if self.bipolar:
+            x1, y1 = self._point(cx, cy, arc_r - 5, 0.0)
+            x2, y2 = self._point(cx, cy, arc_r + 5, 0.0)
+            p.setPen(QPen(QColor(COLOR_TEXT), 2))
+            p.drawLine(int(x1), int(y1), int(x2), int(y2))
+        # Knob body and its white indicator line.
+        p.setPen(QPen(QColor(COLOR_BORDER_HI), 1.5))
+        p.setBrush(QColor('#17181c'))
+        p.drawEllipse(QRectF(cx - radius, cy - radius, self.DIAMETER, self.DIAMETER))
+        angle = self._angle(fraction)
+        x1, y1 = self._point(cx, cy, radius * 0.42, angle)
+        x2, y2 = self._point(cx, cy, radius * 0.88, angle)
+        p.setPen(QPen(QColor(COLOR_TEXT), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(int(x1), int(y1), int(x2), int(y2))
+        # Label beneath the knob.
+        mono = QFont()
+        mono.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New', 'monospace'])
+        mono.setPointSize(8)
+        mono.setBold(True)
+        p.setFont(mono)
+        p.setPen(QColor(COLOR_TEXT_MUTE))
+        p.drawText(QRectF(0, 54, self.width(), 12), Qt.AlignmentFlag.AlignCenter, self.label)
+
 class Deck(QFrame):
     def __init__(self, window, index):
         super().__init__()
@@ -184,10 +317,17 @@ class Deck(QFrame):
         self.setObjectName('deck')
         lay = QVBoxLayout(self)
         color = COLOR_DECK_A if index == 0 else COLOR_DECK_B
-        slider_qss = (f'QSlider::groove:horizontal {{height:8px;background:#0c0d0e;border:1px solid {COLOR_BORDER};border-radius:2px}}'
-                      f'QSlider::sub-page:horizontal {{background:{color};border-radius:2px}}'
-                      f'QSlider::handle:horizontal {{width:14px;height:24px;margin:-9px 0;background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8);border:2px solid #000000;border-radius:2px}}')
-        self.slider_qss = slider_qss
+        # Channel fader styling (vertical, mixer-strip style): for a
+        # vertical slider Qt paints the region above the handle (toward
+        # maximum) as the sub-page, so the deck colour goes on the
+        # add-page — the fill then rises from the bottom up to the
+        # handle, like a level. The handle is a wide bar with a centre
+        # grip line.
+        fader_qss = (f'QSlider::groove:vertical {{width:8px;background:#0c0d0e;border:1px solid {COLOR_BORDER};border-radius:2px}}'
+                     f'QSlider::sub-page:vertical {{background:#0c0d0e;border-radius:2px}}'
+                     f'QSlider::add-page:vertical {{background:{color};border-radius:2px}}'
+                     f'QSlider::handle:vertical {{height:16px;width:30px;margin:0 -12px;background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8);border:2px solid #000000;border-radius:2px}}')
+        self.fader_qss = fader_qss
         # Deck info strip, rekordbox-style: small deck chip, big title
         # with a sub line under it, then BPM and time readouts right.
         top = QHBoxLayout()
@@ -228,36 +368,46 @@ class Deck(QFrame):
         self.cue.clicked.connect(self.reset)
         for button in [self.load, self.play, self.cue]: row.addWidget(button)
         lay.addLayout(row)
-        volume_label = QLabel('CHANNEL VOLUME')
+        # Channel strip (user direction, 2026-11-26): the channel
+        # volume becomes a VERTICAL fader and GAIN / EQ / FILTER become
+        # rotary KNOBS in a column beside the pad grid and jog dial,
+        # like a hardware mixer channel strip. Only the widgets and
+        # layout changed — the value domain (0-100), the defaults
+        # (volume 80, parameters 50 = neutral) and every engine command
+        # below are exactly what the horizontal sliders sent.
+        strip = QHBoxLayout()
+        strip.setSpacing(8)
+        fader_box = QVBoxLayout()
+        fader_box.setSpacing(4)
+        volume_label = QLabel('CHANNEL\nVOLUME')
         volume_label.setStyleSheet(SECTION_LABEL_QSS)
-        lay.addWidget(volume_label)
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setStyleSheet(slider_qss)
-        slider.setValue(80)
-        slider.setRange(0,100)
-        slider.setValue(80)
-        slider.valueChanged.connect(lambda v: window.engine.command('volume',index,v/100))
-        lay.addWidget(slider)
-        # Phase 2: GAIN / 3-band EQ / FILTER (centre = neutral)
+        volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fader_box.addWidget(volume_label)
+        self.volume = QSlider(Qt.Orientation.Vertical)
+        self.volume.setStyleSheet(fader_qss)
+        self.volume.setRange(0, 100)
+        self.volume.setValue(80)
+        self.volume.setFixedHeight(312)
+        self.volume.valueChanged.connect(lambda v: window.engine.command('volume', index, v/100))
+        fader_box.addWidget(self.volume)
+        strip.addLayout(fader_box)
+        # Phase 2: GAIN / 3-band EQ / FILTER as knobs (centre = neutral)
+        knob_column = QVBoxLayout()
+        knob_column.setSpacing(2)
         self.controls = {}
         for label, action, default in [('GAIN', 'gain', 50), ('EQ HIGH', 'eq_high', 50),
                                        ('EQ MID', 'eq_mid', 50), ('EQ LOW', 'eq_low', 50),
                                        ('FILTER', 'filter', 50)]:
-            control_row = QHBoxLayout()
-            control_label = QLabel(label)
-            control_label.setStyleSheet(SECTION_LABEL_QSS)
-            control_label.setFixedWidth(80)
-            control_row.addWidget(control_label)
-            s = QSlider(Qt.Orientation.Horizontal)
-            s.setStyleSheet(slider_qss)
-            s.setRange(0, 100); s.setValue(default)
+            knob = Knob(label, color, bipolar=(action != 'gain'))
+            knob.setRange(0, 100); knob.setValue(default)
             if action == 'gain':
-                s.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
+                knob.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
             else:
-                s.valueChanged.connect(lambda v, a=action, i=index: window.engine.command(a, i, v/100))
-            self.controls[action] = s
-            control_row.addWidget(s)
-            lay.addLayout(control_row)
+                knob.valueChanged.connect(lambda v, a=action, i=index: window.engine.command(a, i, v/100))
+            self.controls[action] = knob
+            knob_column.addWidget(knob)
+        knob_column.addStretch()
+        strip.addLayout(knob_column)
         # Phase 2: CUE / HOT CUE / LOOP / QUANTIZE / SYNC — laid out as
         # a dark performance-pad grid (3x3) beside the jog-style dial,
         # like the rekordbox pad + jog block. Same buttons, same wiring.
@@ -286,7 +436,14 @@ class Deck(QFrame):
         perf_row.addLayout(pads, 1)
         self.jog = JogDial()
         perf_row.addWidget(self.jog)
-        lay.addLayout(perf_row)
+        # Pads + jog sit alongside the fader / knob strip, centred
+        # vertically; the strip's height is set by the knob column.
+        perf_box = QVBoxLayout()
+        perf_box.addStretch()
+        perf_box.addLayout(perf_row)
+        perf_box.addStretch()
+        strip.addLayout(perf_box, 1)
+        lay.addLayout(strip)
     def reset(self):
         self.window.engine.command('play', self.index, False)
         self.window.engine.command('seek', self.index, 0)
