@@ -18,8 +18,9 @@ as unicode, never as bytes, against clip names coming from Live.
 
 The v1.6 browse-knob rules (selection cursor, standby-deck target,
 LOAD override, highlight plans) are mirrored identically too —
-including the caveat that the browse turn/push MIDI numbers are
-placeholders, not from the documented map (see ``_midi_map.py``).
+including the browse turn/push MIDI numbers, which are from
+AlphaTheta's official DDJ-RB MIDI message list — turn CC 64,
+push Note 65 on the browser channel (see ``_midi_map.py``).
 
 The full design rationale (conversion table, fixed-BPM rule, jog
 encoding assumption) lives in the root module's docstring — read it

@@ -38,13 +38,14 @@ no LED, so the on-screen highlight is the feedback), and pushing
 the knob fires the selected clip through the same fire_clip path
 as the pads.  LOAD 1/2 pin the browse target deck.  The adapter
 reports each deck's playing clip to the bridge on its display
-tick (note_deck_playing) so the standby rule can work.  CAVEAT:
-the browse turn/push MIDI numbers are placeholders — the repo's
-documented DDJ-RB map has no browse encoder message (see
-_midi_map.py).  To make the hardware probe painless, this adapter
-logs every UNMAPPED message on the browser channel once per
-(kind, number): if the placeholder numbers are wrong, turning /
-pushing the real knob prints its real numbers into Live's Log.txt.
+tick (note_deck_playing) so the standby rule can work.  The
+browse turn/push MIDI numbers are from AlphaTheta's official
+DDJ-RB MIDI message list (turn = CC 64 on the browser channel,
+difference-count; push = Note 65), confirmed 2026-11-26 — see
+_midi_map.py.  As a general safety net, this adapter also logs
+every UNMAPPED message on the browser channel once per
+(kind, number), so any browser control the profile does not use
+still shows up in Live's Log.txt instead of vanishing silently.
 
 Template assumptions (see SETUP.md): Track 1 = Deck A, Track 2 =
 Deck B; each deck track carries a Utility (TRIM), an EQ Three and an
@@ -126,7 +127,7 @@ class MixCraft(ControlSurface):
         # missing LOM property logs once instead of on every pad press
         self._edit_warned = set()
         # (kind, number) of unmapped browser-channel messages already
-        # logged — the browse-knob probe (see the module docstring)
+        # logged — the safety net (see the module docstring)
         self._unmapped_seen = set()
         self._view_warned = False
         self._tick = 0
@@ -220,13 +221,14 @@ class MixCraft(ControlSurface):
     def _note_unmapped(self, channel, kind, number, value):
         """Log unmapped browser-channel messages once per control.
 
-        The browse knob's real MIDI numbers are not in the repo's
-        documented map (the turn/push bindings are placeholders), so
-        this is the hardware probe: whatever the knob actually sends
-        shows up here, in Live's Log.txt, the first time it moves.
-        Other channels are not logged — their unmapped messages are
-        controls the profile deliberately leaves out, and the FX
-        channels would flood the log.
+        A general safety net: the browse knob's own numbers are
+        documented (official list — see _midi_map.py), but any
+        other browser-channel control this profile does not map
+        shows up here, in Live's Log.txt, the first time it moves,
+        instead of being dropped silently.  Other channels are not
+        logged — their unmapped messages are controls the profile
+        deliberately leaves out, and the FX channels would flood
+        the log.
         """
         if channel != BROWSER_CHANNEL:
             return

@@ -614,9 +614,8 @@ def test_browse_load_button_pins_the_target_deck():
 
 
 def test_unmapped_browser_channel_message_logs_once():
-    # The browse probe: an unknown control on the browser channel
-    # (e.g. the real BROWSE knob, if the placeholder numbers are
-    # wrong) identifies itself in the log — once, not per message.
+    # The safety net: an unknown control on the browser channel
+    # identifies itself in the log — once, not per message.
     surface, song = _make_surface()
     surface.receive_midi(_cc(6, 99, 5))
     surface.receive_midi(_cc(6, 99, 6))

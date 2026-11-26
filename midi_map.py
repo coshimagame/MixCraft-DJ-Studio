@@ -59,17 +59,14 @@ DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
            (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider
            (0, 34): ('jog', 0), (1, 34): ('jog', 1),            # JOG platter (relative)
            (0, 33): ('jog', 0), (1, 33): ('jog', 1),            # JOG wheel side (relative)
-           # BROWSE knob turn — PLACEHOLDER, not from the official
-           # list: the documented map in this repo contains NO browse
-           # encoder message (the Browser/Global channel entries are
-           # crossfader CC31, master CC8, filter CC23/24 and the LOAD
-           # notes below only).  CC 64 sits on that documented
-           # channel so the v1.6 browse feature is wired end to end;
-           # the Remote Script logs every unmapped browser-channel
-           # message, so the knob's real number can be read off
-           # Live's Log.txt on hardware and corrected here in one
-           # line.  NOT official, NOT hardware-verified.
-           (6, 64): ('browse_turn', None)},                      # BROWSE turn (placeholder)
+           # BROWSE knob turn — from AlphaTheta's official DDJ-RB
+           # MIDI message list (DDJ-RB_MIDI_Message_List_E.pdf):
+           # CC 64 on the Browser/Global channel (ch 7 in the PDF =
+           # 6 here), difference-count encoding — clockwise sends
+           # 0x01-0x1E, counter-clockwise 0x7F-0x62.  Confirmed
+           # against the official list 2026-11-26; like the rest of
+           # this table it is documented, not hardware-verified.
+           (6, 64): ('browse_turn', None)},                      # BROWSE turn
     'note': {(0, 11): ('play', 0), (1, 11): ('play', 1),        # PLAY/PAUSE = Note 11
              (0, 12): ('cue_jump', 0), (1, 12): ('cue_jump', 1),
              # HEADPHONES CUE 1/2 buttons = Note 84 (C5 in Live's
@@ -80,9 +77,11 @@ DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
              (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
              (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
              (6, 70): ('load', 0), (6, 71): ('load', 1),        # LOAD buttons
-             # BROWSE knob push — PLACEHOLDER, same caveat as the
-             # browse_turn CC above: not in the documented map.
-             (6, 65): ('browse_push', None),                     # BROWSE push (placeholder)
+             # BROWSE knob push — Note 65 on the Browser/Global
+             # channel, from the same official list as the turn CC
+             # above.  The push is not deck-specific; the LOAD
+             # notes (70/71 above) are the deck-specific ones.
+             (6, 65): ('browse_push', None),                     # BROWSE push
              # PERFORMANCE PADs (pad channels 8/9 in the PDF = 7/8
              # here), notes 0-7 = pads 1-8.  v1.5 layout (user
              # decision 2026-11-26 — everything on the hardware, no

@@ -133,16 +133,19 @@ stays stateless and returns [] for browse actions):
 - Push: a plain `fire_clip` for the cursor's clip — the exact
   firing path the pads use.
 
-MIDI caveat: the repo's documented DDJ-RB map contains NO browse
-encoder message (the official-list extract in midi_map.py covers
-the browser channel's crossfader / master / filter / LOAD only).
-The turn/push bindings in midi_map.py are therefore placeholders on
-the documented Browser/Global channel, pending a hardware probe —
-see the comment there and TRY_PADS.md.  The relative-value decoding
-follows the convention this codebase documents for the jog wheels
-(0x01-0x3F = +, 0x7F-0x41 = -) but WITHOUT the jog's sign flip,
-which was a jog-specific hardware finding; if the knob turns out
-reversed, flip BROWSE_TURN_SIGN.
+MIDI numbers: the browse bindings in midi_map.py are from
+AlphaTheta's official DDJ-RB MIDI message list — turn = CC 64 on
+the Browser/Global channel (ch 7), difference-count encoding
+(clockwise 0x01-0x1E, counter-clockwise 0x7F-0x62); push = Note 65
+on the same channel (not deck-specific; LOAD 1/2, notes 70/71, are
+the deck-specific browser controls).  Confirmed against the
+official list 2026-11-26.  The relative-value decoding follows the
+convention this codebase documents for the jog wheels
+(0x01-0x3F = +, 0x7F-0x41 = -), which covers the official ranges,
+but WITHOUT the jog's sign flip, which was a jog-specific hardware
+finding; if the knob ever feels reversed, flip BROWSE_TURN_SIGN.
+What remains unverified is Live-side behaviour (highlight movement
+and clip firing on the user's Live 10.1.43) — see TRY_PADS.md.
 """
 from dataclasses import dataclass
 from typing import Optional

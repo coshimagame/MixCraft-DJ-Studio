@@ -407,10 +407,10 @@ def _push(bridge):
 
 def test_browse_dispatch_bindings():
     # Turn = CC on the browser channel, push = note on the browser
-    # channel.  PLACEHOLDER numbers (see midi_map.py): the repo's
-    # documented DDJ-RB map has no browse encoder message, so these
-    # pin the wiring, not an official fact.  LOAD 1/2 (notes 70/71)
-    # ARE documented.
+    # channel — numbers from AlphaTheta's official DDJ-RB MIDI
+    # message list (turn CC 64, difference-count; push Note 65),
+    # confirmed 2026-11-26 (see midi_map.py).  LOAD 1/2 (notes
+    # 70/71) are from the same list.
     assert _ddj_cc(6, 64, 1) == ('browse_turn', None, 1 / 127.0)
     assert _ddj_note(6, 65) == ('browse_push', None, True)
     assert dispatch(DDJ_RB, 'note', 6, 65, 0) is None  # push note-off
