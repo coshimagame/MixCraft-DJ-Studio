@@ -9,7 +9,8 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QDesktopServices
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
-from engine import Engine, Journal, RATE, load_track
+from engine import (Engine, Journal, RATE, WAVE_WINDOW_SECONDS, frame_to_x,
+                    load_track, peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
@@ -88,7 +89,22 @@ def lcd_qss(size, bold=True, fg=None):
 class Result(QObject):
     ready = Signal(int, object, str)
 
+# Height of the thin full-track overview strip under the scrolling
+# waveform (pass 7). The widget's total height is unchanged, so the
+# mixer block built in passes 3-6 keeps its size.
+WAVE_OVERVIEW_HEIGHT = 16
+
 class Waveform(QWidget):
+    """Pass 7 (user direction, 2026-11-26: 「波形データが流れるのも
+    だいじ」): the main area is a SCROLLING waveform, rekordbox-style —
+    a zoomed WAVE_WINDOW_SECONDS window flows past a playhead fixed at
+    the centre as the engine position advances. Under it, a thin
+    full-track overview strip keeps the whole song (and the position
+    marker) in sight. Both areas draw the same track.peaks data and
+    the same blue scheme on both decks. Window/position math lives in
+    engine.py (scroll_window / peak_span / seek_fraction), Qt-free and
+    unit-tested. Clicking the overview seeks by track fraction;
+    clicking the scrolling area seeks to the time shown at that x."""
     seek = Signal(float)
     def __init__(self, color):
         super().__init__()
@@ -99,32 +115,66 @@ class Waveform(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(COLOR_WAVE_BG))
-        p.setPen(QColor(COLOR_WAVE_GRID))
-        for x in range(0, self.width(), 40): p.drawLine(x, 0, x, self.height())
-        mid = self.height()/2
-        p.setPen(QColor(COLOR_BORDER))
-        p.drawLine(0, int(mid), self.width(), int(mid))
-        if self.track:
-            # rekordbox blue scheme: deep blue body, lighter core —
-            # the same on both decks, like the real thing.
-            body = QPen(QColor(self.color), 1)
-            core = QPen(QColor(COLOR_WAVE_LIGHT), 1)
-            for i, peak in enumerate(self.track.peaks):
-                x = int(i*self.width()/len(self.track.peaks))
-                y = int(peak*(mid-8))
-                p.setPen(body)
-                p.drawLine(x, int(mid)-y, x, int(mid)+y)
-                inner = int(y*0.45)
-                p.setPen(core)
-                p.drawLine(x, int(mid)-inner, x, int(mid)+inner)
-            x = int(self.position/max(1,len(self.track.audio))*self.width())
-            p.setPen(QPen(QColor('#ffffff'), 2))
-            p.drawLine(x, 0, x, self.height())
-        else:
+        w, h = self.width(), self.height()
+        main_h = h - WAVE_OVERVIEW_HEIGHT - 1
+        mid = main_h/2
+        if not self.track:
             p.setPen(QColor(COLOR_TEXT_MUTE))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'DROP AUDIO HERE  /  音声ファイルをドロップ')
+            return
+        total = len(self.track.audio)
+        start, end = scroll_window(self.position)
+        # One-second grid lines scroll WITH the music, so the flow is
+        # visible even in a steady passage.
+        p.setPen(QColor(COLOR_WAVE_GRID))
+        for s in range(math.ceil(start/RATE), int(end//RATE)+1):
+            x = int(frame_to_x(s*RATE, start, end, w))
+            p.drawLine(x, 0, x, main_h)
+        p.setPen(QColor(COLOR_BORDER))
+        p.drawLine(0, int(mid), w, int(mid))
+        # rekordbox blue scheme: deep blue body, lighter core —
+        # the same on both decks, like the real thing. Each peak is
+        # drawn as a bar as wide as its bucket's span in the window,
+        # so long tracks (few buckets in view) still read dense.
+        peaks = self.track.peaks
+        count = len(peaks)
+        bucket_px = (total/count)/(end-start)*w if count else 1
+        pen_w = max(1, int(bucket_px))
+        body = QPen(QColor(self.color), pen_w)
+        core = QPen(QColor(COLOR_WAVE_LIGHT), pen_w)
+        lo, hi = peak_span(count, total, start, end)
+        for i in range(lo, hi):
+            x = int(frame_to_x((i+0.5)*total/count, start, end, w))
+            y = int(peaks[i]*(mid-8))
+            p.setPen(body)
+            p.drawLine(x, int(mid)-y, x, int(mid)+y)
+            inner = int(y*0.45)
+            p.setPen(core)
+            p.drawLine(x, int(mid)-inner, x, int(mid)+inner)
+        # Playhead: fixed at the centre of the scrolling area.
+        p.setPen(QPen(QColor('#ffffff'), 2))
+        p.drawLine(w//2, 0, w//2, main_h)
+        # Overview strip: the whole track, thin, with the position
+        # marker — the scrolling area's map.
+        oy = main_h + 1
+        p.setPen(QColor(COLOR_BORDER))
+        p.drawLine(0, main_h, w, main_h)
+        omid = oy + WAVE_OVERVIEW_HEIGHT/2
+        p.setPen(QPen(QColor(self.color), 1))
+        step = max(1, count//max(1, w))
+        for i in range(0, count, step):
+            x = int((i+0.5)/count*w)
+            y = max(1, int(peaks[i]*(WAVE_OVERVIEW_HEIGHT/2-2)))
+            p.drawLine(x, int(omid)-y, x, int(omid)+y)
+        x = int(self.position/max(1, total)*w)
+        p.setPen(QPen(QColor('#ffffff'), 2))
+        p.drawLine(x, oy, x, oy + WAVE_OVERVIEW_HEIGHT)
     def mousePressEvent(self, event):
-        if self.track: self.seek.emit(event.position().x()/self.width())
+        if self.track:
+            pos = event.position()
+            self.seek.emit(seek_fraction(pos.x(), pos.y(), self.width(),
+                                         self.height(), WAVE_OVERVIEW_HEIGHT,
+                                         self.position, len(self.track.audio)))
 
 class JogDial(QWidget):
     """Display-only circular BPM dial echoing the rekordbox jog ring:
@@ -896,8 +946,13 @@ class Window(QMainWindow):
         for widget,d in zip(self.decks,self.engine.decks):
             for button, key in [(widget.quant,'quantize'),(widget.sync,'sync')]:
                 button.blockSignals(True); button.setChecked(d[key]); button.blockSignals(False)
-            widget.wave.position = d['position']
-            widget.wave.update()
+            # Pass 7: repaint the (scrolling) waveform only when the
+            # position actually moved or the loaded track changed —
+            # no busy repaint while a deck sits paused.
+            if (widget.wave.position != d['position']
+                    or widget.wave.track is not d['track']):
+                widget.wave.position = d['position']
+                widget.wave.update()
             widget.play.setText('Ⅱ Pause / 一時停止' if d['playing'] else '▶ Play / 再生')
             length = len(d['track'].audio)/RATE if d['track'] else 0
             def clock(s):

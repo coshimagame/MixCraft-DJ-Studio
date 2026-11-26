@@ -67,6 +67,49 @@ def load_track(path, cache=None):
     return Track(str(Path(path).resolve()), audio, peaks, bpm, confidence,
                  offset, beat_conf, key, camelot, key_conf)
 
+# Scrolling-waveform window math (pass 7, user direction 2026-11-26:
+# 「波形データが流れるのもだいじ」). The deck waveform shows a zoomed
+# window of WAVE_WINDOW_SECONDS centred on the play position, flowing
+# past a fixed centre playhead, rekordbox-style. Pure functions, kept
+# here (Qt-free) so the tests can pin them like the other engine math.
+WAVE_WINDOW_SECONDS = 16.0    # total visible span (±8 s around the playhead)
+
+def scroll_window(position, half_seconds=WAVE_WINDOW_SECONDS / 2, rate=RATE):
+    """(start, end) frames of the visible waveform window, centred on
+    `position`. Deliberately NOT clamped to the track: the playhead
+    stays at the centre and the track's start/end scroll through the
+    window, leaving empty space beyond the edges."""
+    half = half_seconds * rate
+    return position - half, position + half
+
+def frame_to_x(frame, start, end, width):
+    """Pixel x of `frame` inside the window [start, end] across `width` px."""
+    return (frame - start) * width / max(1.0, end - start)
+
+def peak_span(count, total, start, end):
+    """[lo, hi) indices of the `count` peak buckets (evenly split over
+    `total` frames) whose buckets intersect the window [start, end]."""
+    if count <= 0 or total <= 0:
+        return 0, 0
+    lo = min(count, max(0, int(start * count / total)))
+    hi = min(count, max(0, int(end * count / total) + 1))
+    return lo, max(lo, hi)
+
+def seek_fraction(x, y, width, height, overview_height, position, total,
+                  rate=RATE):
+    """Track fraction (0..1) for a waveform click at pixel (x, y).
+    A click in the overview strip seeks by track fraction directly;
+    a click in the scrolling area seeks to the time shown at that x
+    inside the current window. Result clamped to [0, 1]."""
+    if width <= 0 or total <= 0:
+        return 0.0
+    if y > height - overview_height:
+        frac = x / width
+    else:
+        start, end = scroll_window(position, rate=rate)
+        frac = (start + x / width * (end - start)) / total
+    return min(1.0, max(0.0, frac))
+
 def estimate_bpm(audio):
     mono = audio[:RATE * 180].mean(axis=1)
     hop = 480
