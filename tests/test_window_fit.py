@@ -133,3 +133,34 @@ def test_scroll_reaches_the_bottom_and_right(shown_window):
     hbar.setValue(hbar.maximum())
     qapp.processEvents()
     assert panel.visibleRegion().boundingRect().width() == panel.width()
+
+
+@pytest.mark.parametrize('size', [(1280, 720), (900, 600), (760, 500)])
+def test_every_widget_reachable_at_any_size(shown_window, size):
+    # The user's fixed acceptance criterion (2026-11-27 23:46):
+    # at ANY window size, nothing needed for operation may end
+    # up unreachable — what does not fit must be reachable by
+    # scrolling. Drive the scroll area to every visible widget
+    # inside the scroll content and require its rect to meet
+    # the viewport; a single unreachable widget fails the size.
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QWidget
+    qapp = QApplication.instance()
+    shown_window.resize(*size)
+    qapp.processEvents()
+    scroll = shown_window.centralWidget()
+    content = scroll.widget()
+    viewport = scroll.viewport()
+    widgets = [c for c in content.findChildren(QWidget)
+               if c.isVisible() and c.width() > 0 and c.height() > 0]
+    assert len(widgets) > 50  # the check must really cover the UI
+    unreachable = []
+    for widget in widgets:
+        scroll.ensureWidgetVisible(widget, 4, 4)
+        qapp.processEvents()
+        mapped = QRect(widget.mapTo(viewport, widget.rect().topLeft()),
+                       widget.mapTo(viewport, widget.rect().bottomRight()))
+        if not mapped.intersects(viewport.rect()):
+            unreachable.append(
+                f'{widget.__class__.__name__}({widget.objectName()})')
+    assert unreachable == []
