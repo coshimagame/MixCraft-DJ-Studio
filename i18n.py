@@ -118,7 +118,7 @@ STRINGS = {
         "en": "Live export failed: {error}",
         "jp": "Live書き出し失敗: {error}",
     },
-    "device_auto": {"en": "AUTOMATIC", "jp": "自動（WASAPI優先）"},
+    "device_auto": {"en": "AUTOMATIC", "jp": "自動（ASIO優先）"},
     # Pass 23: DDJ-RB MIDI connection state (status bar).
     "midi_connected": {"en": "DDJ-RB connected", "jp": "DDJ-RB 接続済み"},
     "midi_disconnected": {"en": "DDJ-RB not connected", "jp": "DDJ-RB 未接続"},
@@ -144,10 +144,18 @@ STRINGS = {
     # --- status bar -------------------------------------------------
     "ready": {"en": "Ready", "jp": "準備完了"},
     "audio_active": {
-        "en": "Audio active • 48 kHz / 512 frames • {host} • latency "
-              "{ms} ms (reported) • autosaving actions",
-        "jp": "音声アクティブ • 48 kHz / 512 frames • {host} • レイテンシ "
-              "{ms} ms（報告値）• 操作を自動保存中",
+        "en": "Audio active • {device} • {host} • 48 kHz / 512 frames "
+              "• latency {ms} ms (reported) • autosaving actions",
+        "jp": "音声アクティブ • {device} • {host} • 48 kHz / 512 frames "
+              "• レイテンシ {ms} ms（報告値）• 操作を自動保存中",
+    },
+    # Pass 23: the chosen output would not open — the app fell
+    # back to the system default rather than staying silent.
+    "audio_fallback": {
+        "en": "Output {device} could not be opened — playing "
+              "through the system default instead",
+        "jp": "出力 {device} を開けなかったので、システム既定の出力で"
+              "鳴らしています",
     },
     "audio_error": {
         "en": "Audio unavailable: {error}",

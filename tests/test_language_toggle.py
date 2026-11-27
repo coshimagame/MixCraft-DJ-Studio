@@ -89,7 +89,7 @@ def test_window_starts_in_japanese(window):
                  'transition_label', 'output_label', 'mix_remaining'):
         assert not hasattr(window, gone), gone
     assert _badge_texts(window) == ['済', '再生中', '次']
-    assert window.devices.itemText(0) == '自動（WASAPI優先）'
+    assert window.devices.itemText(0) == '自動（ASIO優先）'
     assert window.duration.itemText(0) == '8 秒'
 
 

@@ -1135,6 +1135,7 @@ class Window(QMainWindow):
         self.callback_seconds = 0.0
         self.callback_max_seconds = 0.0
         self.hostapi_name = ''
+        self.audio_device_name = ''
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.result = Result()
         self.result.ready.connect(self.loaded)
@@ -1647,34 +1648,69 @@ class Window(QMainWindow):
                 deck.name.setText(deck_title_text(track.path,
                                                   self.setlist_data))
                 self._render_deck_key(deck, track)
+    def _open_stream(self, device, extra):
+        # Pass 23: the block size stays 512 frames — the top of
+        # the stable 256-512 range for the DDJ-RB's ASIO driver at
+        # 44.1/48 kHz — and latency='low' asks PortAudio for the
+        # device's own suggested low latency rather than a fixed
+        # guess. (Underruns are what the user hears as ぶつぶつ.)
+        kwargs = dict(samplerate=RATE, channels=2, blocksize=512, latency='low',
+            dtype='float32', device=device, callback=self.callback)
+        if extra is not None: kwargs['extra_settings'] = extra
+        stream = sd.OutputStream(**kwargs)
+        stream.start()
+        return stream
+
     def start_audio(self):
         if self.stream:
             self.stream.stop(); self.stream.close(); self.stream = None
-        device = self.devices.currentData()
+        selection = self.devices.currentData()
+        device = selection
         extra = None
         hostapi_name = ''
-        try:  # Phase 2: prefer WASAPI (low latency) on Windows when available
-            device, hostapi_name = resolve_output(device, sd)
+        device_name = ''
+        try:  # Pass 23: 'auto' climbs the ASIO -> WASAPI ladder
+            device, hostapi_name = resolve_output(selection, sd)
             if 'WASAPI' in hostapi_name:
                 extra = sd.WasapiSettings(exclusive=False)
+            if device is not None:
+                device_name = sd.query_devices(device)['name']
         except Exception:
             extra = None
-            device = None if device == 'auto' else device
+            device = None if selection == 'auto' else selection
         try:
-            kwargs = dict(samplerate=RATE, channels=2, blocksize=512, latency='low',
-                dtype='float32', device=device, callback=self.callback)
-            if extra is not None: kwargs['extra_settings'] = extra
-            self.stream = sd.OutputStream(**kwargs)
-            self.stream.start()
-            self.hostapi_name = hostapi_name
-            latency_ms = (self.stream.latency or 0) * 1000
-            self._status_fn = lambda lang, h=hostapi_name or 'default host', ms=f'{latency_ms:.0f}': \
-                i18n.tr('audio_active', lang).format(host=h, ms=ms)
-            self._apply_status()
-        except Exception as error:
-            self._status_fn = lambda lang, e=error: \
-                i18n.tr('audio_error', lang).format(error=e)
-            self._apply_status()
+            self.stream = self._open_stream(device, extra)
+        except Exception as first_error:
+            # Pass 23: a chosen device that will not open (an ASIO
+            # driver refusing 48 kHz, a busy WASAPI endpoint) must
+            # not leave the app silent — fall back to the system
+            # default output and say so in the status bar.
+            if device is None and extra is None:
+                self._status_fn = lambda lang, e=first_error: \
+                    i18n.tr('audio_error', lang).format(error=e)
+                self._apply_status()
+                return
+            try:
+                self.stream = self._open_stream(None, None)
+                self.hostapi_name = ''
+                self.audio_device_name = ''
+                failed = device_name or hostapi_name or str(device)
+                self._status_fn = lambda lang, d=failed: \
+                    i18n.tr('audio_fallback', lang).format(device=d)
+                self._apply_status()
+                return
+            except Exception:
+                self._status_fn = lambda lang, e=first_error: \
+                    i18n.tr('audio_error', lang).format(error=e)
+                self._apply_status()
+                return
+        self.hostapi_name = hostapi_name
+        self.audio_device_name = device_name
+        latency_ms = (self.stream.latency or 0) * 1000
+        self._status_fn = lambda lang, h=hostapi_name or 'default host', \
+                d=device_name or 'system default', ms=f'{latency_ms:.0f}': \
+            i18n.tr('audio_active', lang).format(host=h, device=d, ms=ms)
+        self._apply_status()
     def callback(self,outdata,frames,time_info,status):
         started = time.perf_counter()
         if status: self.audio_status_count += 1
