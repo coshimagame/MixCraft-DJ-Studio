@@ -6,8 +6,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sounddevice as sd
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QRectF
-from PySide6.QtGui import (QColor, QFont, QLinearGradient, QPainter, QPen,
-    QDesktopServices, QRadialGradient)
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient,
+    QPainter, QPen, QDesktopServices, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
 from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
@@ -17,6 +17,7 @@ from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
+import dotfont
 import i18n
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
@@ -172,10 +173,9 @@ class Waveform(QWidget):
             inner = int(y*0.42)
             p.setPen(core)
             p.drawLine(x, int(mid)-inner, x, int(mid)+inner)
-        # Playhead: fixed at the centre of the scrolling area, with a
-        # restrained glow under the bright line (pass 9).
-        p.setPen(QPen(QColor(255, 255, 255, 42), 7))
-        p.drawLine(w//2, 0, w//2, main_h)
+        # Playhead: fixed at the centre of the scrolling area.
+        # Pass 11 drops pass 9's glow pass — the bright line alone
+        # is the active indicator on the matte console.
         p.setPen(QPen(QColor('#ffffff'), 2))
         p.drawLine(w//2, 0, w//2, main_h)
         # Overview strip: the whole track, thin, with the position
@@ -261,15 +261,17 @@ class JogDial(QWidget):
             p.setBrush(QColor(COLOR_WAVEFORM_LOW))
             p.drawEllipse(int(mx)-3, int(my)-3, 6, 6)
         bpm_text = f'{self.bpm:.2f}' if self.bpm else '--.--'
-        p.setPen(QColor(COLOR_TEXT))
+        # Pass 11: the dial's number is dot-matrix, like the rest
+        # of the console readouts; the caption below stays font
+        # text (it carries the Japanese label in JP mode).
+        pitch = 3.4 if self.width() > 124 else 3.0
+        units = dotfont.text_units(bpm_text)
+        _paint_dot_run(p, bpm_text, rect.center().x() - units * pitch / 2,
+                       rect.center().y() - dotfont.GLYPH_H * pitch / 2 - 10,
+                       pitch, QColor(COLOR_TEXT), ghost_alpha=12)
         mono = QFont()
         mono.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New', 'monospace'])
-        mono.setPointSize(19 if self.width() <= 124 else 24)
-        mono.setBold(True)
-        p.setFont(mono)
-        p.drawText(inner.adjusted(0, -16, 0, 0), Qt.AlignmentFlag.AlignCenter, bpm_text)
         mono.setPointSize(9)
-        mono.setBold(False)
         p.setFont(mono)
         if self.caption is not None:
             p.setPen(QColor(COLOR_TEXT_SUB))
@@ -321,6 +323,127 @@ class MeterLamp(QWidget):
                 p.setBrush(QColor('#101216'))
             p.setPen(QPen(QColor(COLOR_BORDER_HI), 1.2))
             p.drawEllipse(QRectF(cx - 11, cy - 11, 22, 22))
+
+def _paint_dot_run(p, text, x, y, pitch, color, ghost_alpha=16):
+    """Paint one run of dot-matrix text with the painter at (x, y);
+    returns the run's visual width in px. Every glyph cell first
+    shows its unlit ghost dots (the classic LCD look), the lit dots
+    drawn over them in the full colour."""
+    ghost = QColor(color)
+    ghost.setAlpha(ghost_alpha)
+    d = pitch * 0.74
+    off = (pitch - d) / 2.0
+    p.setPen(Qt.PenStyle.NoPen)
+    for i, ch in enumerate(text):
+        glyph = dotfont.glyph_for(ch) or dotfont.BLANK
+        ox = x + i * dotfont.ADVANCE * pitch
+        for row in range(dotfont.GLYPH_H):
+            line = glyph[row]
+            for col in range(dotfont.GLYPH_W):
+                p.setBrush(color if line[col] == '#' else ghost)
+                p.drawEllipse(QRectF(ox + col * pitch + off,
+                                     y + row * pitch + off, d, d))
+    return dotfont.text_units(text) * pitch
+
+
+class DotReadout(QWidget):
+    """Dot-matrix console readout (pass 11, user direction
+    2026-11-27: 「ビットマップ文字みたいな無骨なコンソールにしたい」).
+    Paints its text on dark glass: characters the embedded 5x7 dot
+    font knows (digits, A-Z, . : + - / ≈) become dot grids with a
+    faint unlit ghost behind each glyph; anything else (kana/kanji)
+    is drawn in a bold mono-leaning font in the same colour, so a
+    Japanese readout like '残り 36:12' still gets dotted digits.
+    setText()/text() mirror the QLabel API the readouts had, so the
+    tick()/loaded() wiring is unchanged. If the text would overflow
+    the glass, the pitch scales down to fit — never clipped."""
+    def __init__(self, pitch=2.0, color=COLOR_DISPLAY_FG, align='left',
+                 height=28):
+        super().__init__()
+        self._text = ''
+        self.pitch = float(pitch)
+        self.color = QColor(color)
+        self.align = align
+        self.setFixedHeight(height)
+    def setText(self, text):
+        if text != self._text:
+            self._text = text
+            self.update()
+    def text(self):
+        return self._text
+    def _font(self, pitch):
+        font = QFont()
+        font.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New',
+                          'monospace'])
+        font.setBold(True)
+        font.setPixelSize(max(9, int(dotfont.GLYPH_H * pitch * 0.98)))
+        return font
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        glass = QLinearGradient(0, 0, 0, self.height())
+        glass.setColorAt(0, QColor('#080809'))
+        glass.setColorAt(1, QColor('#040405'))
+        p.fillRect(self.rect(), glass)
+        p.setPen(QColor(COLOR_BORDER))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        if not self._text:
+            return
+        runs = dotfont.segments(self._text)
+        pitch = self.pitch
+
+        def widths(pitch):
+            font = self._font(pitch)
+            metrics = QFontMetrics(font)
+            out = []
+            for run, is_dot in runs:
+                out.append(dotfont.text_units(run) * pitch if is_dot
+                           else metrics.horizontalAdvance(run))
+            return out, font
+
+        ws, font = widths(pitch)
+        total = sum(ws) + 2 * (len(runs) - 1)
+        if total > self.width() - 8:
+            pitch = pitch * (self.width() - 8) / total
+            ws, font = widths(pitch)
+            total = sum(ws) + 2 * (len(runs) - 1)
+        x = (self.width() - total) / 2 if self.align == 'center' else 6.0
+        y = (self.height() - dotfont.GLYPH_H * pitch) / 2
+        p.setFont(font)
+        p.setPen(self.color)
+        for (run, is_dot), run_w in zip(runs, ws):
+            if is_dot:
+                _paint_dot_run(p, run, x, y, pitch, self.color)
+            else:
+                p.drawText(QRectF(x, 0, run_w + 4, self.height()),
+                           Qt.AlignmentFlag.AlignLeft |
+                           Qt.AlignmentFlag.AlignVCenter, run)
+            x += run_w + 2
+
+
+def _paint_screws(p, width, height):
+    """Pass 11 rugged material: small corner screws over a panel's
+    styled surface — rack-gear hardware, not a glossy card."""
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    r, inset = 2.6, 7
+    for cx, cy in ((inset, inset), (width - inset, inset),
+                   (inset, height - inset), (width - inset, height - inset)):
+        p.setPen(QPen(QColor('#3a3d45'), 1))
+        p.setBrush(QColor('#1d1e23'))
+        p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+        p.setPen(QPen(QColor('#08080a'), 1.1))
+        p.drawLine(int(cx - r + 0.7), int(cy), int(cx + r - 0.7), int(cy))
+
+
+class PanelFrame(QFrame):
+    """A QFrame that adds the pass-11 corner screws over its styled
+    surface. The stylesheet still paints first (super), the screws
+    are drawn on top."""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        _paint_screws(QPainter(self), self.width(), self.height())
+
 
 class Knob(QWidget):
     """Rotary mixer knob (user direction, 2026-11-26: the EQ / GAIN /
@@ -450,8 +573,8 @@ class Knob(QWidget):
         # the deck colour instead of white, so each column reads as
         # its deck's at a glance.
         cap = QRadialGradient(cx - radius * 0.4, cy - radius * 0.4, radius * 1.35)
-        cap.setColorAt(0.0, QColor('#2b2c34'))
-        cap.setColorAt(0.55, QColor('#17181c'))
+        cap.setColorAt(0.0, QColor('#24252b'))
+        cap.setColorAt(0.55, QColor('#15161a'))
         cap.setColorAt(1.0, QColor('#0c0c0f'))
         p.setPen(QPen(QColor('#3a3d46'), 1.2))
         p.setBrush(cap)
@@ -548,11 +671,17 @@ class Deck(QFrame):
         info.addWidget(self.sub)
         readouts = QHBoxLayout()
         readouts.setSpacing(4)
-        self.bpm = QLabel('— BPM')
-        self.bpm.setStyleSheet(lcd_qss(19))
+        # Pass 11: both readouts are dot-matrix console displays.
+        # Fixed widths sized to their longest texts at their pitch,
+        # so the digits never clip (the old LCD label squeezed the
+        # clock's last digit at the box edge).
+        self.bpm = DotReadout(pitch=1.7, height=28)
+        self.bpm.setFixedWidth(118)
+        self.bpm.setText('— BPM')
         readouts.addWidget(self.bpm)
-        self.clock = QLabel('-00:00.0  00:00.0')
-        self.clock.setStyleSheet(lcd_qss(12, fg=COLOR_TEXT_SUB))
+        self.clock = DotReadout(pitch=1.55, color=COLOR_TEXT_SUB, height=28)
+        self.clock.setFixedWidth(164)
+        self.clock.setText('-00:00.0  00:00.0')
         readouts.addWidget(self.clock)
         readouts.addStretch()
         info.addLayout(readouts)
@@ -625,6 +754,11 @@ class Deck(QFrame):
             button.setProperty('pad', True)
             pads_row.addWidget(button)
         grid.addLayout(pads_row, 1, 2)
+    def paintEvent(self, event):
+        # Pass 11: corner screws over the deck's styled surface,
+        # same as the PanelFrame panels.
+        super().paintEvent(event)
+        _paint_screws(QPainter(self), self.width(), self.height())
     def reset(self):
         self.window.engine.command('play', self.index, False)
         self.window.engine.command('seek', self.index, 0)
@@ -687,7 +821,7 @@ class Window(QMainWindow):
         layout.setSpacing(5)
         # Slim dark header bar (rekordbox toolbar style) — product name
         # and version stay, the big light title block is gone.
-        header_bar = QFrame()
+        header_bar = PanelFrame()
         header_bar.setObjectName('headerbar')
         header = QHBoxLayout(header_bar)
         header.setContentsMargins(10, 3, 10, 3)
@@ -733,7 +867,7 @@ class Window(QMainWindow):
         strips.addWidget(self.decks[0])
         strips.addWidget(self.decks[1])
         top_band.addLayout(strips, 1)
-        bpm_frame = QFrame()
+        bpm_frame = PanelFrame()
         bpm_frame.setObjectName('bpmframe')
         bpm_frame.setMinimumWidth(200)
         bpm_lay = QVBoxLayout(bpm_frame)
@@ -763,7 +897,7 @@ class Window(QMainWindow):
         # Set list panel: independent of the decks. Loads the JSON exported
         # by the phone prep page (setlist.load_setlist) and shows the set
         # summary + track order with the phone design's status colours.
-        setlist_panel = QFrame()
+        setlist_panel = PanelFrame()
         setlist_panel.setObjectName('setlist')
         setlist_layout = QVBoxLayout(setlist_panel)
         # Pass 9: the browser header and the MIX TIMER share one
@@ -786,11 +920,17 @@ class Window(QMainWindow):
         # (Pass 9: the MIX TIMER caption label left the head row —
         # the readout's own 'MIX' prefix says it, and the row shares
         # the bottom zone's width with the mixer block now.)
-        self.mix_elapsed = QLabel('MIX 00:00')
-        self.mix_elapsed.setStyleSheet(lcd_qss(20))
+        # Pass 11: the MIX TIMER readouts are dot-matrix too (the
+        # remaining readout mixes dotted digits with its kanji
+        # caption in Japanese mode — see DotReadout).
+        self.mix_elapsed = DotReadout(pitch=2.3, align='center', height=30)
+        self.mix_elapsed.setFixedWidth(134)
+        self.mix_elapsed.setText('MIX 00:00')
         setlist_head.addWidget(self.mix_elapsed)
-        self.mix_remaining = QLabel('残り 60:00')
-        self.mix_remaining.setStyleSheet(lcd_qss(14, fg=COLOR_TEXT_SUB))
+        self.mix_remaining = DotReadout(pitch=2.0, color=COLOR_TEXT_SUB,
+                                        align='center', height=30)
+        self.mix_remaining.setFixedWidth(142)
+        self.mix_remaining.setText('残り 60:00')
         setlist_head.addWidget(self.mix_remaining)
         setlist_head.addStretch()
         self.mix_toggle = QPushButton('START / 開始')
@@ -843,7 +983,7 @@ class Window(QMainWindow):
         # are both set-up tools, not performance controls) — one row
         # instead of a caption line plus two rows. Same widgets,
         # same wiring; the audition's fine print rides as a tooltip.
-        self.utility_bar = QFrame()
+        self.utility_bar = PanelFrame()
         utility_bar = self.utility_bar
         utility_bar.setObjectName('utility')
         utility_bar.setToolTip('Aの末尾 → Bの先頭（テンポ同期なし）')
@@ -901,7 +1041,7 @@ class Window(QMainWindow):
         # the user's standing rule), the MASTER knob at the block's
         # top centre, and the CROSSFADER along its bottom. Right, the
         # SET LIST gets the large remaining area.
-        mixer = QFrame()
+        mixer = PanelFrame()
         mixer.setObjectName('mixer')
         mix = QVBoxLayout(mixer)
         mix.setSpacing(4)
@@ -1374,15 +1514,15 @@ STYLE = (
     # Pass 9 material: panels are machined surfaces, not flat
     # rectangles — a 1px top-edge highlight (the bright first stop),
     # a subtle vertical falloff, and consistent 6px corners.
-    f'QFrame#headerbar {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #23242a, stop:0.06 #141519, stop:1 #0e0e11); border:1px solid {COLOR_BORDER}; border-radius:5px; }}'
-    f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #33363f, stop:0.004 #1d1f26, stop:0.5 #131418, stop:1 #0e0f12); border:1px solid #26282f; border-radius:6px; padding:8px; }}'
-    f'QFrame#mixer, QFrame#bpmframe {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #33363f, stop:0.004 #1e2027, stop:0.5 #14151a, stop:1 #0f1013); border:1px solid #26282f; border-radius:6px; padding:8px 12px; }}'
-    f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #33363f, stop:0.01 #1d1f26, stop:0.4 #131418, stop:1 #0f1013); border:1px solid #26282f; border-radius:6px; padding:8px 12px; }}'
-    f'QFrame#utility {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d34, stop:0.05 #17181d, stop:1 #101114); border:1px solid #26282f; border-radius:6px; }}'
-    f'QFrame#setrow0 {{ background:#101114; border:1px solid #1b1c21; border-radius:4px; }}'
-    f'QFrame#setrow1 {{ background:#16171c; border:1px solid #1e2026; border-radius:4px; }}'
-    f'QFrame#setrowplaying {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #16280f, stop:1 #0d1a0a); border:1px solid #33512a; border-radius:4px; }}'
-    f'QPushButton {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e1f25, stop:1 #121317); border:1px solid #2c2e36; border-radius:4px; padding:6px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
+    f'QFrame#headerbar {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #202127, stop:0.05 #131418, stop:1 #0e0e11); border:1px solid {COLOR_BORDER}; border-radius:3px; }}'
+    f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #121317, stop:1 #0e0f11); border:1px solid #26282f; border-radius:3px; padding:8px; }}'
+    f'QFrame#mixer, QFrame#bpmframe {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #131418, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:8px 12px; }}'
+    f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.4 #121317, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:8px 12px; }}'
+    f'QFrame#utility {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #24262d, stop:0.005 #15161a, stop:1 #101114); border:1px solid #26282f; border-radius:3px; }}'
+    f'QFrame#setrow0 {{ background:#101114; border:1px solid #1b1c21; border-radius:2px; }}'
+    f'QFrame#setrow1 {{ background:#16171c; border:1px solid #1e2026; border-radius:2px; }}'
+    f'QFrame#setrowplaying {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #16280f, stop:1 #0d1a0a); border:1px solid #33512a; border-radius:2px; }}'
+    f'QPushButton {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b20, stop:1 #121317); border:1px solid #2c2e36; border-radius:3px; padding:6px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
     f'QPushButton:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
     f'QPushButton:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton:disabled {{ background:#121317; border-color:#1d1f24; color:#565b63; }}'
@@ -1390,12 +1530,12 @@ STYLE = (
     # Header language toggle (pass 10): same treatment as the normal
     # buttons but slimmer — the header bar keeps its pass-9 height,
     # so the bottom notice stays inside the 900px window.
-    f'QPushButton#langbtn {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e1f25, stop:1 #121317); border:1px solid #2c2e36; border-radius:4px; padding:2px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
+    f'QPushButton#langbtn {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b20, stop:1 #121317); border:1px solid #2c2e36; border-radius:3px; padding:2px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
     f'QPushButton#langbtn:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
     f'QPushButton#langbtn:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton#langbtn:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; font-weight:800; }}'
     # Performance pads: near-black cells, hairline borders, small caps.
-    f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:3px; padding:9px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
+    f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:2px; padding:9px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
     f'QPushButton[pad="true"]:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b21, stop:1 #0e0f12); border-color:#3f434e; }}'
     f'QPushButton[pad="true"]:pressed {{ background:#060607; }}'
     f'QPushButton[pad="true"]:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; }}'

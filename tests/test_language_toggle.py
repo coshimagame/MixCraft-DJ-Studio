@@ -89,9 +89,9 @@ def test_switch_to_english_relables_everything(window):
     window.set_language('en')
     assert window.lang == 'en'
     assert window.lang_en.isChecked() and not window.lang_jp.isChecked()
-    assert window.decks[0].load.text() == 'Load'
-    assert window.decks[0].cue.text() == '■ Reset'
-    assert window.decks[0].pad_cue_set.text() == 'Cue Set'
+    assert window.decks[0].load.text() == 'LOAD'
+    assert window.decks[0].cue.text() == '■ RESET'
+    assert window.decks[0].pad_cue_set.text() == 'CUE SET'
     assert window.decks[1].sync.text() == 'SYNC'
     assert window.set_bpm_label.text() == 'SET BPM'
     assert window.set_dial.caption == 'SET BPM'
@@ -103,8 +103,8 @@ def test_switch_to_english_relables_everything(window):
     assert window.status.text() == 'Ready'
     assert 'PLAYING TRACK 2' in window.setlist_summary.text()
     assert _badge_texts(window) == ['PLAYED', 'NOW', 'NEXT']
-    assert window.devices.itemText(0) == 'Automatic'
-    assert window.duration.itemText(0) == '8 seconds'
+    assert window.devices.itemText(0) == 'AUTOMATIC'
+    assert window.duration.itemText(0) == '8 SECONDS'
     # No Japanese left anywhere in the labelled surface.
     surface = [window.mode_label, window.setlist_label,
                window.transition_label, window.output_label,
@@ -141,7 +141,7 @@ def test_loaded_deck_keeps_filename_across_switch(window, tmp_path):
     assert window.decks[0].name.text() == path.name
     window.set_language('en')
     assert window.decks[0].name.text() == path.name
-    assert window.decks[0].sub.text().startswith('Key ')
+    assert window.decks[0].sub.text().startswith('KEY ')
     window.set_language('jp')
     assert window.decks[0].name.text() == path.name
     assert window.decks[0].sub.text().startswith('キー ')

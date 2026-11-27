@@ -41,11 +41,11 @@ def test_languages_actually_differ():
 
 def test_tr_defaults_to_current_and_accepts_explicit_lang():
     assert i18n.tr('load') == '読込'
-    assert i18n.tr('load', 'en') == 'Load'
+    assert i18n.tr('load', 'en') == 'LOAD'
     assert i18n.tr('load', 'jp') == '読込'
     i18n.set_current('en')
     try:
-        assert i18n.tr('load') == 'Load'
+        assert i18n.tr('load') == 'LOAD'
     finally:
         i18n.set_current('jp')
 
@@ -80,6 +80,6 @@ def test_format_templates_render_in_both_languages():
     line = i18n.tr('summary_line', 'jp').format(
         bpm='122', count=5, total='24:19', state='再生中 2 曲目')
     assert line == 'セットBPM 122  •  5 曲  •  合計 24:19  •  再生中 2 曲目'
-    assert i18n.tr('seconds_item', 'en').format(n=8) == '8 seconds'
+    assert i18n.tr('seconds_item', 'en').format(n=8) == '8 SECONDS'
     assert i18n.tr('seconds_item', 'jp').format(n=8) == '8 秒'
     assert i18n.tr('key_line', 'jp').format(key='A minor', camelot='8A') == 'キー A minor (8A)'

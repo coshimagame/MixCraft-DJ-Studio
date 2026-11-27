@@ -18,6 +18,11 @@ FILTER, the DECK A/B chips, the BPM / KEY column heads, unit labels)
 are deliberately NOT in this table — they never mixed languages, and
 real hardware prints them the same way in Japan. app.py keeps them
 as literals and the pass-10 notes say so.
+
+Pass 11 (rugged console): the English LABELS (buttons, captions,
+display placeholders) are uppercase — console lettering to match
+the dot-matrix readouts. Status-bar prose and dialog titles keep
+sentence case; they are messages, not labels.
 """
 
 DEFAULT_LANG = "jp"
@@ -30,21 +35,21 @@ STRINGS = {
         "jp": "DJモード  •  2デッキ パフォーマンス  •  試遊版",
     },
     # --- transport / deck info ------------------------------------
-    "load": {"en": "Load", "jp": "読込"},
-    "play": {"en": "▶ Play", "jp": "▶ 再生"},
-    "pause": {"en": "Ⅱ Pause", "jp": "Ⅱ 一時停止"},
-    "reset": {"en": "■ Reset", "jp": "■ 先頭"},
-    "no_track": {"en": "No track loaded", "jp": "未読込"},
-    "loading": {"en": "Loading… ", "jp": "解析中… "},
-    "load_failed": {"en": "Load failed", "jp": "読込失敗"},
-    "key_line": {"en": "Key {key} ({camelot})", "jp": "キー {key} ({camelot})"},
+    "load": {"en": "LOAD", "jp": "読込"},
+    "play": {"en": "▶ PLAY", "jp": "▶ 再生"},
+    "pause": {"en": "Ⅱ PAUSE", "jp": "Ⅱ 一時停止"},
+    "reset": {"en": "■ RESET", "jp": "■ 先頭"},
+    "no_track": {"en": "NO TRACK LOADED", "jp": "未読込"},
+    "loading": {"en": "LOADING… ", "jp": "解析中… "},
+    "load_failed": {"en": "LOAD FAILED", "jp": "読込失敗"},
+    "key_line": {"en": "KEY {key} ({camelot})", "jp": "キー {key} ({camelot})"},
     "drop_hint": {"en": "DROP AUDIO HERE", "jp": "音声ファイルをドロップ"},
     # --- performance pads ------------------------------------------
-    "cue_set": {"en": "Cue Set", "jp": "キュー設定"},
-    "cue": {"en": "Cue", "jp": "キュー"},
-    "hot1": {"en": "Hot 1", "jp": "ホット1"},
-    "hot1_set": {"en": "Hot1 Set", "jp": "ホット1設定"},
-    "quantize": {"en": "Quantize", "jp": "クオンタイズ"},
+    "cue_set": {"en": "CUE SET", "jp": "キュー設定"},
+    "cue": {"en": "CUE", "jp": "キュー"},
+    "hot1": {"en": "HOT 1", "jp": "ホット1"},
+    "hot1_set": {"en": "HOT1 SET", "jp": "ホット1設定"},
+    "quantize": {"en": "QUANTIZE", "jp": "クオンタイズ"},
     "sync": {"en": "SYNC", "jp": "シンク"},
     "sync_tip": {
         "en": "Tempo match only. Pitch shifts too. No beat-phase sync.",
@@ -64,14 +69,14 @@ STRINGS = {
         "en": "A's tail → B's head (no tempo sync)",
         "jp": "Aの末尾 → Bの先頭（テンポ同期なし）",
     },
-    "seconds_item": {"en": "{n} seconds", "jp": "{n} 秒"},
-    "preview": {"en": "▶ Preview transition", "jp": "▶ ミックス試聴"},
-    "stop_preview": {"en": "Stop preview", "jp": "試聴終了"},
-    "save_events": {"en": "Save events JSON", "jp": "操作保存"},
+    "seconds_item": {"en": "{n} SECONDS", "jp": "{n} 秒"},
+    "preview": {"en": "▶ PREVIEW TRANSITION", "jp": "▶ ミックス試聴"},
+    "stop_preview": {"en": "STOP PREVIEW", "jp": "試聴終了"},
+    "save_events": {"en": "SAVE EVENTS JSON", "jp": "操作保存"},
     "output": {"en": "OUTPUT", "jp": "出力"},
-    "device_auto": {"en": "Automatic", "jp": "自動（WASAPI優先）"},
-    "device_default": {"en": "System default", "jp": "システム既定"},
-    "apply": {"en": "Apply", "jp": "適用"},
+    "device_auto": {"en": "AUTOMATIC", "jp": "自動（WASAPI優先）"},
+    "device_default": {"en": "SYSTEM DEFAULT", "jp": "システム既定"},
+    "apply": {"en": "APPLY", "jp": "適用"},
     # --- set list / mix timer ---------------------------------------
     "setlist_caption": {"en": "SET LIST", "jp": "セットリスト"},
     "remaining": {"en": "LEFT", "jp": "残り"},
@@ -79,7 +84,7 @@ STRINGS = {
     "start": {"en": "START", "jp": "開始"},
     "stop": {"en": "STOP", "jp": "停止"},
     "timer_reset": {"en": "RESET", "jp": "リセット"},
-    "open_setlist": {"en": "Open setlist JSON", "jp": "セットリストを開く"},
+    "open_setlist": {"en": "OPEN SETLIST JSON", "jp": "セットリストを開く"},
     "setlist_dialog": {"en": "Setlist JSON", "jp": "セットリスト"},
     "setlist_empty": {
         "en": "No setlist loaded — open the JSON exported from the phone prep page",
@@ -100,7 +105,7 @@ STRINGS = {
     "badge_next": {"en": "NEXT", "jp": "次"},
     "badge_queued": {"en": "QUEUED", "jp": "待機"},
     "untitled": {"en": "(untitled)", "jp": "(無題)"},
-    "listen": {"en": "Listen ↗", "jp": "試聴 ↗"},
+    "listen": {"en": "LISTEN ↗", "jp": "試聴 ↗"},
     # --- status bar / notices ---------------------------------------
     "ready": {"en": "Ready", "jp": "準備完了"},
     "notice": {
