@@ -37,6 +37,8 @@ class FakeClip:
         self.looping = False
         self.loop_start = 0.0
         self.loop_end = 0.0
+        self.start_marker = 0.0
+        self.length = 0.0
         self.playing_position = 0.0
         self.nudge_calls = []
 
@@ -93,11 +95,38 @@ class FakeTrack:
                 slot.clip.is_playing = False
 
 
+class FakeView:
+    """Live's Song.View: the session highlight the browse knob moves."""
+
+    def __init__(self):
+        self.highlighted_clip_slot = None
+        self.selected_track = None
+
+
 class FakeSong:
     def __init__(self, tracks):
         self.tracks = tracks
         self.master_track = FakeTrack('Master')
         self.master_track.mixer_device = FakeMixerDevice(is_master=True)
+        # Live.Song.clip_trigger_quantization, holding the fake enum
+        # values from FakeQuantization below.
+        self.clip_trigger_quantization = 'Q_1_BAR'
+        self.view = FakeView()
+        # Live.Song.tempo: the adapter captures it at load as the
+        # TEMPO faders' centre reference (v1.7) and writes it on
+        # fader moves.  Writes are recorded so tests can count them
+        # (the bridge must write only on a 0.1 BPM change).
+        self._tempo = 120.0
+        self.tempo_writes = []
+
+    @property
+    def tempo(self):
+        return self._tempo
+
+    @tempo.setter
+    def tempo(self, value):
+        self._tempo = value
+        self.tempo_writes.append(value)
 
 
 class FakeCInstance:
@@ -160,6 +189,16 @@ class FakeMidiMap:
             (script_handle, midi_map_handle, channel, cc))
 
 
+class FakeQuantization:
+    """Stand-in for Live.Song.Quantization (enum members as sentinels)."""
+    q_1_bar = 'Q_1_BAR'
+    q_no_q = 'Q_NO_Q'
+
+
+class FakeSongType:
+    Quantization = FakeQuantization
+
+
 def _install_fake_live():
     framework = types.ModuleType('_Framework')
     cs_module = types.ModuleType('_Framework.ControlSurface')
@@ -167,6 +206,7 @@ def _install_fake_live():
     framework.ControlSurface = cs_module
     live_module = types.ModuleType('Live')
     live_module.MidiMap = FakeMidiMap
+    live_module.Song = FakeSongType
     sys.modules.setdefault('_Framework', framework)
     sys.modules.setdefault('_Framework.ControlSurface', cs_module)
     sys.modules.setdefault('Live', live_module)
@@ -381,13 +421,46 @@ def test_eq_knobs_drive_lom_named_eq_three_params():
     assert track_b.devices[1].parameters[2].value == 15.0
 
 
-def test_tempo_and_sync_are_ignored():
+def test_sync_is_ignored():
     surface, song = _make_surface()
-    before = song.master_track.mixer_device.crossfader.value
-    surface.receive_midi(_cc(0, 0, 127))    # TEMPO deck A
     surface.receive_midi(_note(0, 88))      # SYNC deck A
-    assert song.master_track.mixer_device.crossfader.value == before
     assert song.tracks[0].clip_slots[0].fire_count == 0
+    assert song.tempo_writes == []
+
+
+# ---------------------------------------------------------------------------
+# Tempo faders (v1.7): both decks drive the song tempo
+# ---------------------------------------------------------------------------
+
+
+def test_tempo_faders_drive_the_song_tempo():
+    surface, song = _make_surface()
+    # The reference is the song tempo at load (120.0 in the fake);
+    # a fader parked at its centre detent (raw 63/64) writes nothing.
+    surface.receive_midi(_cc(0, 0, 64))     # TEMPO deck A, detent
+    surface.receive_midi(_cc(0, 0, 63))
+    assert song.tempo == 120.0 and song.tempo_writes == []
+    # Deck A to the top of the ±6 BPM range, then back to centre.
+    surface.receive_midi(_cc(0, 0, 127))
+    assert song.tempo == 126.0
+    surface.receive_midi(_cc(0, 0, 64))
+    assert song.tempo == 120.0
+    # Deck B's slider (CC 5 on ch 1) drives the same tempo:
+    # last-moved wins, here to the bottom of the range.
+    surface.receive_midi(_cc(1, 5, 0))
+    assert song.tempo == 114.0
+    assert song.tempo_writes == [126.0, 120.0, 114.0]
+
+
+def test_tempo_fader_writes_only_on_a_tenth_change():
+    surface, song = _make_surface()
+    surface.receive_midi(_cc(0, 0, 65))     # one count up: 120.1
+    assert song.tempo_writes == [120.1]
+    # The same position again quantises to the same value, so the
+    # adapter writes nothing (within-step positions are covered at
+    # bridge level in test_live_bridge.py).
+    surface.receive_midi(_cc(0, 0, 65))
+    assert song.tempo_writes == [120.1]
 
 
 def test_jog_nudges_the_playing_clip():
@@ -462,3 +535,144 @@ def test_hp_cue_led_follows_solo_state():
     surface.receive_midi(_note(0, 84))      # cue deck A off again
     surface.update_display()
     assert (0x90, 84, 0) in surface.sent_midi
+
+
+# ---------------------------------------------------------------------------
+# Performance pads (v1.5): CUE SET / QUANTIZE / LOOP IN / LOOP OUT
+# ---------------------------------------------------------------------------
+
+
+def test_pad_cue_set_writes_the_playing_clips_start_marker():
+    surface, song = _make_surface()
+    track = song.tracks[0]
+    surface.receive_midi(_note(0, 11))      # PLAY deck A
+    clip = track.clip_slots[0].clip
+    clip.playing_position = 12.3
+    surface.receive_midi(_note(7, 4))       # pad 5 = CUE SET
+    # Quantize starts on (Live's 1-bar default): snapped to the beat.
+    assert clip.start_marker == 12.0
+    surface.receive_midi(_note(7, 5))       # pad 6 = QUANTIZE off
+    clip.playing_position = 20.3
+    surface.receive_midi(_note(7, 4))
+    assert clip.start_marker == 20.3
+
+
+def test_pad_quantize_toggles_the_song_launch_quantization():
+    surface, song = _make_surface()
+    assert song.clip_trigger_quantization == 'Q_1_BAR'
+    surface.receive_midi(_note(7, 5))       # pad 6 on deck A
+    assert song.clip_trigger_quantization == 'Q_NO_Q'
+    surface.receive_midi(_note(8, 5))       # pad 6 on deck B: same switch
+    assert song.clip_trigger_quantization == 'Q_1_BAR'
+
+
+def test_pad_loop_in_out_cycle_on_the_playing_clip():
+    surface, song = _make_surface()
+    track = song.tracks[0]
+    surface.receive_midi(_note(0, 11))      # PLAY deck A
+    clip = track.clip_slots[0].clip
+    clip.length = 64.0
+    clip.playing_position = 8.0
+    surface.receive_midi(_note(7, 6))       # pad 7 = LOOP IN
+    assert clip.loop_start == 8.0
+    assert clip.loop_end == 12.0            # provisional +4 beats
+    assert clip.looping is True
+    clip.playing_position = 16.0
+    surface.receive_midi(_note(7, 7))       # pad 8 = LOOP OUT
+    assert clip.loop_end == 16.0
+    assert clip.looping is True
+    surface.receive_midi(_note(7, 7))       # pad 8 again = loop off
+    assert clip.looping is False
+
+
+def test_pad_hotcue_fires_the_current_songs_hot_cue_clip():
+    surface, song = _make_surface(
+        deck_a_clips=('Song 1 - Artist', 'Song 1 – Hot Cue A',
+                      'Song 2 - Other'))
+    track = song.tracks[0]
+    surface.receive_midi(_note(0, 11))      # PLAY: Song 1's main clip
+    assert track.clip_slots[0].fire_count == 1
+    surface.receive_midi(_note(7, 0))       # pad 1 = Hot Cue A
+    assert track.clip_slots[1].fire_count == 1
+    surface.update_display()
+    assert (0x97, 0, 127) in surface.sent_midi  # pad 1 lit while it plays
+    # Song 1 has no Hot Cue B clip: pad 2 must not fire Song 2's clip.
+    surface.receive_midi(_note(7, 1))
+    assert track.clip_slots[2].fire_count == 0
+
+
+def test_pad_edits_without_a_playing_clip_are_noops():
+    surface, song = _make_surface()
+    clip = song.tracks[0].clip_slots[0].clip
+    surface.receive_midi(_note(7, 4))       # CUE SET, nothing playing
+    surface.receive_midi(_note(7, 6))       # LOOP IN
+    surface.receive_midi(_note(7, 7))       # LOOP OUT
+    assert clip.start_marker == 0.0
+    assert clip.looping is False
+
+
+# ---------------------------------------------------------------------------
+# Browse knob (v1.6): turn = session highlight, push = fire
+# ---------------------------------------------------------------------------
+
+
+def test_browse_turn_highlights_and_push_fires():
+    surface, song = _make_surface(deck_a_clips=('A1', 'A2', 'A3'),
+                                  deck_b_clips=('B1', 'B2'))
+    track_a = song.tracks[0]
+    # Nothing playing: the initial target is Deck A (sets start
+    # there).  One detent clockwise moves the highlight to A2.
+    surface.receive_midi(_cc(6, 64, 1))
+    assert song.view.highlighted_clip_slot is track_a.clip_slots[1]
+    assert song.view.selected_track is track_a
+    # Push fires the highlighted clip through the fire_clip path.
+    surface.receive_midi(_note(6, 65))
+    assert track_a.clip_slots[1].fire_count == 1
+
+
+def test_browse_targets_the_standby_deck_once_a_plays():
+    surface, song = _make_surface(deck_a_clips=('A1', 'A2'),
+                                  deck_b_clips=('B1', 'B2', 'B3'))
+    track_b = song.tracks[1]
+    surface.receive_midi(_note(0, 11))      # PLAY on Deck A
+    surface.update_display()                # playing state reported
+    # The knob now browses Deck B (the standby deck).
+    surface.receive_midi(_cc(6, 64, 1))
+    assert song.view.highlighted_clip_slot is track_b.clip_slots[1]
+    assert song.view.selected_track is track_b
+    surface.receive_midi(_note(6, 65))      # push fires B2
+    assert track_b.clip_slots[1].fire_count == 1
+
+
+def test_browse_load_button_pins_the_target_deck():
+    surface, song = _make_surface(deck_a_clips=('A1', 'A2'),
+                                  deck_b_clips=('B1', 'B2'))
+    track_a, track_b = song.tracks
+    surface.receive_midi(_note(0, 11))      # PLAY on Deck A
+    surface.update_display()
+    # LOAD 1 (documented note 70) pins Deck A despite A playing:
+    # the highlight jumps to A's cursor and LOAD itself fires
+    # nothing.
+    surface.receive_midi(_note(6, 70))
+    assert song.view.highlighted_clip_slot is track_a.clip_slots[0]
+    assert track_a.clip_slots[0].fire_count == 1  # from PLAY only
+    assert track_b.clip_slots[0].fire_count == 0
+    surface.receive_midi(_cc(6, 64, 1))
+    assert song.view.highlighted_clip_slot is track_a.clip_slots[1]
+
+
+def test_unmapped_browser_channel_message_logs_once():
+    # The safety net: an unknown control on the browser channel
+    # identifies itself in the log — once, not per message.
+    surface, song = _make_surface()
+    surface.receive_midi(_cc(6, 99, 5))
+    surface.receive_midi(_cc(6, 99, 6))
+    lines = [' '.join(str(a) for a in entry)
+             for entry in surface._c_instance.log_lines]
+    hits = [line for line in lines if 'unmapped' in line and '99' in line]
+    assert len(hits) == 1
+    # Other channels stay silent (the FX channels would flood).
+    surface.receive_midi(_cc(4, 99, 5))
+    lines = [' '.join(str(a) for a in entry)
+             for entry in surface._c_instance.log_lines]
+    assert len([line for line in lines if 'unmapped' in line]) == 1

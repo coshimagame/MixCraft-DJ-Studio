@@ -15,8 +15,54 @@ does only what the design memo (remote_script/README.md) assigns to it:
 
 Everything is defensive: a missing device/parameter/clip is skipped
 silently (one log line at most), never an exception that would kill
-the control surface.  Tempo/SYNC input is ignored by the bridge
-(fixed set BPM, user decision 2026-11-25).
+the control surface.  SYNC input is ignored by the bridge; the
+TEMPO faders drive the song tempo since v1.7 (see below).
+
+v1.5 adds the performance pads (user request 2026-11-26 — try the
+assignment on the real DDJ-RB; he avoids mouse operation, so the
+functions live on the hardware): pads 1-4 fire the current song's
+hot-cue clips, pad 5 sets the playing clip's cue point
+(start_marker), pad 6 toggles the song's clip launch quantization,
+pads 7/8 run the bridge's loop in/out state machine on the playing
+clip.  All decisions stay in the bridge; this adapter only reports
+the playing clip's observed state (pad_context), executes the
+clip_edit / song_edit actions against the LOM — every property
+write guarded, a missing property degrades to a log line — and
+drives the pad LEDs from the bridge's pad_leds().
+
+v1.6 adds BROWSE-knob track selection (user request 2026-11-26 —
+"track selection by knob would be great"): turning the knob moves
+the bridge's selection cursor on the standby deck, the adapter
+points Live's session highlight at the cursor's slot (the knob has
+no LED, so the on-screen highlight is the feedback), and pushing
+the knob fires the selected clip through the same fire_clip path
+as the pads.  LOAD 1/2 pin the browse target deck.  The adapter
+reports each deck's playing clip to the bridge on its display
+tick (note_deck_playing) so the standby rule can work.  The
+browse turn/push MIDI numbers are from AlphaTheta's official
+DDJ-RB MIDI message list (turn = CC 64 on the browser channel,
+difference-count; push = Note 65), confirmed 2026-11-26 — see
+_midi_map.py.  As a general safety net, this adapter also logs
+every UNMAPPED message on the browser channel once per
+(kind, number), so any browser control the profile does not use
+still shows up in Live's Log.txt instead of vanishing silently.
+
+v1.7 adds TEMPO fader control of the song tempo (user request
+2026-11-27 — he relaxed his own fixed-BPM rule, because every
+warped clip follows the song tempo): both decks' TEMPO sliders
+drive the one song tempo over ±6 BPM around the tempo the set
+had when the script loaded, in 0.1 BPM steps; all mapping state
+stays in the bridge.  This adapter only captures the reference
+from song.tempo at load (guarded — if the read fails the faders
+simply plan nothing) and executes the bridge's song_edit
+'song.tempo' actions against the same LOM property, guarded the
+same way.  SYNC stays ignored.  The sliders are read MSB-only:
+the documented map wires no LSB (see _midi_map.py), and one MSB
+count over the ±6 range is ≈0.094 BPM — finer than the 0.1
+step.  Pickup caveat: the two faders share one tempo, so if
+they are parked at different positions, the first movement of
+the other fader takes the tempo to ITS position; parked both
+at the centre detent (the normal case) there is no jump.
 
 Template assumptions (see SETUP.md): Track 1 = Deck A, Track 2 =
 Deck B; each deck track carries a Utility (TRIM), an EQ Three and an
@@ -46,6 +92,7 @@ CUE_NOTE = 12           # per deck channel
 HP_CUE_NOTE = 84        # HEADPHONES CUE 1/2, per deck channel
 PAD_CHANNELS = (7, 8)   # 0-based; PDF channels 8/9
 PAD_COUNT = 8
+BROWSER_CHANNEL = 6     # 0-based; PDF channel 7 (Browser/Global)
 
 # 0-based channels the DDJ-RB profile uses: decks (0/1), FX (4/5),
 # global/browser (6), performance pads (7/8).  build_midi_map
@@ -93,11 +140,22 @@ class MixCraft(ControlSurface):
         # deck -> last filter side (-1 LP, +1 HP) so the type parameter
         # is only rewritten when the knob crosses the centre
         self._filter_side = dict((deck, 0) for deck in DECKS)
+        # clip property names already reported as unsupported, so a
+        # missing LOM property logs once instead of on every pad press
+        self._edit_warned = set()
+        # (kind, number) of unmapped browser-channel messages already
+        # logged — the safety net (see the module docstring)
+        self._unmapped_seen = set()
+        self._view_warned = False
+        # song.tempo write already reported as failed (log once)
+        self._tempo_warned = False
         self._tick = 0
         self._refresh_clip_plans()
+        self._capture_tempo_reference()
         try:
-            self.log_message('MixCraft Remote Script v1 loaded '
-                             '(DDJ-RB companion)')
+            self.log_message('MixCraft Remote Script v1.7 loaded '
+                             '(DDJ-RB companion, pads + browse knob '
+                             '+ tempo faders)')
         except Exception:
             pass
 
@@ -162,19 +220,78 @@ class MixCraft(ControlSurface):
         # dispatch drops the pad index (known constraint): remember the
         # note number of pad-channel notes so the bridge can select the
         # hot-cue clip.  Pad notes are 0-7 by construction of the profile.
+        # Pad actions that edit the playing clip also need its observed
+        # state (the bridge is pure logic and cannot see positions).
         cue_index = None
+        pad_context = None
         if kind == 'note' and channel in PAD_CHANNELS:
             cue_index = number
+            pad_context = self._pad_context(PAD_CHANNELS.index(channel))
         command = midi_mod.dispatch(PROFILE, kind, channel, number, value)
         if command is None:
+            self._note_unmapped(channel, kind, number, value)
             return
         try:
-            actions = self._bridge.handle_dispatch(command,
-                                                   cue_index=cue_index)
+            actions = self._bridge.handle_dispatch(
+                command, cue_index=cue_index, pad_context=pad_context)
         except Exception:
             return
         for action in actions:
             self._execute(action)
+
+    def _note_unmapped(self, channel, kind, number, value):
+        """Log unmapped browser-channel messages once per control.
+
+        A general safety net: the browse knob's own numbers are
+        documented (official list — see _midi_map.py), but any
+        other browser-channel control this profile does not map
+        shows up here, in Live's Log.txt, the first time it moves,
+        instead of being dropped silently.  Other channels are not
+        logged — their unmapped messages are controls the profile
+        deliberately leaves out, and the FX channels would flood
+        the log.
+        """
+        if channel != BROWSER_CHANNEL:
+            return
+        key = (kind, number)
+        if key in self._unmapped_seen:
+            return
+        self._unmapped_seen.add(key)
+        try:
+            self.log_message(
+                'MixCraft: unmapped browser-channel %s %d (value %d) '
+                'on channel 7 — if this was the BROWSE knob, these '
+                'are its real numbers; tell the developer or fix '
+                '_midi_map.py' % (kind, number, value))
+        except Exception:
+            pass
+
+    def _pad_context(self, deck):
+        """Observed state of the deck's playing clip, for pad actions.
+
+        Returns None when nothing is playing (the clip-editing pads
+        then plan nothing; quantize needs no clip and still works).
+        Every read is guarded — a clip lacking a property reports the
+        default instead of raising.
+        """
+        track = self._deck_track(deck + 1)
+        if track is None:
+            return None
+        clip = self._playing_clip(track)
+        if clip is None:
+            return None
+
+        def _num(name):
+            try:
+                return float(getattr(clip, name, 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        return {'playing_position': _num('playing_position'),
+                'looping': bool(getattr(clip, 'looping', False)),
+                'loop_start': _num('loop_start'),
+                'loop_end': _num('loop_end'),
+                'length': _num('length')}
 
     # ------------------------------------------------------------------
     # Action execution
@@ -189,8 +306,136 @@ class MixCraft(ControlSurface):
                 self._execute_fire_clip(action)
             elif action.kind == 'nudge':
                 self._execute_nudge(action)
+            elif action.kind == 'clip_edit':
+                self._execute_clip_edit(action)
+            elif action.kind == 'song_edit':
+                self._execute_song_edit(action)
+            elif action.kind == 'highlight':
+                self._execute_highlight(action)
         except Exception:
             # A single bad target must never take the surface down.
+            pass
+
+    # Clip properties the pad actions may write (LOM Clip attributes).
+    _CLIP_EDIT_PROPS = ('start_marker', 'loop_start', 'loop_end',
+                        'looping')
+
+    def _execute_clip_edit(self, action):
+        """Write one property on the deck's playing clip (pads 5/7/8).
+
+        Guarded throughout: no playing clip, an unknown target or a
+        property the build does not expose all degrade to at most one
+        log line — never an exception out of the pad press.
+        """
+        track = self._deck_track(action.track)
+        if track is None:
+            return
+        clip = self._playing_clip(track)
+        if clip is None:
+            return
+        target = action.target
+        prop = target[len('clip.'):] if target.startswith('clip.') else target
+        if prop not in self._CLIP_EDIT_PROPS:
+            return
+        if not hasattr(clip, prop):
+            if prop not in self._edit_warned:
+                self._edit_warned.add(prop)
+                try:
+                    self.log_message(
+                        'MixCraft: clip has no %s property; pad edits '
+                        'for it are skipped' % (prop,))
+                except Exception:
+                    pass
+            return
+        try:
+            setattr(clip, prop, action.value)
+        except Exception:
+            pass
+
+    def _execute_song_edit(self, action):
+        """Apply a song-level edit (pad 6 / TEMPO faders).
+
+        Two targets: 'song.tempo' (v1.7 — the value is a float BPM,
+        written to the LOM's plain Song.tempo property) and
+        'clip_trigger_quantization' (pad 6 — the bridge speaks
+        'bar' / 'none'; the LOM wants the Live.Song.Quantization
+        enum, q_1_bar / q_no_q).  Every write is guarded: a failure
+        degrades to at most one log line, never an exception.
+        """
+        if action.target == 'song.tempo':
+            try:
+                self.song().tempo = float(action.value)
+            except Exception:
+                if not self._tempo_warned:
+                    self._tempo_warned = True
+                    try:
+                        self.log_message(
+                            'MixCraft: writing song.tempo failed; '
+                            'the TEMPO faders are a no-op in this '
+                            'build')
+                    except Exception:
+                        pass
+            return
+        if action.target != 'clip_trigger_quantization':
+            return
+        enum = None
+        song_type = getattr(Live, 'Song', None)
+        quantization = (getattr(song_type, 'Quantization', None)
+                        if song_type is not None else None)
+        if quantization is not None:
+            enum = getattr(quantization,
+                           'q_1_bar' if action.value == 'bar' else 'q_no_q',
+                           None)
+        if enum is None:
+            try:
+                self.log_message(
+                    'MixCraft: Live.Song.Quantization enum not found; '
+                    'quantize pad is a no-op in this build')
+            except Exception:
+                pass
+            return
+        try:
+            self.song().clip_trigger_quantization = enum
+        except Exception:
+            pass
+
+    def _execute_highlight(self, action):
+        """Point Live's session highlight at the browse cursor's slot.
+
+        The LOM exposes the highlight as song.view.highlighted_clip_
+        slot (assignable to a ClipSlot); the selected track is moved
+        along so the highlight is visible in context.  Guarded like
+        every other write: a build without the property degrades to
+        one log line and the knob simply shows nothing.
+        """
+        track = self._deck_track(action.track)
+        if track is None or action.clip_index is None:
+            return
+        slot = self._clip_bearing_slot(track, action.clip_index)
+        if slot is None:
+            return
+        try:
+            view = self.song().view
+        except Exception:
+            return
+        try:
+            view.selected_track = track
+        except Exception:
+            pass
+        if not hasattr(view, 'highlighted_clip_slot'):
+            if not self._view_warned:
+                self._view_warned = True
+                try:
+                    self.log_message(
+                        'MixCraft: song.view has no highlighted_clip_'
+                        'slot; browse highlight is a no-op in this '
+                        'build')
+                except Exception:
+                    pass
+            return
+        try:
+            view.highlighted_clip_slot = slot
+        except Exception:
             pass
 
     def _execute_set_parameter(self, action):
@@ -263,6 +508,12 @@ class MixCraft(ControlSurface):
             if candidate is slot:
                 self._loaded_slot[action.track - 1] = i
                 break
+        # The bridge tracks the current song group from what fires.
+        try:
+            self._bridge.note_clip_fired(action.track - 1,
+                                         action.clip_index)
+        except Exception:
+            pass
 
     def _execute_nudge(self, action):
         track = self._deck_track(action.track)
@@ -289,6 +540,10 @@ class MixCraft(ControlSurface):
         slot = self._start_slot(track, deck)
         if slot is not None:
             slot.fire()
+            for i, candidate in enumerate(track.clip_slots):
+                if candidate is slot:
+                    self._note_slot_fired(track, deck, i)
+                    break
 
     def _cue_jump(self, track, deck):
         # v1 approximation of the DDJ-RB CUE button: while a clip is
@@ -299,10 +554,40 @@ class MixCraft(ControlSurface):
         if index >= 0:
             track.clip_slots[index].fire()
             self._loaded_slot[deck] = index
+            self._note_slot_fired(track, deck, index)
             return
         slot = self._start_slot(track, deck)
         if slot is not None:
             slot.fire()
+            for i, candidate in enumerate(track.clip_slots):
+                if candidate is slot:
+                    self._note_slot_fired(track, deck, i)
+                    break
+
+    def _ordinal_of_slot(self, track, slot_index):
+        """Clip-bearing ordinal of a Session slot index (or None).
+
+        The bridge counts clips, not slots (empty slots are skipped
+        in its plans), so slot indices are converted through the
+        same counting _clip_bearing_slot uses in reverse.
+        """
+        ordinal = -1
+        for i, slot in enumerate(track.clip_slots):
+            if slot.has_clip:
+                ordinal += 1
+                if i == slot_index:
+                    return ordinal
+        return None
+
+    def _note_slot_fired(self, track, deck, slot_index):
+        """Report a directly-fired slot to the bridge's song tracker."""
+        ordinal = self._ordinal_of_slot(track, slot_index)
+        if ordinal is None:
+            return
+        try:
+            self._bridge.note_clip_fired(deck, ordinal)
+        except Exception:
+            pass
 
     def _start_slot(self, track, deck):
         """The slot PLAY should fire: last fired, else first with a clip."""
@@ -426,8 +711,32 @@ class MixCraft(ControlSurface):
             freq_param.value = low + sweep * (high - low)
 
     # ------------------------------------------------------------------
-    # Clip plans (hot-cue pads)
+    # Clip plans (hot-cue pads) / tempo reference (v1.7)
     # ------------------------------------------------------------------
+    def _capture_tempo_reference(self):
+        """Report the song tempo at load as the faders' centre.
+
+        His sets are built at the SET BPM, so the tempo the set
+        opens with IS the planned tempo — the bridge quantises it
+        to a 0.1 step and the centre detent restores it.  Guarded:
+        if the read fails, the bridge never gets a reference and
+        the TEMPO faders plan nothing (the v1.6 behaviour).
+        """
+        try:
+            tempo = float(self.song().tempo)
+        except Exception:
+            return
+        try:
+            self._bridge.set_tempo_reference(tempo)
+        except Exception:
+            pass
+        try:
+            self.log_message(
+                'MixCraft: TEMPO faders centred on %.1f BPM '
+                '(the set tempo at load)' % (tempo,))
+        except Exception:
+            pass
+
     def _refresh_clip_plans(self):
         """Build each deck's clip plan from its Session slots.
 
@@ -438,7 +747,6 @@ class MixCraft(ControlSurface):
         lay hot-cue clips out (see SETUP.md).  Empty slots are skipped
         here and again when firing, so gaps never misalign the pads.
         """
-        plans = {}
         for deck in DECKS:
             track = self._deck_track(deck + 1)
             if track is None:
@@ -447,9 +755,11 @@ class MixCraft(ControlSurface):
             for slot in track.clip_slots:
                 if slot.has_clip:
                     clips.append({'name': slot.clip.name})
-            if clips:
-                plans[deck] = {'clips': clips, 'locators': []}
-        self._bridge.clip_plans = plans
+            plan = {'clips': clips, 'locators': []} if clips else None
+            try:
+                self._bridge.set_clip_plan(deck, plan)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # LED feedback
@@ -499,13 +809,29 @@ class MixCraft(ControlSurface):
             cued = bool(track is not None
                         and getattr(track, 'solo', False))
             self._send_led(deck, HP_CUE_NOTE, 127 if cued else 0)
-        # Pad LEDs: lit for pads whose slot holds a clip.
+        # Pad LEDs: the bridge decides (v1.5 layout) — hot-cue pads
+        # light while their clip plays, CUE SET while anything plays,
+        # QUANTIZE with the toggle state, LOOP IN/OUT with the loop
+        # state machine's phase.  The same observation feeds the
+        # bridge's browse targeting (v1.6): which clip is playing on
+        # each deck decides the standby deck.
         for deck in DECKS:
-            plan = self._bridge.clip_plans.get(deck) or {}
-            count = len(plan.get('clips', []))
+            track = self._deck_track(deck + 1)
+            playing_ordinal = None
+            if track is not None and track.playing_slot_index >= 0:
+                playing_ordinal = self._ordinal_of_slot(
+                    track, track.playing_slot_index)
+            try:
+                self._bridge.note_deck_playing(deck, playing_ordinal)
+            except Exception:
+                pass
+            try:
+                states = self._bridge.pad_leds(deck, playing_ordinal)
+            except Exception:
+                states = [False] * PAD_COUNT
             for n in range(PAD_COUNT):
                 self._send_led(PAD_CHANNELS[deck], n,
-                               127 if n < count else 0)
+                               127 if states[n] else 0)
 
     def _send_led(self, channel, note, velocity):
         key = (channel, note)

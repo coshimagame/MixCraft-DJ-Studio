@@ -11,6 +11,22 @@ syntax.  This copy keeps ``plan_event`` / ``plan_dispatch`` /
 - Python 2 ``round()`` returns a float, so ``_jog_delta`` casts to
   ``int`` to keep the tick delta an integer as in the original.
 
+The v1.5 performance-pad rules (song groups, quantize toggle, loop
+state machine, pad LEDs) are mirrored identically; the name
+separators are written as unicode escapes so Python 2 compares them
+as unicode, never as bytes, against clip names coming from Live.
+
+The v1.6 browse-knob rules (selection cursor, standby-deck target,
+LOAD override, highlight plans) are mirrored identically too —
+including the browse turn/push MIDI numbers, which are from
+AlphaTheta's official DDJ-RB MIDI message list — turn CC 64,
+push Note 65 on the browser channel (see ``_midi_map.py``).
+
+The v1.7 tempo-fader rules (both decks' TEMPO sliders drive the
+one song tempo, ±6 BPM around the tempo captured at script init,
+0.1 BPM steps, last-moved fader wins) are mirrored identically
+too — see the root module's tempo section for the rationale.
+
 The full design rationale (conversion table, fixed-BPM rule, jog
 encoding assumption) lives in the root module's docstring — read it
 there.  When the root module's rules change, mirror them here.
@@ -22,6 +38,29 @@ DECK_TRACKS = {0: 1, 1: 2}
 # One jog tick = this many beats of nudge.
 # 0.01 -> 0.005 on 2026-11-26 (finer step, user request; mirror of root).
 NUDGE_BEATS_PER_TICK = 0.005
+
+# Performance pads (v1.5, mirror of root): pads 1-4 Hot Cue A-D,
+# pad 5 CUE SET, pad 6 QUANTIZE, pad 7 LOOP IN, pad 8 LOOP OUT.
+PAD_HOTCUE_COUNT = 4
+
+# LOOP IN arms a provisional loop of this many beats.
+LOOP_PROVISIONAL_BEATS = 4.0
+
+# The two clip_trigger_quantization states pad 6 toggles between.
+QUANTIZATION_BAR = 'bar'
+QUANTIZATION_NONE = 'none'
+
+# Browse knob (v1.6, mirror of root): sign applied to the decoded
+# encoder delta.  +1 assumes clockwise = next clip; flip to -1 if
+# the real knob runs reversed.
+BROWSE_TURN_SIGN = 1
+
+# Tempo faders (v1.7, mirror of root): ±6 BPM range around the
+# captured reference, 0.1 BPM steps; the sign assumes the top of
+# the MIDI range is the fast end — flip to -1 if reversed.
+TEMPO_RANGE_BPM = 6.0
+TEMPO_STEP_BPM = 0.1
+TEMPO_FADER_SIGN = 1
 
 _EQ_TARGETS = {'eq_high': 'eq_three.high',
                'eq_mid': 'eq_three.mid',
@@ -35,19 +74,26 @@ _TRANSPORT_TARGETS = {'play': 'clip.toggle_play',
                       'load': 'track.load'}
 
 # Actions that intentionally produce no LiveAction (design doc 5.4).
-_IGNORED_ACTIONS = {'tempo', 'sync'}
+_IGNORED_ACTIONS = {'sync'}
 
 
 class LiveAction(object):
     """One planned operation against Live.  Pure data, no Live objects.
 
-    kind:   'set_parameter' | 'transport' | 'fire_clip' | 'nudge'
+    kind:   'set_parameter' | 'transport' | 'fire_clip' | 'nudge' |
+            'clip_edit' | 'song_edit' | 'highlight'
     track:  1-based Live track number, or None for global (mixer) targets
-    target: dotted name of what to touch, e.g. 'eq_three.high'
+    target: dotted name of what to touch, e.g. 'eq_three.high';
+            'clip.start_marker' / 'clip.loop_start' / 'clip.loop_end' /
+            'clip.looping' for clip_edit, 'clip_trigger_quantization'
+            / 'song.tempo' for song_edit, 'view.highlighted_clip_slot'
+            for highlight
     value:  normalised float for set_parameter, signed beats for nudge,
-            True for transport / fire_clip
-    clip_index / clip_name: set for fire_clip (index into the deck's
-            clip plan clips list)
+            True for transport / fire_clip / highlight, beats or bool
+            for clip_edit, 'bar' / 'none' for song_edit
+            'clip_trigger_quantization', float BPM for 'song.tempo'
+    clip_index / clip_name: set for fire_clip and highlight (index
+            into the deck's clip plan clips list)
     """
 
     def __init__(self, kind, track, target, value=None,
@@ -96,12 +142,127 @@ def _jog_delta(normalised):
     return -ticks
 
 
-def plan_event(action, deck, value, clip_plan=None, cue_index=None):
+def _browse_delta(normalised):
+    """Signed detents from a browse-encoder CC (mirror of root).
+
+    Same relative encoding as the jog (raw 0x01-0x3F = +,
+    0x7F-0x41 = -) but NOT negated — the jog's flip was specific
+    to the jog hardware path.
+    """
+    raw = int(round(_clamp01(normalised) * 127))
+    ticks = raw if raw < 64 else raw - 128
+    return BROWSE_TURN_SIGN * ticks
+
+
+def _quantise_tempo(bpm):
+    """Round a tempo to the nearest TEMPO_STEP_BPM (mirror of root).
+
+    int(x / step + 0.5), not round(): Python 2 and 3 round halves
+    differently, and the two copies must agree exactly.  Tempos
+    are positive, where int() truncation is floor.
+    """
+    steps = int(float(bpm) / TEMPO_STEP_BPM + 0.5)
+    return round(steps * TEMPO_STEP_BPM, 1)
+
+
+def tempo_for_fader(reference, normalised):
+    """Song tempo for a TEMPO fader position (mirror of root).
+
+    Centre (0.5) = the reference exactly; the ends are reference
+    ± TEMPO_RANGE_BPM; quantised to TEMPO_STEP_BPM.
+    """
+    offset = (TEMPO_FADER_SIGN * (_clamp01(normalised) - 0.5)
+              * 2.0 * TEMPO_RANGE_BPM)
+    return _quantise_tempo(reference + offset)
+
+
+# Clip-name separators (mirror of root): main clips are
+# '<title> - <artist>' (hyphen), hot-cue clips '<title> – <label>'
+# (en dash U+2013).  Escapes, so Python 2 treats them as unicode.
+_NAME_SEPARATORS = (' - ', ' \u2013 ')
+
+
+def clip_base_name(name):
+    """The song-title part of a clip name (before the first separator)."""
+    if not name:
+        return ''
+    cut = len(name)
+    for sep in _NAME_SEPARATORS:
+        index = name.find(sep)
+        if 0 <= index < cut:
+            cut = index
+    return name[:cut]
+
+
+def _name_remainder(name):
+    """The part of a clip name after the first separator ('' if none)."""
+    if not name:
+        return ''
+    best = None
+    for sep in _NAME_SEPARATORS:
+        index = name.find(sep)
+        if index >= 0 and (best is None or index < best[0]):
+            best = (index, len(sep))
+    if best is None:
+        return ''
+    return name[best[0] + best[1]:]
+
+
+def compute_clip_groups(clips):
+    """Partition an ordered clip plan into song groups (mirror of root).
+
+    A clip joins the previous group when its name is a hot-cue
+    variant of that group's main clip (same base title, different
+    remainder).  No detectable grouping -> one group per clip.
+    """
+    groups = []
+    for ordinal, clip in enumerate(clips):
+        name = clip.get('name') or ''
+        base = clip_base_name(name)
+        joined = False
+        if groups and base:
+            main_name = clips[groups[-1][0]].get('name') or ''
+            if (base == clip_base_name(main_name)
+                    and name != main_name
+                    and _name_remainder(name)
+                    != _name_remainder(main_name)):
+                groups[-1].append(ordinal)
+                joined = True
+        if not joined:
+            groups.append([ordinal])
+    return groups
+
+
+def _group_has_main(clips, group):
+    """True when the group's first clip is a song's main clip.
+
+    Main = '<title> - <artist>' (hyphen) with en-dash hot-cue clips
+    after it; a group starting with an en-dash name has no separate
+    main, so pads address it from position 0 (mirror of root).
+    """
+    if len(group) < 2:
+        return False
+    first = clips[group[0]].get('name') or ''
+    if ' - ' not in first:
+        return False
+    base = clip_base_name(first)
+    for ordinal in group[1:]:
+        other = clips[ordinal].get('name') or ''
+        if '\u2013' in other and clip_base_name(other) == base:
+            return True
+    return False
+
+
+def plan_event(action, deck, value, clip_plan=None, cue_index=None,
+               pad_context=None, quantize_on=True):
     """Convert one semantic controller event into LiveActions.
 
     `action`/`deck`/`value` follow the midi_map.dispatch contract.
     `clip_plan` is a library.cues_to_clip_plan result for the deck's
     track; `cue_index` selects which hot-cue clip to fire.
+    `pad_context` is the adapter's observation of the deck's playing
+    clip (beats); `quantize_on` is the caller's quantize state, owned
+    by LiveBridge (mirror of root).
     Returns a list (possibly empty) of LiveAction.
     """
     if action is None or action in _IGNORED_ACTIONS:
@@ -112,6 +273,11 @@ def plan_event(action, deck, value, clip_plan=None, cue_index=None):
         target = ('mixer.crossfader' if action == 'cross'
                   else 'mixer.master_volume')
         return [LiveAction('set_parameter', None, target, _clamp01(value))]
+    if action == 'quantize':
+        # Song-level: toggles the song's launch quantization.
+        new_value = QUANTIZATION_NONE if quantize_on else QUANTIZATION_BAR
+        return [LiveAction('song_edit', None,
+                           'clip_trigger_quantization', new_value)]
     if track is None:
         return []  # deck action without a known deck: nowhere to send it
 
@@ -146,16 +312,37 @@ def plan_event(action, deck, value, clip_plan=None, cue_index=None):
         return [LiveAction('fire_clip', track, 'clip.fire', True,
                            clip_index=cue_index,
                            clip_name=clip.get('name'))]
+    if action == 'cue_set':
+        # Pad 5: start marker := playing position, snapped to the
+        # nearest whole beat while quantize is on (mirror of root).
+        if pad_context is None:
+            return []
+        position = pad_context.get('playing_position')
+        if position is None:
+            return []
+        position = float(position)
+        if quantize_on:
+            position = float(int(round(position)))
+        return [LiveAction('clip_edit', track, 'clip.start_marker',
+                           position)]
+    if action in ('pad_loop_in', 'pad_loop_out'):
+        return []  # state machine: LiveBridge.handle owns these
+    if action in ('browse_turn', 'browse_push'):
+        return []  # cursor state: LiveBridge.handle owns these
+    if action == 'tempo':
+        return []  # reference + last-value state: LiveBridge owns it
     return []
 
 
-def plan_dispatch(command, clip_plan=None, cue_index=None):
+def plan_dispatch(command, clip_plan=None, cue_index=None,
+                  pad_context=None, quantize_on=True):
     """Convert a midi_map.dispatch result (or None) into LiveActions."""
     if command is None:
         return []
     action, deck, value = command
     return plan_event(action, deck, value,
-                      clip_plan=clip_plan, cue_index=cue_index)
+                      clip_plan=clip_plan, cue_index=cue_index,
+                      pad_context=pad_context, quantize_on=quantize_on)
 
 
 class LiveBridge(object):
@@ -163,21 +350,374 @@ class LiveBridge(object):
 
     Holds each deck's clip plan (built from library.cues_to_clip_plan,
     or by the adapter scanning the deck track's Session slots) and the
-    fixed set BPM.  The BPM is recorded for display/logging only — by
-    design no event ever turns into a tempo action.
+    set BPM.  Since v1.7 the BPM doubles as the tempo faders' centre
+    reference; a constructor `set_bpm` seeds the same reference
+    `set_tempo_reference` sets from the live song tempo.
+
+    v1.5 pad state (mirror of the root module — see its docstring):
+    `_group_main[deck]` is the current song's main clip ordinal,
+    learned from `note_clip_fired`; `_quantize_on` is pad 6's toggle
+    (starts True, Live's 1-bar factory default); `_loop_state[deck]`
+    is the LOOP IN/OUT state machine ('idle' -> 'open' -> 'set' ->
+    'idle').
+
+    v1.6 browse state (mirror of root): `_playing[deck]` is the
+    playing clip ordinal reported via `note_deck_playing` (None =
+    stopped); `_browse_cursor[deck]` is the selection cursor;
+    `_browse_explicit` is the LOAD-pinned target deck (clears when
+    a clip fires on it); `_browse_last` is the last resolved target.
+
+    v1.7 tempo state (mirror of root): `_tempo_reference` is the
+    song tempo captured at script init (quantised to 0.1), or None
+    until the adapter reports it; `_tempo_current` is the last
+    quantised tempo commanded — a fader event emits only on a
+    change, and both decks share the pair (last-moved wins).
     """
 
     def __init__(self, clip_plans=None, set_bpm=None):
         self.clip_plans = clip_plans or {}  # deck index -> clip plan
         self.set_bpm = set_bpm
+        self._quantize_on = True
+        self._loop_state = {}   # deck -> {'phase': str, 'start': float}
+        self._group_main = {}   # deck -> main clip ordinal of the song
+        self._groups_cache = {}  # deck -> (names tuple, groups)
+        self._playing = {}      # deck -> playing clip ordinal or None
+        self._last_fired = {}   # deck -> last clip ordinal fired
+        self._browse_cursor = {}  # deck -> selection cursor (ordinal)
+        self._browse_explicit = None  # deck pinned by LOAD 1/2
+        self._browse_last = None      # last resolved browse target
+        self._tempo_reference = None  # song tempo captured at init
+        self._tempo_current = None    # last quantised tempo commanded
+        if set_bpm is not None:
+            self.set_tempo_reference(set_bpm)
 
-    def handle(self, action, deck, value, cue_index=None):
-        return plan_event(action, deck, value,
-                          clip_plan=self.clip_plans.get(deck),
-                          cue_index=cue_index)
+    @property
+    def quantize_on(self):
+        """Pad 6's current state (True = launch quantization is 1 bar)."""
+        return self._quantize_on
 
-    def handle_dispatch(self, command, cue_index=None):
+    # -- tempo faders (v1.7) ---------------------------------------------
+
+    @property
+    def tempo_reference(self):
+        """The TEMPO faders' centre tempo (BPM), None before capture."""
+        return self._tempo_reference
+
+    @property
+    def current_tempo(self):
+        """The last quantised tempo commanded (BPM), or None."""
+        return self._tempo_current
+
+    def set_tempo_reference(self, bpm):
+        """Capture the centre reference from the song tempo at init
+        (mirror of root).  Quantised to a 0.1 step so the centre
+        detent restores it exactly; junk input is ignored."""
+        try:
+            bpm = float(bpm)
+        except (TypeError, ValueError):
+            return
+        if bpm <= 0:
+            return
+        self._tempo_reference = _quantise_tempo(bpm)
+        self._tempo_current = self._tempo_reference
+
+    def _plan_tempo(self, value):
+        if self._tempo_reference is None:
+            return []  # the adapter has not reported the song tempo
+        target = tempo_for_fader(self._tempo_reference, value)
+        if target == self._tempo_current:
+            return []  # same 0.1 step: the adapter writes nothing
+        self._tempo_current = target
+        return [LiveAction('song_edit', None, 'song.tempo', target)]
+
+    # -- clip plans / song groups --------------------------------------
+
+    def set_clip_plan(self, deck, plan):
+        """Replace a deck's clip plan; keeps the tracked song if it
+        still exists in the new plan (mirror of root)."""
+        if plan is None:
+            self.clip_plans.pop(deck, None)
+        else:
+            self.clip_plans[deck] = plan
+        self._groups_cache.pop(deck, None)
+        main = self._group_main.get(deck)
+        if main is not None and not any(
+                main in group for group in self._groups_for(deck)):
+            self._group_main[deck] = None
+
+    def _groups_for(self, deck):
+        plan = self.clip_plans.get(deck) or {}
+        explicit = plan.get('groups')
+        if explicit:
+            return [list(group) for group in explicit]
+        clips = plan.get('clips', [])
+        key = tuple(clip.get('name') for clip in clips)
+        cached = self._groups_cache.get(deck)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        groups = compute_clip_groups(clips)
+        self._groups_cache[deck] = (key, groups)
+        return groups
+
+    def note_clip_fired(self, deck, ordinal):
+        """Learn the current song from a clip the adapter fired."""
+        if ordinal is None or ordinal < 0:
+            return
+        self._last_fired[deck] = ordinal
+        if self._browse_explicit == deck:
+            # The LOAD-pinned deck just got its clip: the override
+            # has done its job, standby targeting resumes.
+            self._browse_explicit = None
+        for group in self._groups_for(deck):
+            if ordinal in group:
+                self._group_main[deck] = group[0]
+                return
+        self._group_main[deck] = ordinal
+
+    def note_deck_playing(self, deck, ordinal):
+        """Record which clip is playing on a deck (None = stopped).
+
+        Reported by the adapter from its display tick; the browse
+        target rule reads it to find the standby deck.
+        """
+        if deck in DECK_TRACKS:
+            self._playing[deck] = ordinal
+
+    def _hotcue_target(self, deck, cue_index):
+        """Clip ordinal pad (cue_index + 1) would fire, or None."""
+        plan = self.clip_plans.get(deck)
+        if (not plan or cue_index is None
+                or not 0 <= cue_index < PAD_HOTCUE_COUNT):
+            return None
+        clips = plan.get('clips', [])
+        if not clips:
+            return None
+        groups = self._groups_for(deck)
+        main = self._group_main.get(deck)
+        if main is not None:
+            for group in groups:
+                if group and group[0] == main:
+                    offset = 1 if _group_has_main(clips, group) else 0
+                    position = cue_index + offset
+                    if position < len(group):
+                        return group[position]
+                    break
+            if any(len(group) > 1 for group in groups):
+                # Grouping is detectable and this song has no such
+                # hot cue: firing another song's clip is worse.
+                return None
+        if cue_index < len(clips):
+            return cue_index  # fallback: pad n fires clip #n (v1.4)
+        return None
+
+    def _plan_hotcue(self, deck, cue_index):
+        track = DECK_TRACKS.get(deck)
+        if track is None:
+            return []
+        target = self._hotcue_target(deck, cue_index)
+        if target is None:
+            return []
+        clips = self.clip_plans[deck].get('clips', [])
+        return [LiveAction('fire_clip', track, 'clip.fire', True,
+                           clip_index=target,
+                           clip_name=clips[target].get('name'))]
+
+    # -- loop state machine ---------------------------------------------
+
+    def loop_phase(self, deck):
+        """'idle' | 'open' | 'set' — the deck's pad-loop state."""
+        return self._loop_state.get(deck, {}).get('phase', 'idle')
+
+    def _plan_pad_loop_in(self, deck, pad_context):
+        track = DECK_TRACKS.get(deck)
+        if track is None or pad_context is None:
+            return []
+        position = pad_context.get('playing_position')
+        if position is None:
+            return []
+        position = float(position)
+        end = position + LOOP_PROVISIONAL_BEATS
+        length = pad_context.get('length')
+        if length:
+            end = min(end, float(length))
+        if end <= position:
+            return []  # at/past the clip end: no sane loop to arm
+        state = self._loop_state.setdefault(
+            deck, {'phase': 'idle', 'start': None})
+        state['phase'] = 'open'
+        state['start'] = position
+        return [LiveAction('clip_edit', track, 'clip.loop_start', position),
+                LiveAction('clip_edit', track, 'clip.loop_end', end),
+                LiveAction('clip_edit', track, 'clip.looping', True)]
+
+    def _plan_pad_loop_out(self, deck, pad_context):
+        track = DECK_TRACKS.get(deck)
+        if track is None or pad_context is None:
+            return []
+        position = pad_context.get('playing_position')
+        if position is None:
+            return []
+        position = float(position)
+        state = self._loop_state.setdefault(
+            deck, {'phase': 'idle', 'start': None})
+        if state['phase'] == 'set':
+            # A loop is active and set: this press turns it off.
+            state['phase'] = 'idle'
+            state['start'] = None
+            return [LiveAction('clip_edit', track, 'clip.looping', False)]
+        start = (state['start'] if state['phase'] == 'open'
+                 else pad_context.get('loop_start', 0.0))
+        actions = []
+        if position > float(start):
+            actions.append(
+                LiveAction('clip_edit', track, 'clip.loop_end', position))
+        # Position not past the start: the provisional end stands.
+        actions.append(LiveAction('clip_edit', track, 'clip.looping', True))
+        state['phase'] = 'set'
+        return actions
+
+    # -- pad LEDs ---------------------------------------------------------
+
+    def pad_leds(self, deck, playing_ordinal=None):
+        """The 8 pad LED states for a deck, as booleans (mirror of root).
+
+        Pads 1-4 lit while their target clip plays; pad 5 while any
+        clip plays; pad 6 = quantize on; pad 7 = loop open; pad 8 =
+        loop set and active.
+        """
+        leds = [False] * 8
+        for n in range(PAD_HOTCUE_COUNT):
+            target = self._hotcue_target(deck, n)
+            leds[n] = (target is not None
+                       and playing_ordinal is not None
+                       and target == playing_ordinal)
+        leds[4] = playing_ordinal is not None
+        leds[5] = self._quantize_on
+        phase = self.loop_phase(deck)
+        leds[6] = phase == 'open'
+        leds[7] = phase == 'set'
+        return leds
+
+    # -- browse knob (v1.6) ----------------------------------------------
+
+    def _browse_clip_count(self, deck):
+        plan = self.clip_plans.get(deck) or {}
+        return len(plan.get('clips', []))
+
+    def browse_target_deck(self):
+        """The deck the browse knob currently addresses (mirror of
+        root): LOAD-pinned deck first, else the standby deck (the
+        one not playing), else the last target; initially the deck
+        with clips that is not playing, Deck A preferred."""
+        playing = [deck for deck in (0, 1)
+                   if self._playing.get(deck) is not None]
+        if self._browse_explicit is not None:
+            target = self._browse_explicit
+        elif len(playing) == 1:
+            target = 1 - playing[0]
+        elif self._browse_last is not None:
+            target = self._browse_last
+        elif self._browse_clip_count(0):
+            target = 0
+        elif self._browse_clip_count(1):
+            target = 1
+        else:
+            target = 0
+        self._browse_last = target
+        return target
+
+    def browse_cursor(self, deck):
+        """The deck's selection cursor (clip ordinal), or None when
+        the deck has no clips.  Defaults to the last clip fired on
+        the deck, else the first clip; clamped into the current
+        plan on every read."""
+        count = self._browse_clip_count(deck)
+        if count == 0:
+            return None
+        cursor = self._browse_cursor.get(deck)
+        if cursor is None:
+            cursor = self._last_fired.get(deck, 0)
+        cursor = min(max(int(cursor), 0), count - 1)
+        self._browse_cursor[deck] = cursor
+        return cursor
+
+    def _highlight_action(self, deck):
+        track = DECK_TRACKS.get(deck)
+        cursor = self.browse_cursor(deck)
+        if track is None or cursor is None:
+            return []
+        clips = self.clip_plans[deck].get('clips', [])
+        return [LiveAction('highlight', track,
+                           'view.highlighted_clip_slot', True,
+                           clip_index=cursor,
+                           clip_name=clips[cursor].get('name'))]
+
+    def _plan_browse_turn(self, value):
+        delta = _browse_delta(value)
+        if delta == 0:
+            return []
+        deck = self.browse_target_deck()
+        count = self._browse_clip_count(deck)
+        if count == 0:
+            return []
+        cursor = self.browse_cursor(deck)
+        moved = min(max(cursor + delta, 0), count - 1)
+        if moved == cursor:
+            return []  # at the first/last clip: no wrap, no plan
+        self._browse_cursor[deck] = moved
+        return self._highlight_action(deck)
+
+    def _plan_browse_push(self):
+        deck = self.browse_target_deck()
+        track = DECK_TRACKS.get(deck)
+        cursor = self.browse_cursor(deck)
+        if track is None or cursor is None:
+            return []
+        clips = self.clip_plans[deck].get('clips', [])
+        return [LiveAction('fire_clip', track, 'clip.fire', True,
+                           clip_index=cursor,
+                           clip_name=clips[cursor].get('name'))]
+
+    def _plan_load(self, deck):
+        """LOAD 1/2: pin the browse target to this deck (no firing).
+
+        Supersedes plan_event's plain track.load conversion for the
+        script path (mirror of root — see its docstring).  The plan
+        is the highlight for the newly targeted deck.
+        """
+        if deck not in DECK_TRACKS:
+            return []
+        self._browse_explicit = deck
+        self._browse_last = deck
+        return self._highlight_action(deck)
+
+    # -- entry points -----------------------------------------------------
+
+    def handle(self, action, deck, value, cue_index=None, pad_context=None):
+        if action == 'hotcue_jump':
+            return self._plan_hotcue(deck, cue_index)
+        if action == 'pad_loop_in':
+            return self._plan_pad_loop_in(deck, pad_context)
+        if action == 'pad_loop_out':
+            return self._plan_pad_loop_out(deck, pad_context)
+        if action == 'browse_turn':
+            return self._plan_browse_turn(value)
+        if action == 'browse_push':
+            return self._plan_browse_push()
+        if action == 'load':
+            return self._plan_load(deck)
+        if action == 'tempo':
+            return self._plan_tempo(value)
+        actions = plan_event(action, deck, value,
+                             clip_plan=self.clip_plans.get(deck),
+                             cue_index=cue_index, pad_context=pad_context,
+                             quantize_on=self._quantize_on)
+        if action == 'quantize' and actions:
+            self._quantize_on = not self._quantize_on
+        return actions
+
+    def handle_dispatch(self, command, cue_index=None, pad_context=None):
         if command is None:
             return []
         return self.handle(command[0], command[1], command[2],
-                           cue_index=cue_index)
+                           cue_index=cue_index, pad_context=pad_context)

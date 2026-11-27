@@ -56,9 +56,17 @@ DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
            (0, 11): ('eq_mid', 0), (1, 11): ('eq_mid', 1),
            (0, 15): ('eq_low', 0), (1, 15): ('eq_low', 1),
            (6, 23): ('filter', 0), (6, 24): ('filter', 1),      # Filter Parameter (E11)
-           (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider
+           (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider (MSB; the LSB at MSB+32 is documented above but not wired — one MSB count over the bridge's ±6 BPM range is ≈0.094 BPM, finer than its 0.1 step; see live_bridge v1.7)
            (0, 34): ('jog', 0), (1, 34): ('jog', 1),            # JOG platter (relative)
-           (0, 33): ('jog', 0), (1, 33): ('jog', 1)},           # JOG wheel side (relative)
+           (0, 33): ('jog', 0), (1, 33): ('jog', 1),            # JOG wheel side (relative)
+           # BROWSE knob turn — from AlphaTheta's official DDJ-RB
+           # MIDI message list (DDJ-RB_MIDI_Message_List_E.pdf):
+           # CC 64 on the Browser/Global channel (ch 7 in the PDF =
+           # 6 here), difference-count encoding — clockwise sends
+           # 0x01-0x1E, counter-clockwise 0x7F-0x62.  Confirmed
+           # against the official list 2026-11-26; like the rest of
+           # this table it is documented, not hardware-verified.
+           (6, 64): ('browse_turn', None)},                      # BROWSE turn
     'note': {(0, 11): ('play', 0), (1, 11): ('play', 1),        # PLAY/PAUSE = Note 11
              (0, 12): ('cue_jump', 0), (1, 12): ('cue_jump', 1),
              # HEADPHONES CUE 1/2 buttons = Note 84 (C5 in Live's
@@ -69,11 +77,25 @@ DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
              (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
              (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
              (6, 70): ('load', 0), (6, 71): ('load', 1),        # LOAD buttons
-             # PERFORMANCE PADs in HOT CUE mode (pad channels 8/9 in the
-             # PDF = 7/8 here), notes 0-7 = pads 1-8. Like the APC40
-             # profile, dispatch does not pass the pad index yet.
-             **{(7, n): ('hotcue_jump', 0) for n in range(8)},
-             **{(8, n): ('hotcue_jump', 1) for n in range(8)}},
+             # BROWSE knob push — Note 65 on the Browser/Global
+             # channel, from the same official list as the turn CC
+             # above.  The push is not deck-specific; the LOAD
+             # notes (70/71 above) are the deck-specific ones.
+             (6, 65): ('browse_push', None),                     # BROWSE push
+             # PERFORMANCE PADs (pad channels 8/9 in the PDF = 7/8
+             # here), notes 0-7 = pads 1-8.  v1.5 layout (user
+             # decision 2026-11-26 — everything on the hardware, no
+             # mouse): pads 1-4 = Hot Cue A-D, pad 5 = CUE SET,
+             # pad 6 = QUANTIZE toggle, pad 7 = LOOP IN, pad 8 =
+             # LOOP OUT.  Like the APC40 profile, dispatch does not
+             # pass the pad index; the Remote Script adapter supplies
+             # the note number as cue_index (see live_bridge).
+             **{(7, n): ('hotcue_jump', 0) for n in range(4)},
+             **{(8, n): ('hotcue_jump', 1) for n in range(4)},
+             (7, 4): ('cue_set', 0), (8, 4): ('cue_set', 1),
+             (7, 5): ('quantize', 0), (8, 5): ('quantize', 1),
+             (7, 6): ('pad_loop_in', 0), (8, 6): ('pad_loop_in', 1),
+             (7, 7): ('pad_loop_out', 0), (8, 7): ('pad_loop_out', 1)},
 }
 PROFILES = {'APC40': APC40, 'APC40 mkII': APC40_MKII, 'DDJ-RB': DDJ_RB}
 

@@ -56,9 +56,15 @@ def _build_ddj_rb():
           (0, 11): ('eq_mid', 0), (1, 11): ('eq_mid', 1),
           (0, 15): ('eq_low', 0), (1, 15): ('eq_low', 1),
           (6, 23): ('filter', 0), (6, 24): ('filter', 1),      # Filter Parameter
-          (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider
+          (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider (MSB only; LSB unwired — fine at the bridge's 0.1 BPM steps, see _live_bridge v1.7)
           (0, 34): ('jog', 0), (1, 34): ('jog', 1),            # JOG platter
-          (0, 33): ('jog', 0), (1, 33): ('jog', 1)}            # JOG wheel side
+          (0, 33): ('jog', 0), (1, 33): ('jog', 1),            # JOG wheel side
+          # BROWSE knob turn — from AlphaTheta's official DDJ-RB
+          # MIDI message list: CC 64 on the Browser/Global channel,
+          # difference-count encoding (CW 0x01-0x1E, CCW 0x7F-0x62).
+          # Confirmed against the official list 2026-11-26
+          # (mirror of the root module's note).
+          (6, 64): ('browse_turn', None)}                      # BROWSE turn
     note = {(0, 11): ('play', 0), (1, 11): ('play', 1),        # PLAY/PAUSE
             (0, 12): ('cue_jump', 0), (1, 12): ('cue_jump', 1),
             # HEADPHONES CUE 1/2 = Note 84 on the deck channels
@@ -67,13 +73,27 @@ def _build_ddj_rb():
             (0, 88): ('sync', 0), (1, 88): ('sync', 1),
             (0, 16): ('loop_in', 0), (1, 16): ('loop_in', 1),
             (0, 17): ('loop_out', 0), (1, 17): ('loop_out', 1),
-            (6, 70): ('load', 0), (6, 71): ('load', 1)}        # LOAD buttons
-    # PERFORMANCE PADs in HOT CUE mode (pad channels 8/9 in the PDF =
-    # 7/8 here), notes 0-7 = pads 1-8.  dispatch does not pass the pad
-    # index; the adapter supplies it as cue_index (see MixCraft.py).
-    for n in range(8):
+            (6, 70): ('load', 0), (6, 71): ('load', 1),        # LOAD buttons
+            # BROWSE knob push — Note 65 on the Browser/Global
+            # channel (official list, same as the turn CC above);
+            # not deck-specific (LOAD 70/71 are).
+            (6, 65): ('browse_push', None)}                     # BROWSE push
+    # PERFORMANCE PADs (pad channels 8/9 in the PDF = 7/8 here),
+    # notes 0-7 = pads 1-8.  v1.5 layout (mirror of the root module):
+    # pads 1-4 = Hot Cue A-D, pad 5 = CUE SET, pad 6 = QUANTIZE,
+    # pad 7 = LOOP IN, pad 8 = LOOP OUT.  dispatch does not pass the
+    # pad index; the adapter supplies it as cue_index (MixCraft.py).
+    for n in range(4):
         note[(7, n)] = ('hotcue_jump', 0)
         note[(8, n)] = ('hotcue_jump', 1)
+    note[(7, 4)] = ('cue_set', 0)
+    note[(8, 4)] = ('cue_set', 1)
+    note[(7, 5)] = ('quantize', 0)
+    note[(8, 5)] = ('quantize', 1)
+    note[(7, 6)] = ('pad_loop_in', 0)
+    note[(8, 6)] = ('pad_loop_in', 1)
+    note[(7, 7)] = ('pad_loop_out', 0)
+    note[(8, 7)] = ('pad_loop_out', 1)
     return {'cc': cc, 'note': note}
 
 
