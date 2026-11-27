@@ -162,6 +162,16 @@ STRINGS = {
         "jp": "前に選んだテンプレート（{path}）が使えませんでした： "
               "{reason} 選び直してください。",
     },
+    # Pass 25: a template.als placed beside the app is used
+    # automatically; if it is unusable, say so and fall back to
+    # the remembered base / picker.
+    "live_base_bundled_bad": {
+        "en": "The template.als beside the app cannot be used: "
+              "{reason} Please choose a base set instead.",
+        "jp": "アプリと同じフォルダの template.als が使えません"
+              "でした： {reason} 代わりに土台のセットを選んで"
+              "ください。",
+    },
     "live_export_done_dialog": {
         "en": "Your Live set is written.\n\nSaved to: {path}\n"
               "{clips} clips • {envelopes} envelopes\nTemplate: {base}",
@@ -216,6 +226,25 @@ STRINGS = {
         "en": "Audio unavailable: {error}",
         "jp": "出力エラー: {error}",
     },
+    # Pass 25: the DDJ-RB was visible but would not open — say so
+    # plainly, with the likeliest everyday cause named as a
+    # possibility, never as a fact.
+    "audio_rb_busy_hint": {
+        "en": "The DDJ-RB could not be opened (another app may "
+              "be using it — Live / rekordbox)",
+        "jp": "DDJ-RBを開けませんでした（他のアプリが使用中の可能性"
+              " — Live / rekordbox）",
+    },
+    # Pass 25: the device picker's per-device state words (the
+    # ladder outcome also rides on the picker's tooltip and in
+    # audio-diagnostics.json beside the settings).
+    "audio_state_opened": {"en": "in use", "jp": "使用中"},
+    "audio_state_failed": {
+        "en": "could not open: {error}",
+        "jp": "開けませんでした: {error}",
+    },
+    "audio_state_absent": {"en": "not found", "jp": "見つかりません"},
+    "audio_state_untried": {"en": "not tried yet", "jp": "未試行"},
     "load_both_first": {
         "en": "Load both decks first",
         "jp": "両デッキに音声を読み込んでください",
@@ -232,6 +261,15 @@ STRINGS = {
     "setlist_drop_rejected": {
         "en": "Not audio files, skipped: {names}",
         "jp": "音声ファイルではないので追加できませんでした: {names}",
+    },
+    # Pass 25: a drop whose URLs carry no local file (e.g. dragged
+    # out of a web page) — a drop must never fail silently.
+    "setlist_drop_no_local": {
+        "en": "That drop had no files this PC can read — drag "
+              "audio files from Explorer instead",
+        "jp": "そのドロップには読み込めるファイルがありません"
+              "でした — エクスプローラーから音声ファイルを"
+              "ドラッグしてください",
     },
     "setlist_entry_no_file": {
         "en": "That entry has no local file to load",

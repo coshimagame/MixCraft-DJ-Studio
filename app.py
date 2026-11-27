@@ -43,7 +43,8 @@ def _enable_bundled_asio(roots=None):
 _enable_bundled_asio()
 import sounddevice as sd
 import soundfile as sf
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF, QPointF
+from PySide6.QtCore import (Qt, QTimer, Signal, QObject, QEvent,
+    QRectF, QPointF)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
     QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -56,7 +57,8 @@ from engine import (Engine, Journal, RATE,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction,
                     window_columns)
-from audio_config import resolve_output
+from audio_config import (diagnose_ladder, rb_name_match,
+                          resolve_output)
 from midi_input import MidiController
 import i18n
 import perf_als
@@ -652,7 +654,16 @@ class SetlistDropPanel(PanelFrame):
     not accept drops, so Qt propagates the drag/drop events up
     to this frame — the same mechanism the decks' drop loading
     relies on. `drop_handler` is the callable the Window
-    installs; it receives the dropped local file paths."""
+    installs; it receives the dropped local file paths.
+
+    Pass 25 (user report, 2026-11-28: 「トラックリストにドラッ
+    クドロップできない」): propagation alone did not take on
+    his machine, so the Window now ALSO arms every descendant
+    with a SetlistDropFilter (below) — the drop is caught on
+    whichever child sits under the cursor — and the panel wears
+    a 'drop_active' highlight while a drag hovers, so the live
+    target is visible. These own handlers stay as the backstop
+    for drops landing on the frame itself."""
     drop_handler = None
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -660,9 +671,53 @@ class SetlistDropPanel(PanelFrame):
     def dropEvent(self, event):
         paths = [u.toLocalFile() for u in event.mimeData().urls()
                  if u.isLocalFile()]
-        if paths and self.drop_handler is not None:
+        if self.drop_handler is not None:
             self.drop_handler(paths)
             event.acceptProposedAction()
+    def set_drop_highlight(self, on):
+        """The hover highlight (pass 25): an amber frame (the
+        STYLE rule for [drop_active="true"]) while a file drag
+        is over the panel, so he can SEE the target is live."""
+        on = bool(on)
+        if self.property('drop_active') == on:
+            return
+        self.setProperty('drop_active', on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+class SetlistDropFilter(QObject):
+    """Event filter arming the set-list panel AND every child
+    (pass 25): drag enter/move/drop are intercepted on whichever
+    descendant is under the cursor, not left to Qt's propagation
+    (which pass 24 relied on and his machine did not honour).
+    The Window installs it after building the panel and again
+    after every render_setlist (rows are rebuilt there). The
+    handler receives the dropped local paths — possibly empty,
+    so a URL-only drop still earns a status explanation."""
+    def __init__(self, panel, handler):
+        super().__init__(panel)
+        self.panel = panel
+        self.handler = handler
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+                self.panel.set_drop_highlight(True)
+                return True
+        elif kind == QEvent.Type.DragLeave:
+            self.panel.set_drop_highlight(False)
+        elif kind == QEvent.Type.Drop:
+            self.panel.set_drop_highlight(False)
+            if event.mimeData().hasUrls():
+                paths = [u.toLocalFile()
+                         for u in event.mimeData().urls()
+                         if u.isLocalFile()]
+                self.handler(paths)
+                event.acceptProposedAction()
+                return True
+        return False
 
 
 class SetlistRow(QFrame):
@@ -919,6 +974,50 @@ def live_base_start_dir(settings, home=None):
     if last and Path(last).is_dir():
         return last
     return ''
+
+# ---------------------------------------------------------------------------
+# Pass 25: audio diagnostics + the bundled Live base.
+# ---------------------------------------------------------------------------
+
+AUDIO_DIAG_FILENAME = 'audio-diagnostics.json'
+
+def save_audio_diagnostics(data_dir, diag):
+    """Best-effort write of the last audio ladder outcome beside
+    the settings (pass 25): when the sound lands somewhere
+    unexpected, this file says which devices were seen, which
+    rung was picked and why each open failed — he can send it
+    instead of describing a status bar. A failed write changes
+    nothing."""
+    try:
+        target = Path(data_dir) / AUDIO_DIAG_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(diag, ensure_ascii=False,
+                                     indent=2, default=str),
+                          encoding='utf-8')
+    except OSError:
+        pass
+
+BUNDLED_TEMPLATE_NAME = 'template.als'
+
+def bundled_template_path(roots=None):
+    """The user's own Live template, pre-placed (pass 25, his
+    proposal: 「もう最初のファイルの中に組み込んでおいて」): a
+    file named template.als beside the app — beside the frozen
+    executable, or beside app.py in a checkout — is the export's
+    base automatically, no picker, no settings. None when no
+    such file exists."""
+    if roots is None:
+        roots = [Path(sys.executable).resolve().parent,
+                 Path(__file__).resolve().parent]
+    seen = set()
+    for root in roots:
+        candidate = Path(root) / BUNDLED_TEMPLATE_NAME
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+    return None
 
 # Audio extensions the deck load dialog accepts — a set-list
 # drop accepts exactly the same files (pass 24).
@@ -1329,6 +1428,18 @@ class Window(QMainWindow):
         self.callback_max_seconds = 0.0
         self.hostapi_name = ''
         self.audio_device_name = ''
+        # Pass 25: audio ladder diagnostics + retry state (see
+        # start_audio / _maybe_retry_audio). _audio_attempted
+        # gates the retry: a window built with audio=False and
+        # never started stays inert under tick().
+        self.audio_diag = None
+        self._audio_attempted = False
+        self._audio_on_rb = False
+        self._audio_on_fallback = False
+        self._audio_signature = ()
+        self._audio_retry_due = 0.0
+        self._audio_last_attempt = 0.0
+        self._midi_was_connected = False
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.result = Result()
         self.result.ready.connect(self.loaded)
@@ -1868,6 +1979,8 @@ class Window(QMainWindow):
         return stream
 
     def start_audio(self):
+        self._audio_attempted = True
+        self._audio_last_attempt = time.monotonic()
         if self.stream:
             self.stream.stop(); self.stream.close(); self.stream = None
         selection = self.devices.currentData()
@@ -1875,6 +1988,22 @@ class Window(QMainWindow):
         extra = None
         hostapi_name = ''
         device_name = ''
+        # Pass 25: the ladder is diagnosable. The device landscape
+        # is captured BEFORE opening; every open attempt below
+        # records its outcome; the record lands in
+        # audio-diagnostics.json beside the settings and on the
+        # device picker's tooltip. His 2026-11-28 fall to the PC's
+        # own speakers must never be a silent mystery again.
+        try:
+            landscape = diagnose_ladder(sd)
+        except Exception:
+            landscape = None
+        rb_indices = set()
+        if landscape:
+            rb_indices = {d['index'] for d in landscape['rb_devices']}
+            self._audio_signature = tuple(sorted(
+                (d['index'], d['name'], d['hostapi'])
+                for d in landscape['rb_devices']))
         try:  # Pass 23: 'auto' climbs the ASIO -> WASAPI ladder
             device, hostapi_name = resolve_output(selection, sd)
             if 'WASAPI' in hostapi_name:
@@ -1907,28 +2036,66 @@ class Window(QMainWindow):
             attempts.append((None, None, False))
         first_error = None
         opened = None
+        attempt_records = []
         for attempt_device, attempt_extra, exclusive in attempts:
+            record = dict(
+                device=attempt_device,
+                name=device_name if attempt_device == device else None,
+                hostapi=hostapi_name if attempt_device == device else '',
+                exclusive=bool(exclusive), ok=False, error=None)
             try:
-                opened = (self._open_stream(attempt_device, attempt_extra),
-                          attempt_device, exclusive)
-                break
+                stream = self._open_stream(attempt_device, attempt_extra)
             except Exception as error:
+                record['error'] = str(error)
+                attempt_records.append(record)
                 if first_error is None:
                     first_error = error
+                continue
+            record['ok'] = True
+            attempt_records.append(record)
+            opened = (stream, attempt_device, exclusive)
+            break
+        diag = dict(at=time.strftime('%Y-%m-%d %H:%M:%S'),
+                    selection=str(selection),
+                    hosts=landscape['hosts'] if landscape else [],
+                    rb_devices=landscape['rb_devices'] if landscape
+                               else [],
+                    rungs=landscape['rungs'] if landscape else [],
+                    attempts=attempt_records, outcome='')
+        rb_open_error = None
+        for record in attempt_records:
+            if record['device'] in rb_indices and record['error']:
+                rb_open_error = record['error']
+                break
         if opened is None:
+            diag['outcome'] = 'silent'
+            self._finish_audio_diag(diag, on_rb=False, on_fallback=False)
             self._status_fn = lambda lang, e=first_error: \
                 i18n.tr('audio_error', lang).format(error=e)
             self._apply_status()
             return
         self.stream, opened_device, opened_exclusive = opened
         if opened_device is None and device is not None:
+            diag['outcome'] = 'system_default_fallback'
+            self._finish_audio_diag(
+                diag, on_rb=False, on_fallback=True)
             self.hostapi_name = ''
             self.audio_device_name = ''
             failed = device_name or hostapi_name or str(device)
-            self._status_fn = lambda lang, d=failed: \
-                i18n.tr('audio_fallback', lang).format(device=d)
+            if rb_open_error:
+                # Pass 25: an RB device was THERE but would not
+                # open — name the likeliest cause as a possibility.
+                self._status_fn = lambda lang, d=failed: \
+                    i18n.tr('audio_fallback', lang).format(device=d) \
+                    + ' • ' + i18n.tr('audio_rb_busy_hint', lang)
+            else:
+                self._status_fn = lambda lang, d=failed: \
+                    i18n.tr('audio_fallback', lang).format(device=d)
             self._apply_status()
             return
+        diag['outcome'] = 'opened'
+        self._finish_audio_diag(
+            diag, on_rb=opened_device in rb_indices, on_fallback=False)
         self.hostapi_name = hostapi_name
         self.audio_device_name = device_name
         host_display = hostapi_name or 'default host'
@@ -1939,6 +2106,95 @@ class Window(QMainWindow):
                 d=device_name or 'system default', ms=f'{latency_ms:.0f}': \
             i18n.tr('audio_active', lang).format(host=h, device=d, ms=ms)
         self._apply_status()
+    def _finish_audio_diag(self, diag, on_rb, on_fallback):
+        """Pass 25: store the ladder record, write it beside the
+        settings, refresh the retry state and the picker surfaces."""
+        self.audio_diag = diag
+        self._audio_on_rb = bool(on_rb)
+        self._audio_on_fallback = bool(on_fallback)
+        save_audio_diagnostics(self.data_dir, diag)
+        self._refresh_audio_surfaces(diag)
+    def _refresh_audio_surfaces(self, diag):
+        """Pass 25: the ladder outcome, where he can find it —
+        the device picker's tooltip carries every RB device's
+        state (in use / could not open + the error / not tried /
+        not found), and each RB entry in the picker itself wears
+        the same state as its own tooltip."""
+        by_device = {}
+        for record in diag.get('attempts', []):
+            if record.get('device') is not None:
+                by_device[record['device']] = record
+        rb_by_index = {d['index']: d
+                       for d in diag.get('rb_devices', [])}
+        def state_of(index):
+            record = by_device.get(index)
+            if record is not None and record.get('ok'):
+                return i18n.tr('audio_state_opened', self.lang)
+            if record is not None and record.get('error'):
+                return i18n.tr('audio_state_failed', self.lang) \
+                    .format(error=record['error'])
+            return i18n.tr('audio_state_untried', self.lang)
+        lines = []
+        for index in sorted(rb_by_index):
+            d = rb_by_index[index]
+            lines.append(f"{d['name']} / {d['hostapi']}: "
+                         f"{state_of(index)}")
+        if not lines:
+            lines.append('DDJ-RB: '
+                         + i18n.tr('audio_state_absent', self.lang))
+        self.devices.setToolTip('\n'.join(lines))
+        for row in range(self.devices.count()):
+            data = self.devices.itemData(row)
+            if isinstance(data, int) and data in rb_by_index:
+                d = rb_by_index[data]
+                self.devices.setItemData(
+                    row, f"{d['name']}: {state_of(data)}",
+                    Qt.ItemDataRole.ToolTipRole)
+    def _audio_rb_signature(self):
+        """The visible DDJ-RB outputs as a comparable tuple —
+        the audio retry's change detector (pass 25)."""
+        try:
+            return tuple(sorted(
+                (d['index'], d['name'], d['hostapi'])
+                for d in diagnose_ladder(sd)['rb_devices']))
+        except Exception:
+            return ()
+    def _maybe_retry_audio(self, now):
+        """Pass 25: audio re-selection with MIDI's retry
+        discipline. Only in 'auto' mode (an explicit pick is
+        always respected), only after audio was started once,
+        and only while the sound is NOT on the DDJ-RB: a dead
+        stream retries every few seconds; a stream parked on a
+        fallback retries when the RB picture changes (a device
+        appeared, a busy driver freed — retried at least once a
+        minute while an RB is visible) or the moment the
+        DDJ-RB's MIDI connects, since MIDI presence proves the
+        hardware is attached and awake."""
+        midi_now = bool(getattr(self.midi, 'connected', False)) \
+            if getattr(self, 'midi', None) is not None else False
+        midi_just_connected = midi_now and not self._midi_was_connected
+        self._midi_was_connected = midi_now
+        if not getattr(self, '_audio_attempted', False):
+            return
+        if self.devices.currentData() != 'auto':
+            return
+        if self._audio_on_rb:
+            return
+        if self.stream is None:
+            if now >= self._audio_retry_due:
+                self._audio_retry_due = now + 6.0
+                self.start_audio()
+            return
+        if midi_just_connected:
+            self.start_audio()
+            return
+        if now >= self._audio_retry_due:
+            self._audio_retry_due = now + 6.0
+            signature = self._audio_rb_signature()
+            stale = now - self._audio_last_attempt >= 60.0
+            if signature != self._audio_signature \
+                    or (signature and stale):
+                self.start_audio()
     def callback(self,outdata,frames,time_info,status):
         started = time.perf_counter()
         if status: self.audio_status_count += 1
@@ -2103,11 +2359,26 @@ class Window(QMainWindow):
     def _pick_live_base(self):
         """The template .als for the export, or None on cancel.
 
-        A remembered base is validated and used silently (the
-        pick is a once-ever question). A remembered base that
-        went bad is reported in plain words and re-picked. A
+        Pass 25 priority, the user's own proposal (「もう最初の
+        ファイルの中に組み込んでおいて」): a template.als placed
+        beside the app wins outright — validated like any base,
+        used silently; an invalid one is reported in plain words
+        and the flow falls through. Below that, pass 24's order:
+        a remembered base is validated and used silently (the
+        pick is a once-ever question); a remembered base that
+        went bad is reported in plain words and re-picked; a
         fresh pick is validated on the spot: an unusable file
         is refused with its reason and the picker reopens."""
+        bundled = bundled_template_path()
+        if bundled is not None:
+            reason, _donor = perf_als.validate_base(bundled)
+            if reason is None:
+                return str(bundled)
+            QMessageBox.warning(
+                self, i18n.tr('live_dialog_title', self.lang),
+                i18n.tr('live_base_bundled_bad', self.lang).format(
+                    reason=i18n.tr(f'live_base_reason_{reason}',
+                                   self.lang)))
         remembered = self.settings.get('live_base_als')
         if remembered:
             reason, _donor = perf_als.validate_base(remembered)
@@ -2244,15 +2515,56 @@ class Window(QMainWindow):
         self._status_fn = lambda lang, t=title, d='AB'[deck]: \
             i18n.tr('setlist_entry_loaded', lang).format(title=t, deck=d)
         self._apply_status()
+    def _arm_setlist_drops(self):
+        """Arm the set-list panel and EVERY descendant for drops
+        (pass 25). Two pass-24 gaps this closes: the panel never
+        called setAcceptDrops(True), so a real Windows drag was
+        never delivered to it at all; and delivery to a child
+        under the cursor was left to propagation. Now every
+        widget in the panel accepts drops and wears the shared
+        SetlistDropFilter, and the panel highlights while a drag
+        hovers. Called after the panel is built and at the end
+        of every render_setlist (rows are rebuilt there)."""
+        panel = getattr(self, 'setlist_panel', None)
+        if panel is None:
+            return
+        drop_filter = getattr(self, '_setlist_drop_filter', None)
+        if drop_filter is None:
+            drop_filter = SetlistDropFilter(
+                panel, self.add_dropped_to_setlist)
+            self._setlist_drop_filter = drop_filter
+        for widget in [panel, *panel.findChildren(QWidget)]:
+            widget.setAcceptDrops(True)
+            widget.removeEventFilter(drop_filter)
+            widget.installEventFilter(drop_filter)
     def add_dropped_to_setlist(self, paths):
         """Files dropped on the set-list panel (pass 24): audio
         files become real set-list entries (tags/filename title,
         measured duration); anything else is reported by name
-        in the status bar — never a silent no-op."""
+        in the status bar — never a silent no-op.
+
+        Pass 25: a dropped FOLDER contributes the audio files
+        directly inside it (non-recursive — say so in the
+        manual), and a drop with no local files at all (a URL
+        dragged out of a browser, say) still earns a status
+        explanation instead of silence."""
+        if not paths:
+            self._status_fn = lambda lang: \
+                i18n.tr('setlist_drop_no_local', lang)
+            self._apply_status()
+            return
         added, rejected = [], []
         for raw in paths:
             candidate = Path(raw)
-            if candidate.suffix.lower() in SETLIST_AUDIO_EXTS \
+            if candidate.is_dir():
+                inside = [p for p in sorted(candidate.iterdir())
+                          if p.is_file()
+                          and p.suffix.lower() in SETLIST_AUDIO_EXTS]
+                if inside:
+                    added.extend(file_track_entry(p) for p in inside)
+                else:
+                    rejected.append(candidate.name)
+            elif candidate.suffix.lower() in SETLIST_AUDIO_EXTS \
                     and candidate.is_file():
                 added.append(file_track_entry(candidate))
             else:
@@ -2285,6 +2597,7 @@ class Window(QMainWindow):
             widget = item.widget()
             if widget: widget.deleteLater()
         if self.setlist_data is None:
+            self._arm_setlist_drops()
             return
         # Pass 13: no summary line is composed here any more (see
         # the panel build) — render_setlist only renders the rows.
@@ -2407,6 +2720,9 @@ class Window(QMainWindow):
             container.setToolTip(i18n.tr('setlist_row_tip', self.lang))
             container.setLayout(line)
             self.setlist_rows.addWidget(container)
+        # Pass 25: the rows (and their labels) were just rebuilt —
+        # re-arm the whole panel for drops.
+        self._arm_setlist_drops()
     def tick(self):
         # Pass 21: with no live audio stream there is no callback
         # to apply the engine's command queue, and unapplied
@@ -2465,6 +2781,9 @@ class Window(QMainWindow):
         # Pass 23: DDJ-RB — drain hardware messages into the UI,
         # retry the connection, refresh the PLAY / monitor LEDs.
         self.midi.poll()
+        # Pass 25: if the sound is not on the DDJ-RB yet, keep
+        # re-trying the ladder (device appeared / MIDI connected).
+        self._maybe_retry_audio(now)
     def showEvent(self, event):
         super().showEvent(event)
         if not self._fit_done:
@@ -2519,6 +2838,10 @@ STYLE = (
     f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #121317, stop:1 #0e0f11); border:1px solid #26282f; border-radius:3px; padding:4px 8px; }}'
     f'QFrame#mixer, QFrame#bpmframe {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #131418, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:4px 12px; }}'
     f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.4 #121317, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:4px 12px; }}'
+    # Pass 25: the set-list panel's live-drop highlight — while a
+    # file drag hovers, the frame turns the muted amber of the
+    # MASTER / GAIN / FILTER accents, so the target reads as live.
+    f'QFrame#setlist[drop_active="true"] {{ border:2px solid {COLOR_KNOB_ACCENT}; }}'
     f'QFrame#utility {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #24262d, stop:0.005 #15161a, stop:1 #101114); border:1px solid #26282f; border-radius:3px; }}'
     # Pass 14: the LCD windows — pale grey-green glass with a dark
     # bezel, set into the chassis panels (the ghost grid + inset
