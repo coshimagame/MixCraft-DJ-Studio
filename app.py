@@ -1678,36 +1678,56 @@ class Window(QMainWindow):
         except Exception:
             extra = None
             device = None if selection == 'auto' else selection
-        try:
-            self.stream = self._open_stream(device, extra)
-        except Exception as first_error:
-            # Pass 23: a chosen device that will not open (an ASIO
-            # driver refusing 48 kHz, a busy WASAPI endpoint) must
-            # not leave the app silent — fall back to the system
-            # default output and say so in the status bar.
-            if device is None and extra is None:
-                self._status_fn = lambda lang, e=first_error: \
-                    i18n.tr('audio_error', lang).format(error=e)
-                self._apply_status()
-                return
+        # Pass 23: the attempt chain. The shipped PortAudio build
+        # exposes NO ASIO host (proven by the CI smoke inventory:
+        # MME / DirectSound / WASAPI / WDM-KS only — the Steinberg
+        # SDK is not in the open wheel), so for a WASAPI device the
+        # realistic low-latency path is EXCLUSIVE mode: try it
+        # first, then shared mode on the same device, then the
+        # system default. An ASIO device (if a future PortAudio
+        # ever exposes one) is tried directly, then the default.
+        # A device that will not open must never leave the app
+        # silent — the last attempt is always the system default,
+        # and the status bar says when we landed there.
+        attempts = []
+        if 'WASAPI' in hostapi_name:
+            attempts = [(device, sd.WasapiSettings(exclusive=True), True),
+                        (device, sd.WasapiSettings(exclusive=False), False)]
+        elif device is not None or extra is not None:
+            attempts = [(device, extra, False)]
+        if not attempts or attempts[-1][0] is not None:
+            attempts.append((None, None, False))
+        first_error = None
+        opened = None
+        for attempt_device, attempt_extra, exclusive in attempts:
             try:
-                self.stream = self._open_stream(None, None)
-                self.hostapi_name = ''
-                self.audio_device_name = ''
-                failed = device_name or hostapi_name or str(device)
-                self._status_fn = lambda lang, d=failed: \
-                    i18n.tr('audio_fallback', lang).format(device=d)
-                self._apply_status()
-                return
-            except Exception:
-                self._status_fn = lambda lang, e=first_error: \
-                    i18n.tr('audio_error', lang).format(error=e)
-                self._apply_status()
-                return
+                opened = (self._open_stream(attempt_device, attempt_extra),
+                          attempt_device, exclusive)
+                break
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if opened is None:
+            self._status_fn = lambda lang, e=first_error: \
+                i18n.tr('audio_error', lang).format(error=e)
+            self._apply_status()
+            return
+        self.stream, opened_device, opened_exclusive = opened
+        if opened_device is None and device is not None:
+            self.hostapi_name = ''
+            self.audio_device_name = ''
+            failed = device_name or hostapi_name or str(device)
+            self._status_fn = lambda lang, d=failed: \
+                i18n.tr('audio_fallback', lang).format(device=d)
+            self._apply_status()
+            return
         self.hostapi_name = hostapi_name
         self.audio_device_name = device_name
+        host_display = hostapi_name or 'default host'
+        if opened_exclusive:
+            host_display += ' EXCLUSIVE'
         latency_ms = (self.stream.latency or 0) * 1000
-        self._status_fn = lambda lang, h=hostapi_name or 'default host', \
+        self._status_fn = lambda lang, h=host_display, \
                 d=device_name or 'system default', ms=f'{latency_ms:.0f}': \
             i18n.tr('audio_active', lang).format(host=h, device=d, ms=ms)
         self._apply_status()

@@ -92,3 +92,108 @@ def test_list_outputs_skips_input_only_devices():
     out = list_outputs(audio)
     assert [d['name'] for d in out] == ['Speakers']
     assert out[0]['hostapi'] == 'MME'
+
+
+# ------------------------------------------------------------------
+# start_audio's attempt chain, against a fake sounddevice module.
+# The shipped PortAudio exposes no ASIO host (CI smoke inventory),
+# so WASAPI exclusive is the realistic low-latency path: exclusive
+# first, shared on the same device second, system default last —
+# and the app never stays silent.
+# ------------------------------------------------------------------
+
+import os
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+try:
+    from PySide6.QtWidgets import QApplication
+    import app as appmod
+    HAVE_QT = True
+except Exception:
+    HAVE_QT = False
+
+
+class _FakeStream:
+    latency = 0.01
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakeSD:
+    """sounddevice stand-in: one WASAPI device named DDJ-RB."""
+
+    def __init__(self, fail_extras=(), fail_all=False):
+        self.calls = []
+        self.fail_extras = set(fail_extras)
+        self.fail_all = fail_all
+
+    @staticmethod
+    def WasapiSettings(exclusive=False):
+        return ('wasapi', bool(exclusive))
+
+    def query_hostapis(self):
+        return [dict(name='Windows WASAPI', default_output_device=0)]
+
+    def query_devices(self, device=None, kind=None):
+        record = dict(name='DDJ-RB', hostapi=0,
+                      max_input_channels=0, max_output_channels=2)
+        if device is not None or kind == 'output':
+            return record
+        return [record]
+
+    def OutputStream(self, **kwargs):
+        extra = kwargs.get('extra_settings')
+        self.calls.append((kwargs.get('device'), extra))
+        if self.fail_all or extra in self.fail_extras:
+            raise RuntimeError('cannot open')
+        return _FakeStream()
+
+
+import pytest
+
+pytestmark_qt = pytest.mark.skipif(not HAVE_QT,
+                                   reason='PySide6 unavailable')
+
+
+@pytest.fixture(scope='module')
+def _qapp():
+    return QApplication.instance() or QApplication([])
+
+
+@pytestmark_qt
+def test_start_audio_tries_exclusive_then_shared(_qapp, monkeypatch):
+    win = appmod.Window(audio=False)
+    fake = _FakeSD(fail_extras={('wasapi', True)})
+    monkeypatch.setattr(appmod, 'sd', fake)
+    win.devices.setCurrentIndex(0)   # 'auto'
+    win.start_audio()
+    try:
+        assert fake.calls[0][1] == ('wasapi', True)    # exclusive first
+        assert fake.calls[1][1] == ('wasapi', False)   # shared second
+        assert win.stream is not None
+        assert 'DDJ-RB' in win._status_fn(win.lang)
+    finally:
+        win.close()
+
+
+@pytestmark_qt
+def test_start_audio_falls_back_to_system_default(_qapp, monkeypatch):
+    win = appmod.Window(audio=False)
+    fake = _FakeSD(fail_extras={('wasapi', True), ('wasapi', False)})
+    monkeypatch.setattr(appmod, 'sd', fake)
+    win.devices.setCurrentIndex(0)
+    win.start_audio()
+    try:
+        assert fake.calls[-1] == (None, None)          # default last
+        assert win.stream is not None                  # never silent
+        assert 'DDJ-RB' in win._status_fn(win.lang)    # fallback names it
+    finally:
+        win.close()
