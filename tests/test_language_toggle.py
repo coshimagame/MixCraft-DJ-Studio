@@ -145,10 +145,9 @@ def test_loaded_deck_keeps_filename_across_switch(window, tmp_path):
     path = sorted(tmp_path.glob('*.wav'))[0]
     window.loaded(0, load_track(str(path)), '')
     assert window.decks[0].name.text() == path.name
-    # Pass 13: no '≈' estimate mark on the BPM readout, and the key
+    # Pass 20: the deck's BPM readout is gone entirely; the key
     # sub-line is Camelot only — no '(key name)' second notation.
-    assert '≈' not in window.decks[0].bpm.text()
-    assert window.decks[0].bpm.text().endswith(' BPM')
+    assert not hasattr(window.decks[0], 'bpm')
     assert '(' not in window.decks[0].sub.text()
     window.set_language('en')
     assert window.decks[0].name.text() == path.name

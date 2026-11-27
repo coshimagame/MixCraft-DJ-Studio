@@ -1,8 +1,9 @@
-"""Pass 16 (remaining-time displays removed): the deck clocks
-show ELAPSED only, and the MIX TIMER is the elapsed readout plus
-START/STOP + RESET — no 'remaining' readout, no over-target state.
-(The engine's format_mix_remaining math stays in engine.py; the
-app simply no longer displays it.)
+"""Remaining-time displays. Pass 16 removed them all; pass 20
+(user review fix, 2026-11-27: 「残り時間はほしいね」) restored
+the remaining figure on the DECK clocks only — the MIX TIMER is
+still the elapsed readout plus START/STOP + RESET, with no
+'remaining' readout and no over-target state. (The engine's
+format_mix_remaining math stays in engine.py regardless.)
 
 Offscreen Qt; skipped where PySide6 cannot be imported.
 """
@@ -49,15 +50,25 @@ def test_mix_timer_shows_elapsed_only(window):
     assert window.mix_elapsed.text() == 'MIX 00:00'
 
 
-def test_deck_clock_shows_elapsed_only(window):
+def test_deck_clock_shows_remaining_and_elapsed(window):
+    # Pass 20: with a track loaded, the deck clock is the pair
+    # '-remaining  elapsed'; with no track it falls back to
+    # elapsed alone (there is no remaining to show).
+    import numpy as np
     from engine import RATE
+
+    class StubTrack:
+        def __init__(self, seconds):
+            self.audio = np.zeros((int(seconds * RATE), 2),
+                                  dtype=np.float32)
+
+    window.engine.decks[0]['track'] = StubTrack(24.0)
     window.engine.decks[0]['position'] = int(13.0 * RATE)
     window.engine.decks[1]['position'] = int(11.0 * RATE)
     window.tick()
-    assert window.decks[0].clock.text() == '00:13.0'
+    assert window.decks[0].clock.text() == '-00:11.0  00:13.0'
     assert window.decks[1].clock.text() == '00:11.0'
-    for deck in window.decks:
-        assert '-' not in deck.clock.text()
+    window.engine.decks[0]['track'] = None
     window.engine.decks[0]['position'] = 0
     window.engine.decks[1]['position'] = 0
     window.tick()

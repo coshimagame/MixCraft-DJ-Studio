@@ -19,9 +19,10 @@ key line also changed: one notation only (Camelot) — see key_line.
 
 Conventions: DEFAULT_LANG is 'jp' (the user's language). Strings
 that are already single-language DJ/hardware terminology in BOTH
-languages (the knob captions GAIN / LOW / FILTER — the HIGH and
-MID knobs are uncaptioned since pass 17 — the DECK A/B chips, the
-BPM / KEY column heads, unit labels)
+languages (the knob captions GAIN / HI / MID / LOW / FILTER —
+bare band names since pass 20 restored HI / MID; the letters
+'EQ' appear nowhere — the DECK A/B chips, the BPM / KEY column
+heads, unit labels)
 are deliberately NOT in this table — they never mixed languages, and
 real hardware prints them the same way in Japan. app.py keeps them
 as literals and the pass-10 notes say so.
@@ -82,6 +83,10 @@ STRINGS = {
               "(default B; no tempo sync)",
         "jp": "モニター中のデッキへの繋ぎ試聴（無指定はB・テンポ同期なし）",
     },
+    # Pass 20: the audition-length caption beside the seconds
+    # combo (the one utility-bar caption that came back — the
+    # combo's meaning did not read without it).
+    "audition_length": {"en": "AUDITION LENGTH", "jp": "試聴の長さ"},
     "seconds_item": {"en": "{n} SECONDS", "jp": "{n} 秒"},
     "preview": {"en": "▶ PREVIEW TRANSITION", "jp": "▶ ミックス試聴"},
     "stop_preview": {"en": "STOP PREVIEW", "jp": "試聴終了"},

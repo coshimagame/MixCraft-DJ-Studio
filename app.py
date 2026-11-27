@@ -76,6 +76,14 @@ COLOR_STATE_PLAYING = '#7dff6a'  # set list: now playing (green)
 COLOR_STATE_NEXT = '#ff5347'     # set list: up next (red). Queued tracks stay amber.
 COLOR_STATE_QUEUED = '#ffb000'   # set list: queued (amber, fixed user decision)
 COLOR_METER = '#2ee66b'          # level meter green (waveform RGB mid colour)
+# Pass 20 (user review fix list, 2026-11-27): a SLIGHT colour
+# accent returns — on exactly five knobs: the MASTER knob and
+# each deck's GAIN and FILTER. A muted, desaturated amber on the
+# indicator line + value arc only (caps and sizes unchanged);
+# every other knob keeps the neutral grey. This is a "the
+# important knobs" accent, not deck colour coding (pass 15's
+# retirement of A=blue / B=red stands).
+COLOR_KNOB_ACCENT = '#cc9433'    # muted amber: MASTER / GAIN / FILTER
 COLOR_WAVE_BG = COLOR_DISPLAY_BG
 COLOR_WAVE_GRID = THEME['wave_grid']
 # Waveform band colours (rekordbox RGB scheme, estimates — analysis doc §2)
@@ -729,7 +737,8 @@ class Knob(QWidget):
             for a, b in zip(pts, pts[1:]):
                 p.drawLine(int(a[0]), int(a[1]), int(b[0]), int(b[1]))
         # Full-sweep track, then the value arc in the knob colour
-        # (pass 15: the same neutral grey on every knob).
+        # (pass 15: neutral grey everywhere; pass 20: MASTER /
+        # GAIN / FILTER wear the muted-amber accent instead).
         arc(0.0, 1.0, QPen(QColor(COLOR_BORDER_HI), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         fraction = self._fraction()
         arc(0.5 if self.bipolar else 0.0, fraction,
@@ -747,7 +756,7 @@ class Knob(QWidget):
             p.drawLine(int(x1), int(y1), int(x2), int(y2))
         # Knob cap (pass 9): radial shading lit from the upper left
         # like a machined metal cap; the indicator line wears the
-        # knob colour (pass 15: neutral grey, like the MASTER knob).
+        # knob colour (pass 20: amber on MASTER / GAIN / FILTER).
         cap = QRadialGradient(cx - radius * 0.4, cy - radius * 0.4, radius * 1.35)
         cap.setColorAt(0.0, QColor('#24252b'))
         cap.setColorAt(0.55, QColor('#15161a'))
@@ -852,8 +861,11 @@ class Deck(QFrame):
         # line removed) lands here, not in the pads row.
         grid.setRowStretch(0, 1)
         # Transport: three buttons stacked at the strip's left end,
-        # before the title. Same buttons, same wiring as the old row;
-        # Deck B's stack mirrors Deck A's top-to-bottom.
+        # before the title. Same buttons, same wiring as the old row.
+        # Pass 20 (user review fix, 2026-11-27: 「左上の読み込みとか
+        # 3つの要素はabともに上から同じ並びに」): Deck B's stack no
+        # longer mirrors Deck A's — BOTH decks read top-to-bottom
+        # 読込 / 再生・一時停止 / 先頭.
         self.load = QPushButton('Load / 読込')
         self.load.clicked.connect(self.choose)
         self.play = QPushButton('▶ Play / 再生')
@@ -865,8 +877,7 @@ class Deck(QFrame):
         transport = QVBoxLayout(transport_box)
         transport.setContentsMargins(0, 0, 0, 0)
         transport.setSpacing(4)
-        for button in ([self.load, self.play, self.cue] if index == 0
-                        else [self.cue, self.play, self.load]):
+        for button in (self.load, self.play, self.cue):
             transport.addWidget(button)
         transport.addStretch()
         grid.addWidget(transport_box, 0, 0)
@@ -899,19 +910,21 @@ class Deck(QFrame):
         info.addWidget(self.sub)
         readouts = QHBoxLayout()
         readouts.setSpacing(4)
-        # Pass 11: both readouts are dot-matrix console displays
+        # Pass 11: the readout is a dot-matrix console display
         # (pass 12: drawn in the bundled DotGothic16, like everything).
-        # Fixed widths sized to their longest texts at their pitch,
-        # so the digits never clip (the old LCD label squeezed the
+        # Fixed width sized to its longest text at its pitch, so
+        # the digits never clip (the old LCD label squeezed the
         # clock's last digit at the box edge).
-        self.bpm = DotReadout(pitch=1.7, height=28)
-        self.bpm.setFixedWidth(118)
-        self.bpm.setText('— BPM')
-        readouts.addWidget(self.bpm)
+        # Pass 20 (user review fix, 2026-11-27: 「読み込んだ曲のと
+        # ころにはbpmいらなくて 残り時間はほしいね」): the BPM
+        # readout that sat beside the clock is GONE (the track BPM
+        # still feeds the SET BPM dial's fallback and the set
+        # list's BPM column — only this figure leaves), and the
+        # clock shows the remaining + elapsed pair again, undoing
+        # pass 16 for the DECK clocks only (the MIX TIMER stays
+        # elapsed-only).
         self.clock = DotReadout(pitch=1.55, color=COLOR_LCD_INK_SOFT, height=28)
-        # Pass 16: elapsed only ('00:00.0') — the readout shrinks
-        # from the old remaining+elapsed pair's width to fit.
-        self.clock.setFixedWidth(96)
+        self.clock.setFixedWidth(164)
         self.clock.setText('00:00.0')
         readouts.addWidget(self.clock)
         readouts.addStretch()
@@ -979,18 +992,22 @@ class Deck(QFrame):
         # window's height budget needs the pixels (see Window).
         knob_column.setSpacing(0)
         self.controls = {}
-        # Pass 17 (user direction, 2026-11-27: 「eqって文字いらな
-        # い」+「HIGH/MIDの文字だけ消す」): the captions are GAIN /
-        # (none) / (none) / LOW / FILTER — the 'EQ' prefix is gone
-        # everywhere and the HIGH / MID knobs wear NO caption at
-        # all. All five knobs stay, fully wired; HIGH and MID are
-        # identified by position (the standard mixer order: GAIN,
-        # HIGH, MID, LOW, FILTER, top to bottom). The column
-        # spacing opens up slightly into the freed visual room.
-        for label, action, default in [('GAIN', 'gain', 50), ('', 'eq_high', 50),
-                                       ('', 'eq_mid', 50), ('LOW', 'eq_low', 50),
+        # Pass 17 set the captions to GAIN / (none) / (none) / LOW /
+        # FILTER (the 'EQ' prefix gone, HIGH / MID uncaptioned);
+        # pass 20 (user review fix, 2026-11-27: 「hi mid の文字が
+        # ない」) restores the bare band names — the final caption
+        # row is GAIN / HI / MID / LOW / FILTER, and the letters
+        # 'EQ' still appear nowhere. All five knobs stay, fully
+        # wired. Pass 20 also gives GAIN and FILTER the muted-amber
+        # accent colour (COLOR_KNOB_ACCENT — indicator + arc only);
+        # HI / MID / LOW keep the neutral grey.
+        for label, action, default in [('GAIN', 'gain', 50), ('HI', 'eq_high', 50),
+                                       ('MID', 'eq_mid', 50), ('LOW', 'eq_low', 50),
                                        ('FILTER', 'filter', 50)]:
-            knob = Knob(label, COLOR_TEXT_SUB, bipolar=(action != 'gain'))
+            knob = Knob(label,
+                        COLOR_KNOB_ACCENT if action in ('gain', 'filter')
+                        else COLOR_TEXT_SUB,
+                        bipolar=(action != 'gain'))
             knob.setRange(0, 100); knob.setValue(default)
             if action == 'gain':
                 knob.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
@@ -1344,6 +1361,14 @@ class Window(QMainWindow):
         # are gone — the controls (duration combo, preview buttons,
         # device combo, apply) stay exactly as wired and read fine
         # without them.
+        # Pass 20 (user review fix, 2026-11-27: 「まんなかひだりの
+        # 8秒って意味がわからない」): ONE caption comes back — the
+        # seconds combo was the one control whose meaning did not
+        # read without it, so it gets its name beside it: 試聴の
+        # 長さ / AUDITION LENGTH (the audition's length in seconds).
+        self.audition_label = QLabel('AUDITION LENGTH')
+        self.audition_label.setStyleSheet(SECTION_LABEL_QSS)
+        utility.addWidget(self.audition_label)
         self.duration = QComboBox()
         # Pass 10: the items are re-texted on a language switch, so
         # the combo must keep fitting its contents (the default
@@ -1400,9 +1425,10 @@ class Window(QMainWindow):
         mix_top.addStretch()
         # MASTER volume as a knob (pass 6): same Knob widget and the
         # same wiring the horizontal slider had — range 0-100, default
-        # 80, 'master' command with v/100. A neutral grey arc and
-        # indicator: the master belongs to neither deck.
-        self.master = Knob('MASTER', COLOR_TEXT_SUB, bipolar=False)
+        # 80, 'master' command with v/100. Pass 20: the master wears
+        # the muted-amber accent (like GAIN / FILTER) — it belongs
+        # to neither deck, the accent marks it as a master control.
+        self.master = Knob('MASTER', COLOR_KNOB_ACCENT, bipolar=False)
         self.master.setRange(0, 100)
         self.master.setValue(80)
         self.master.valueChanged.connect(lambda v: self.engine.command('master', value=v/100))
@@ -1493,6 +1519,7 @@ class Window(QMainWindow):
         self._reg(self.set_dial.set_caption, 'set_bpm')
         self._reg(self.level_label.setText, 'level')
         self._reg(self.utility_bar.setToolTip, 'audition_tip')
+        self._reg(self.audition_label.setText, 'audition_length')
         self._reg(self.preview_button.setText, 'preview')
         self._reg(self.preview_stop.setText, 'stop_preview')
         self._reg(self.export_button.setText, 'save_events')
@@ -1644,10 +1671,9 @@ class Window(QMainWindow):
         deck.wave.track = track
         deck.name.setText(deck_title_text(track.path, self.setlist_data))
         self._render_deck_key(deck, track)
-        # Pass 13: no '≈' estimate mark on the BPM readout — the
-        # estimate caveat lives in the readout's tooltip below.
-        deck.bpm.setText(f'{track.bpm or "—"} BPM')
-        deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
+        # Pass 20: the deck's BPM readout is gone (user review fix)
+        # — the analysed BPM still lands in deck_a_bpm below, where
+        # it feeds the SET BPM dial's fallback.
         if index == 0:
             self.deck_a_bpm = track.bpm
             self.refresh_set_bpm_dial()
@@ -1881,11 +1907,19 @@ class Window(QMainWindow):
             def clock(s):
                 s = max(0.0, s)
                 return f'{int(s)//60:02}:{s%60:04.1f}'
-            # Pass 16 (user direction, 2026-11-27: 「残りの時間もい
-            # らねな」): the deck clock shows ELAPSED only — the
-            # '-mm:ss.s' remaining figure is gone. The waveform and
-            # its overview still show the position in the track.
-            widget.clock.setText(clock(d['position']/RATE))
+            # Pass 20 (user review fix, 2026-11-27: 「残り時間はほ
+            # しいね」): the DECK clock shows the remaining +
+            # elapsed pair again ('-00:11.0  00:13.0'), undoing
+            # pass 16 for the decks only — the MIX TIMER further
+            # down stays elapsed-only, as pass 16 left it. With no
+            # track loaded there is no remaining to show, so the
+            # clock falls back to elapsed alone.
+            elapsed = d['position'] / RATE
+            if d['track'] is not None:
+                remaining = max(0.0, len(d['track'].audio) / RATE - elapsed)
+                widget.clock.setText(f'-{clock(remaining)}  {clock(elapsed)}')
+            else:
+                widget.clock.setText(clock(elapsed))
         # Pass 8: drive the mix timer off this same tick — auto-start
         # on the first deck play (audition playback counts), then
         # accumulate from monotonic deltas and refresh the readouts.

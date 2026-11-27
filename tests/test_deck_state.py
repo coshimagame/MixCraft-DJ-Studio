@@ -95,13 +95,20 @@ def window():
 @qt_only
 def test_no_deck_colours_anywhere(window):
     # The two decks' surface is identical now: same fader styling,
-    # same knob colour (the MASTER knob's neutral grey), and the
-    # retired palette constants no longer hold the old blue/red.
+    # same knob colour per position on both decks, and the retired
+    # palette constants no longer hold the old blue/red. Pass 20's
+    # amber accent is a MASTER-control accent, not deck coding:
+    # GAIN / FILTER wear it on BOTH decks alike, the EQ knobs keep
+    # the neutral grey, and the MASTER knob wears it too.
     assert window.decks[0].fader_qss == window.decks[1].fader_qss
     for deck in window.decks:
-        for knob in deck.controls.values():
-            assert knob.color.name() == \
-                appmod.QColor(appmod.COLOR_TEXT_SUB).name()
+        for action, knob in deck.controls.items():
+            expected = (appmod.COLOR_KNOB_ACCENT
+                        if action in ('gain', 'filter')
+                        else appmod.COLOR_TEXT_SUB)
+            assert knob.color.name() == appmod.QColor(expected).name()
+    assert window.master.color.name() == \
+        appmod.QColor(appmod.COLOR_KNOB_ACCENT).name()
     assert appmod.COLOR_DECK_A == appmod.COLOR_DECK_B
     assert appmod.COLOR_DECK_A not in ('#0e9bff', '#ff4a2d')
 

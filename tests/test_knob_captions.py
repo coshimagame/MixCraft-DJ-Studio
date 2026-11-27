@@ -1,8 +1,10 @@
-"""Pass 17 (knob captions): all five knobs per deck stay, fully
-wired — only the caption TEXT changed: GAIN / (none) / (none) /
-LOW / FILTER. The 'EQ' prefix is gone everywhere, and HIGH / MID
-wear no caption at all (identified by position, the standard
-mixer order).
+"""Knob captions: all five knobs per deck stay, fully wired —
+only the caption TEXT changed over the passes. Pass 17 set GAIN /
+(none) / (none) / LOW / FILTER (the 'EQ' prefix gone, HIGH / MID
+uncaptioned); pass 20 (user review fix, 2026-11-27: 「hi mid の
+文字がない」) restored the bare band names — the final row is
+GAIN / HI / MID / LOW / FILTER, and the letters 'EQ' still appear
+nowhere.
 
 Offscreen Qt; skipped where PySide6 cannot be imported.
 """
@@ -40,13 +42,13 @@ def test_all_five_knobs_present_with_final_captions(window):
         assert list(deck.controls) == ['gain', 'eq_high', 'eq_mid',
                                        'eq_low', 'filter']
         labels = [deck.controls[k].label for k in deck.controls]
-        assert labels == ['GAIN', '', '', 'LOW', 'FILTER']
+        assert labels == ['GAIN', 'HI', 'MID', 'LOW', 'FILTER']
+        assert all('EQ' not in label for label in labels)
 
 
-def test_uncaptioned_knobs_still_drive_the_engine(window):
-    # HIGH / MID lost their captions, not their wiring: turning
-    # every knob lands in the engine state (gain: v/50; EQ bands:
-    # v/100 mapped to 0..2 by the engine; filter: v/100).
+def test_knobs_still_drive_the_engine(window):
+    # Turning every knob lands in the engine state (gain: v/50;
+    # EQ bands: v/100 mapped to 0..2 by the engine; filter: v/100).
     cases = [('gain', 40, 'gain', 0.8),
              ('eq_high', 40, 'eq_high', 0.8),
              ('eq_mid', 60, 'eq_mid', 1.2),
