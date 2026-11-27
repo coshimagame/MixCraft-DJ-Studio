@@ -1,7 +1,10 @@
 name: Windows trial
 on:
   push:
-    branches: [main]
+    # Pass 22 (tonight build, part 3): the rekordbox-style branch
+    # builds too, so the user can download tonight's exe from the
+    # run's artifact without merging PR #8 first.
+    branches: [main, muse/rekordbox-style-2]
   pull_request:
   workflow_dispatch:
 jobs:
