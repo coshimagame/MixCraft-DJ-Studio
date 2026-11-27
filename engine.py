@@ -54,7 +54,7 @@ def load_track(path, cache=None):
         gcd = math.gcd(rate, RATE)
         audio = resample_poly(audio, RATE // gcd, rate // gcd).astype('float32')
     audio = np.nan_to_num(audio)
-    peaks = np.array([np.max(np.abs(x)) for x in np.array_split(audio, min(1400, len(audio)))])
+    peaks = compute_peaks(audio)
     if cached:
         return Track(str(Path(path).resolve()), audio, peaks, cached['bpm'], cached['confidence'],
                      cached['beat_offset'] or 0, 0.0, cached['key'], cached['camelot'], cached['key_confidence'] or 0.0)
@@ -66,6 +66,82 @@ def load_track(path, cache=None):
                              key=key, camelot=camelot, key_confidence=key_conf))
     return Track(str(Path(path).resolve()), audio, peaks, bpm, confidence,
                  offset, beat_conf, key, camelot, key_conf)
+
+# Peak data (pass 24, user report 2026-11-27: 「波形がまだガタガタの
+# まま」). Passes up to 23 split the whole track into at most 1400
+# buckets — for a 5-minute track each bucket spanned ~0.2 s, so the
+# ±8 s window held ~75 fat bars and the waveform read as a staircase.
+# Peaks are now computed at a FIXED hop (256 frames ≈ 5 ms at
+# 48 kHz, ~188 buckets per second), independent of track length:
+# the same window holds ~3000 buckets, several per pixel column.
+# Standing rule (pass 23): this resolution may only ever go UP.
+PEAK_HOP = 256    # frames per peak bucket
+
+def compute_peaks(audio, hop=PEAK_HOP):
+    """Per-bucket peak (max |sample| over channels) at a fixed hop.
+
+    Vectorized: a per-frame channel max, zero-padded to a whole
+    number of buckets, reshaped and reduced. Zero padding cannot
+    raise a max, so the tail bucket stays honest."""
+    frames = len(audio)
+    if frames == 0:
+        return np.zeros(0, dtype=np.float32)
+    mono = np.abs(audio).max(axis=1) if audio.ndim == 2 else np.abs(audio)
+    count = (frames + hop - 1) // hop
+    if count * hop != frames:
+        mono = np.pad(mono, (0, count * hop - frames))
+    return mono.reshape(count, hop).max(axis=1).astype(np.float32)
+
+def window_columns(peaks, total, start, end, width):
+    """Per-pixel-column peak values for the frame window [start, end].
+
+    Column x covers the window's x-th slice; its value is the TRUE
+    max of the peak buckets intersecting that slice (never a sampled
+    single bucket, so transients cannot fall between columns).
+    Columns whose slice holds no bucket (window narrower than one
+    bucket per column) take the nearest bucket's value; columns
+    outside the track (the window is deliberately unclamped) stay 0.
+    Qt-free and unit-tested; the paint code draws one 1px line per
+    column from this array."""
+    count = len(peaks)
+    width = int(width)
+    cols = np.zeros(max(0, width), dtype=np.float32)
+    if count == 0 or total <= 0 or width <= 0:
+        return cols
+    if (end - start) * count / total < width:
+        # Fewer buckets than columns (a very short track, or the
+        # whole-track overview of one): each column takes the
+        # bucket it sits in — upsampling, so no holes and nothing
+        # to alias. Columns centred outside the track stay 0.
+        centres = start + (np.arange(width) + 0.5) * (end - start) / width
+        inside = (centres >= 0) & (centres < total)
+        idx = np.floor(centres * count / total).astype(np.int64)
+        cols[inside] = peaks[np.clip(idx[inside], 0, count - 1)]
+        return cols
+    # One or more buckets per column (constant advance >= 1 bucket,
+    # so every column's range is non-empty and consecutive starts
+    # strictly increase). Column i's true range is [floor(b_i),
+    # ceil(b_{i+1})) in bucket space: it may reach ONE bucket past
+    # the next column's start (the bucket the boundary falls in),
+    # which the tail fix below adds back.
+    bounds = (start + np.arange(width + 1) * (end - start) / width) \
+        * count / total
+    starts = np.clip(np.floor(bounds[:-1]).astype(np.int64), 0, count)
+    stops = np.clip(np.ceil(bounds[1:]).astype(np.int64), 0, count)
+    nonempty = stops > starts
+    if not nonempty.any():
+        return cols
+    nstarts, nstops = starts[nonempty], stops[nonempty]
+    # reduceat reduces [idx[i], idx[i+1]); appending the last
+    # column's stop (into a zero-padded array, so an index equal
+    # to count is valid) keeps its range from running to the
+    # end of the track.
+    idx = np.concatenate([nstarts, [nstops[-1]]])
+    padded = np.concatenate([peaks, np.zeros(1, dtype=peaks.dtype)])
+    vals = np.maximum.reduceat(padded, idx)[:-1]
+    vals = np.maximum(vals, peaks[np.clip(nstops - 1, 0, count - 1)])
+    cols[nonempty] = vals
+    return cols
 
 # Scrolling-waveform window math (pass 7, user direction 2026-11-26:
 # 「波形データが流れるのもだいじ」). The deck waveform shows a zoomed
