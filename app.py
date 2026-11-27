@@ -365,7 +365,11 @@ class JogDial(QWidget):
     BPM, so there is ONE dial, in the centre mixer column, showing
     the SET BPM. With a caption ('SET BPM') the rotating position
     marker and the pitch % / range lines are replaced by the
-    caption — a set tempo has no platter position or pitch range."""
+    caption — a set tempo has no platter position or pitch range.
+
+    Pass 18 audit: the dial does NOT share the Knob's clipping —
+    its painting is inset 5px from the widget edge while its
+    widest pen overhang is ~1px, so the ring clears every edge."""
     def __init__(self, caption=None, size=118):
         super().__init__()
         self.bpm = None
@@ -618,6 +622,20 @@ class Knob(QWidget):
     SWEEP = 135.0    # pointer travel: ±135° from top (270° total)
     DETENT = 3       # ±value units around centre that snap (bipolar)
     DIAMETER = 34    # pass 9: compact cells for the mixer block
+    # Pass 18 geometry (user direction, 2026-11-27: 「ノブの周りの
+    # 円が切れてるのきになるな」): the paint reach around the knob
+    # centre is the arc radius (DIAMETER/2 + 5 = 22) plus the tick
+    # overhang (+5) plus ~1px of pen = 28px. The old 64x52 cell put
+    # the centre only 22px from the top, so the ring and its centre
+    # tick were clipped by ~6px at the top (and the end ticks
+    # grazed the label). The cell is now 64x64 with the centre 30px
+    # down: the full ring + ticks clear the top by 2px, the lowest
+    # tick reach (~50px) clears the label zone (52px), and the
+    # sides keep their 4px. The cap diameter is unchanged — this
+    # is room for the ring, not a bigger knob.
+    WIDTH = 64
+    HEIGHT = 64
+    CENTRE_Y = 30
 
     def __init__(self, label, color, bipolar=True):
         super().__init__()
@@ -626,7 +644,7 @@ class Knob(QWidget):
         self.bipolar = bipolar
         self._min, self._max, self._value = 0, 100, 0
         self._drag_start = None
-        self.setFixedSize(64, 52)
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_label(self, label):
@@ -700,7 +718,7 @@ class Knob(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx = self.width() / 2
-        cy = 5 + self.DIAMETER / 2
+        cy = self.CENTRE_Y   # pass 18: see the geometry note above
         radius = self.DIAMETER / 2
         arc_r = radius + 5
         def arc(f_from, f_to, pen):
@@ -827,7 +845,7 @@ class Deck(QFrame):
         # here — Window gathers both decks' into the mixer block at
         # the bottom left (see the fader_box / knob_box built below).
         grid = QGridLayout(self)
-        grid.setSpacing(6)
+        grid.setSpacing(2)
         grid.setContentsMargins(0, 0, 0, 0)
         # Pass 13: the strip's height goes to the waveform row —
         # height freed elsewhere in the window (notice / summary
@@ -865,8 +883,8 @@ class Deck(QFrame):
         info_box.setObjectName('lcdinfo')
         info_box.setFixedWidth(292)
         info = QVBoxLayout(info_box)
-        info.setContentsMargins(8, 6, 8, 6)
-        info.setSpacing(3)
+        info.setContentsMargins(8, 3, 8, 3)
+        info.setSpacing(1)
         title_row = QHBoxLayout()
         chip = QLabel('DECK '+('A' if index == 0 else 'B'))
         chip.setStyleSheet(f'color:{COLOR_LCD_INK};background:transparent;font-size:12px;font-weight:800;padding:4px 8px;border:1px solid {COLOR_LCD_INK};border-left:6px solid {COLOR_LCD_INK_SOFT};border-radius:2px')
@@ -956,7 +974,10 @@ class Deck(QFrame):
         self.knob_box = QWidget()
         knob_column = QVBoxLayout(self.knob_box)
         knob_column.setContentsMargins(0, 0, 0, 0)
-        knob_column.setSpacing(5)
+        # Pass 18: spacing 0 — the taller knob cells (64px, ring
+        # clearance) carry their own breathing room now, and the
+        # window's height budget needs the pixels (see Window).
+        knob_column.setSpacing(0)
         self.controls = {}
         # Pass 17 (user direction, 2026-11-27: 「eqって文字いらな
         # い」+「HIGH/MIDの文字だけ消す」): the captions are GAIN /
@@ -1123,14 +1144,17 @@ class Window(QMainWindow):
         # taller over the whole window than the old stacks, so the
         # root margins/spacing (and the status size below) give
         # those pixels back — 1280x900 still fits uncut.
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
+        # Pass 18: the root margins/spacing give 14px back to the
+        # height budget — the knob cells grew by 12px each (ring
+        # clearance) and the window still fits 1280x900 unscrolled.
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(1)
         # Slim dark header bar (rekordbox toolbar style) — product name
         # and version stay, the big light title block is gone.
         header_bar = PanelFrame()
         header_bar.setObjectName('headerbar')
         header = QHBoxLayout(header_bar)
-        header.setContentsMargins(10, 3, 10, 3)
+        header.setContentsMargins(10, 2, 10, 2)
         title = QLabel(f'MixAble  <span style="color:{COLOR_TEXT_SUB}">DJ STUDIO</span>')
         title.setStyleSheet('font-size:16px;font-weight:800;letter-spacing:0.5px')
         header.addWidget(title)
@@ -1167,7 +1191,7 @@ class Window(QMainWindow):
         self.decks = [Deck(self,i) for i in range(2)]
         top_band = QHBoxLayout()
         strips = QVBoxLayout()
-        strips.setSpacing(4)
+        strips.setSpacing(2)
         strips.addWidget(self.decks[0], 1)
         strips.addWidget(self.decks[1], 1)
         top_band.addLayout(strips, 1)
@@ -1314,7 +1338,7 @@ class Window(QMainWindow):
         utility_bar.setObjectName('utility')
         utility_bar.setToolTip('Aの末尾 → Bの先頭（テンポ同期なし）')
         utility = QHBoxLayout(utility_bar)
-        utility.setContentsMargins(8, 3, 8, 3)
+        utility.setContentsMargins(8, 2, 8, 2)
         utility.setSpacing(6)
         # Pass 13: the bar's small section captions ('試聴' / '出力')
         # are gone — the controls (duration combo, preview buttons,
@@ -1368,7 +1392,7 @@ class Window(QMainWindow):
         mixer = PanelFrame()
         mixer.setObjectName('mixer')
         mix = QVBoxLayout(mixer)
-        mix.setSpacing(4)
+        mix.setSpacing(2)
         mix_top = QHBoxLayout()
         self.mixer_label = QLabel('MIXER')
         self.mixer_label.setStyleSheet(SECTION_LABEL_QSS)
@@ -1894,9 +1918,9 @@ STYLE = (
     # rectangles — a 1px top-edge highlight (the bright first stop),
     # a subtle vertical falloff, and consistent 6px corners.
     f'QFrame#headerbar {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #202127, stop:0.05 #131418, stop:1 #0e0e11); border:1px solid {COLOR_BORDER}; border-radius:3px; }}'
-    f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #121317, stop:1 #0e0f11); border:1px solid #26282f; border-radius:3px; padding:8px; }}'
-    f'QFrame#mixer, QFrame#bpmframe {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #131418, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:8px 12px; }}'
-    f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.4 #121317, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:8px 12px; }}'
+    f'QFrame#deck {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #121317, stop:1 #0e0f11); border:1px solid #26282f; border-radius:3px; padding:4px 8px; }}'
+    f'QFrame#mixer, QFrame#bpmframe {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #131418, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:4px 12px; }}'
+    f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.4 #121317, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:4px 12px; }}'
     f'QFrame#utility {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #24262d, stop:0.005 #15161a, stop:1 #101114); border:1px solid #26282f; border-radius:3px; }}'
     # Pass 14: the LCD windows — pale grey-green glass with a dark
     # bezel, set into the chassis panels (the ghost grid + inset
@@ -1924,7 +1948,7 @@ STYLE = (
     f'QPushButton#langbtn:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton#langbtn:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; font-weight:800; }}'
     # Performance pads: near-black cells, hairline borders, small caps.
-    f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:2px; padding:9px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
+    f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:2px; padding:4px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
     f'QPushButton[pad="true"]:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b21, stop:1 #0e0f12); border-color:#3f434e; }}'
     f'QPushButton[pad="true"]:pressed {{ background:#060607; }}'
     f'QPushButton[pad="true"]:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; }}'
@@ -1937,7 +1961,7 @@ STYLE = (
     f'QSlider::handle:horizontal {{ width:14px; height:24px; margin:-9px 0; background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8); border:2px solid #000000; border-radius:2px; }}'
     f'QProgressBar {{ background:{COLOR_DISPLAY_BG}; border:1px solid {COLOR_BORDER}; border-radius:3px; min-height:15px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; }}'
     f'QProgressBar::chunk {{ background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1fa34a, stop:0.75 #2ee66b, stop:0.92 #ffc233, stop:1 #ff3838); border-radius:1px; }}'
-    f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid {COLOR_BORDER}; border-radius:2px; padding:3px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
+    f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid {COLOR_BORDER}; border-radius:2px; padding:2px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
     f'QToolTip {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; padding:4px 6px; }}'
     f'QScrollBar:vertical {{ background:{COLOR_BG}; width:12px; margin:0; }}'
     f'QScrollBar::handle:vertical {{ background:#2c2f36; border-radius:2px; min-height:30px; }}'
