@@ -91,6 +91,33 @@ STRINGS = {
     "preview": {"en": "▶ PREVIEW TRANSITION", "jp": "▶ ミックス試聴"},
     "stop_preview": {"en": "STOP PREVIEW", "jp": "試聴終了"},
     "save_events": {"en": "SAVE EVENTS JSON", "jp": "操作保存"},
+    # Pass 21: the performance → Live export (the 'fix it in
+    # Live' half of 「アプリで完結 Liveで修整が理想」).
+    "export_live": {"en": "EXPORT FOR LIVE", "jp": "Live用に書き出し"},
+    "live_need_performance": {
+        "en": "No performance recorded yet — play something first",
+        "jp": "まだ演奏の記録がありません。先に演奏してください",
+    },
+    "live_need_tempo": {
+        "en": "No SET BPM source — load a setlist or a Deck A track first",
+        "jp": "SET BPM の元がありません。セットリストかデッキAの曲を先に読み込んでください",
+    },
+    "live_base_dialog": {
+        "en": "Live template (.als)",
+        "jp": "Live テンプレート (.als)",
+    },
+    "live_out_dialog": {
+        "en": "Save performance set (.als)",
+        "jp": "演奏セットの保存先 (.als)",
+    },
+    "live_export_done": {
+        "en": "Live set written: {path} • {clips} clips • {envelopes} envelopes",
+        "jp": "Live用セットを書き出しました: {path} • クリップ {clips} • エンベロープ {envelopes}",
+    },
+    "live_export_error": {
+        "en": "Live export failed: {error}",
+        "jp": "Live書き出し失敗: {error}",
+    },
     "device_auto": {"en": "AUTOMATIC", "jp": "自動（WASAPI優先）"},
     "device_default": {"en": "SYSTEM DEFAULT", "jp": "システム既定"},
     "apply": {"en": "APPLY", "jp": "適用"},

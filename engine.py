@@ -266,6 +266,16 @@ class Engine:
     def command(self, action, deck=None, value=None):
         self.commands.put((action, deck, value))
 
+    def apply_pending(self):
+        """Apply queued commands without rendering audio. The
+        journal events are minted in _apply, which the audio
+        callback normally drives; pass 21 (performance capture
+        robustness): when no audio stream is running (device
+        failed / not started), Window.tick pumps this so a
+        performance still lands in the journal instead of
+        sitting unlogged in the queue."""
+        self._apply()
+
     def _snap(self, d, frame):
         if d['quantize'] and d['track'] is not None and d['track'].grid():
             frame = d['track'].grid().nearest_beat(frame)

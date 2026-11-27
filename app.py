@@ -20,6 +20,7 @@ from engine import (Engine, Journal, RATE,
                     peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
 import i18n
+import perf_als
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
 
@@ -1386,6 +1387,13 @@ class Window(QMainWindow):
         self.export_button = QPushButton('Save events JSON / 操作保存')
         self.export_button.clicked.connect(self.export)
         utility.addWidget(self.export_button)
+        # Pass 21: the performance → Live export sits beside the
+        # events export — same recorded performance, two products:
+        # the raw log (操作保存) and a Live set to open and fix
+        # (Live用に書き出し).
+        self.live_button = QPushButton('EXPORT FOR LIVE / Live用に書き出し')
+        self.live_button.clicked.connect(self.export_live)
+        utility.addWidget(self.live_button)
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.VLine)
         divider.setStyleSheet(f'color:{COLOR_BORDER_HI}')
@@ -1523,6 +1531,7 @@ class Window(QMainWindow):
         self._reg(self.preview_button.setText, 'preview')
         self._reg(self.preview_stop.setText, 'stop_preview')
         self._reg(self.export_button.setText, 'save_events')
+        self._reg(self.live_button.setText, 'export_live')
         self._reg(self.apply_button.setText, 'apply')
         self._reg(self.setlist_label.setText, 'setlist_caption')
         self._reg(self.mix_reset.setText, 'timer_reset')
@@ -1708,6 +1717,71 @@ class Window(QMainWindow):
             self.journal.drain(self.engine)
             try: self.journal.export(path)
             except OSError as e: QMessageBox.warning(self,'Save failed',str(e))
+    def export_live(self):
+        """Pass 21 (user direction, 2026-11-27: 「アプリで完結
+        Liveで修整が理想」): turn the recorded performance — the
+        journal's event log, autosaved all along — into a Live
+        set: the user picks their template .als (the one saved
+        from Live for the setlist flow) and a destination, and
+        perf_als rebuilds the performance into it (Arrangement
+        clips at the performed positions + automation envelopes).
+        The SET BPM comes from the loaded set list, else Deck A's
+        track — without one there is no honest beat grid."""
+        self.journal.drain(self.engine)
+        history = list(self.journal.history)
+        if not history:
+            self._status_fn = lambda lang: \
+                i18n.tr('live_need_performance', lang)
+            self._apply_status()
+            return
+        set_bpm = None
+        if self.setlist_data is not None:
+            set_bpm = display_summary(self.setlist_data)['set_bpm']
+        if set_bpm is None:
+            set_bpm = self.deck_a_bpm
+        if not set_bpm:
+            self._status_fn = lambda lang: \
+                i18n.tr('live_need_tempo', lang)
+            self._apply_status()
+            return
+        base, _ = QFileDialog.getOpenFileName(
+            self, i18n.tr('live_base_dialog', self.lang), '',
+            'Ableton Live set (*.als)')
+        if not base:
+            return
+        out, _ = QFileDialog.getSaveFileName(
+            self, i18n.tr('live_out_dialog', self.lang),
+            'mixcraft-performance.als', 'Ableton Live set (*.als)')
+        if not out:
+            return
+        # BPM sources for the reconstruction's SYNC math: the
+        # tracks currently on the decks (perf_als adds the set
+        # list's entries itself).
+        bpms = {}
+        for deck in self.decks:
+            track = deck.wave.track
+            if track is not None and track.bpm:
+                bpms[track.path] = track.bpm
+        try:
+            report = perf_als.generate(base, history, out,
+                                       set_bpm=set_bpm,
+                                       setlist_data=self.setlist_data,
+                                       bpms=bpms)
+        except Exception as error:
+            self._status_fn = lambda lang, e=error: \
+                i18n.tr('live_export_error', lang).format(error=e)
+            self._apply_status()
+            return
+        clips = report['clips_written']
+        envelopes = len(report['envelopes_written'])
+        warning = report['warnings'][0] if report['warnings'] else ''
+
+        def status_fn(lang, p=out, c=clips, n=envelopes, w=warning):
+            text = i18n.tr('live_export_done', lang).format(
+                path=p, clips=c, envelopes=n)
+            return text + (f' • {w}' if w else '')
+        self._status_fn = status_fn
+        self._apply_status()
     def open_setlist(self):
         path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist JSON (*.json)')
         if not path: return
@@ -1884,6 +1958,12 @@ class Window(QMainWindow):
             container.setLayout(line)
             self.setlist_rows.addWidget(container)
     def tick(self):
+        # Pass 21: with no live audio stream there is no callback
+        # to apply the engine's command queue, and unapplied
+        # commands mint no journal events — pump the queue here
+        # so the performance capture survives a dead device.
+        if self.stream is None:
+            self.engine.apply_pending()
         try: self.journal.drain(self.engine)
         except OSError as e: self.status.setText(f'Autosave error: {e}')
         for widget,d in zip(self.decks,self.engine.decks):
