@@ -17,6 +17,7 @@ from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
+import i18n
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
 
@@ -134,7 +135,7 @@ class Waveform(QWidget):
         mid = main_h/2
         if not self.track:
             p.setPen(QColor(COLOR_TEXT_MUTE))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, 'DROP AUDIO HERE  /  音声ファイルをドロップ')
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, i18n.tr('drop_hint'))
             return
         total = len(self.track.audio)
         start, end = scroll_window(self.position)
@@ -223,6 +224,12 @@ class JogDial(QWidget):
     def set_bpm(self, bpm):
         self.bpm = bpm
         self.update()
+    def set_caption(self, caption):
+        """Language registry hook (pass 10): the painted caption
+        ('SET BPM' / 'セットBPM') is redrawn in the new language."""
+        if caption != self.caption:
+            self.caption = caption
+            self.update()
     def set_fraction(self, fraction):
         self.fraction = fraction % 1.0
         self.update()
@@ -340,6 +347,14 @@ class Knob(QWidget):
         self._drag_start = None
         self.setFixedSize(64, 52)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_label(self, label):
+        """Language registry hook (pass 10): the MASTER knob's painted
+        caption switches language; the deck knobs keep their English
+        hardware captions (see i18n.py's conventions note)."""
+        if label != self.label:
+            self.label = label
+            self.update()
 
     # --- QSlider-compatible subset (Deck wiring and smoke.py) ---
     def setRange(self, minimum, maximum):
@@ -558,10 +573,10 @@ class Deck(QFrame):
         fader_box = QVBoxLayout(self.fader_box)
         fader_box.setContentsMargins(0, 0, 0, 0)
         fader_box.setSpacing(4)
-        volume_label = QLabel('CHANNEL\nVOLUME')
-        volume_label.setStyleSheet(SECTION_LABEL_QSS)
-        volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fader_box.addWidget(volume_label)
+        self.volume_label = QLabel('CHANNEL\nVOLUME')
+        self.volume_label.setStyleSheet(SECTION_LABEL_QSS)
+        self.volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fader_box.addWidget(self.volume_label)
         self.volume = QSlider(Qt.Orientation.Vertical)
         self.volume.setStyleSheet(fader_qss)
         self.volume.setRange(0, 100)
@@ -593,6 +608,10 @@ class Deck(QFrame):
         cue_jump = QPushButton('Cue'); cue_jump.clicked.connect(lambda: window.engine.command('cue_jump', index))
         hot1 = QPushButton('Hot 1'); hot1.clicked.connect(lambda: window.engine.command('hotcue_jump', index, 1))
         hot1s = QPushButton('Hot1 Set'); hot1s.clicked.connect(lambda: window.engine.command('hotcue_set', index, 1))
+        # Kept as attributes so the Window's language registry
+        # (pass 10) can re-label the row on a language switch.
+        self.pad_cue_set, self.pad_cue = cue_set, cue_jump
+        self.pad_hot1, self.pad_hot1s = hot1, hot1s
         quant = QPushButton('Quantize'); quant.setCheckable(True)
         self.quant = quant
         quant.toggled.connect(lambda on, i=index: window.engine.command('quantize', i, on))
@@ -638,6 +657,19 @@ class Window(QMainWindow):
         self.clip_tracks = []      # setlist_to_clip_tracks() result, for the Live hand-off
         self.deck_a_bpm = None     # Deck A track BPM — fallback for the centre SET BPM dial
         self.mix_timer = new_mix_timer()   # pass 8: performance elapsed timer
+        # Pass 10 (user direction, 2026-11-27): ONE language at a
+        # time — the bilingual labels looked cluttered (「文字ガチャ
+        # ガチャして」). self.lang is the window's language; every
+        # static label registers a setter in self._labels and
+        # set_language() reapplies the whole registry; dynamic texts
+        # (play/pause, timer captions, set-list rows, the status bar)
+        # re-render from i18n at their usual refresh points. The
+        # status bar goes through self._status_fn so a language
+        # switch re-renders the CURRENT message, not a stale one.
+        self.lang = i18n.DEFAULT_LANG
+        i18n.set_current(self.lang)
+        self._labels = []   # [(apply_fn)] — apply_fn(lang) re-labels one widget
+        self._status_fn = lambda lang: i18n.tr('ready', lang)
         data = Path(os.getenv('LOCALAPPDATA', str(Path.home()/'.local/share'))) / 'MixCraftDJStudio'
         self.journal = Journal(data/'sessions'/f'{time.time_ns()}.jsonl')
         root = QWidget()
@@ -662,13 +694,32 @@ class Window(QMainWindow):
         title = QLabel(f'MixAble  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
         title.setStyleSheet('font-size:16px;font-weight:800;letter-spacing:0.5px')
         header.addWidget(title)
-        mode_label = QLabel('DJ MODE  •  2 DECK PERFORMANCE  •  PHASE 2 / 試遊版')
-        mode_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px;font-weight:600')
-        header.addWidget(mode_label)
+        self.mode_label = QLabel('DJ MODE  •  2 DECK PERFORMANCE  •  PHASE 2 / 試遊版')
+        self.mode_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px;font-weight:600')
+        header.addWidget(self.mode_label)
         header.addStretch()
         brand = QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial')
         brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:11px')
         header.addWidget(brand)
+        # Language toggle (pass 10): a small segmented pair at the
+        # header's right end — EN | 日本語, each labelled in its own
+        # language (the standard convention). The checked button
+        # wears the global QPushButton:checked style.
+        self.lang_en = QPushButton('EN')
+        self.lang_en.setObjectName('langbtn')
+        self.lang_en.setCheckable(True)
+        self.lang_en.clicked.connect(lambda: self.set_language('en'))
+        self.lang_jp = QPushButton('日本語')
+        self.lang_jp.setObjectName('langbtn')
+        self.lang_jp.setCheckable(True)
+        self.lang_jp.clicked.connect(lambda: self.set_language('jp'))
+        lang_box = QWidget()
+        lang_row = QHBoxLayout(lang_box)
+        lang_row.setContentsMargins(6, 0, 0, 0)
+        lang_row.setSpacing(2)
+        lang_row.addWidget(self.lang_en)
+        lang_row.addWidget(self.lang_jp)
+        header.addWidget(lang_box)
         layout.addWidget(header_bar)
         # TOP BAND (pass 9 — the user's hand-drawn sketch, 2026-11-27):
         # the two deck strips STACKED wide, Deck A over Deck B, and at
@@ -690,19 +741,19 @@ class Window(QMainWindow):
         # 2026-11-26): both decks run at the fixed set BPM. Display
         # only — refresh_set_bpm_dial() feeds it from the loaded set
         # list, falling back to Deck A's track BPM.
-        set_bpm_label = QLabel('SET BPM / セットBPM')
-        set_bpm_label.setStyleSheet(SECTION_LABEL_QSS)
-        set_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bpm_lay.addWidget(set_bpm_label)
+        self.set_bpm_label = QLabel('SET BPM / セットBPM')
+        self.set_bpm_label.setStyleSheet(SECTION_LABEL_QSS)
+        self.set_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bpm_lay.addWidget(self.set_bpm_label)
         self.set_dial = JogDial(caption='SET BPM', size=148)
         bpm_lay.addWidget(self.set_dial, 0, Qt.AlignmentFlag.AlignCenter)
         # The sketch's two small circles: the level meter as a pair
         # of lamps (MeterLamp keeps the QProgressBar contract tick()
         # already used — setRange / setValue / setToolTip).
-        level_label = QLabel('LEVEL')
-        level_label.setStyleSheet(SECTION_LABEL_QSS)
-        level_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bpm_lay.addWidget(level_label)
+        self.level_label = QLabel('LEVEL')
+        self.level_label.setStyleSheet(SECTION_LABEL_QSS)
+        self.level_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bpm_lay.addWidget(self.level_label)
         self.meter = MeterLamp()
         self.meter.setRange(0,100)
         bpm_lay.addWidget(self.meter, 0, Qt.AlignmentFlag.AlignCenter)
@@ -721,9 +772,9 @@ class Window(QMainWindow):
         # rows below. Same widgets, same wiring as pass 8.
         setlist_head = QHBoxLayout()
         setlist_head.setSpacing(8)
-        setlist_label = QLabel('BROWSER / SET LIST')
-        setlist_label.setStyleSheet(SECTION_LABEL_QSS)
-        setlist_head.addWidget(setlist_label)
+        self.setlist_label = QLabel('BROWSER / SET LIST')
+        self.setlist_label.setStyleSheet(SECTION_LABEL_QSS)
+        setlist_head.addWidget(self.setlist_label)
         # Mix timer (pass 8, user direction 2026-11-27: 「今何分ミック
         # スしたとかもわかるといいね」): how long the performance has
         # been running, at a glance — MIX mm:ss elapsed, the time left
@@ -745,9 +796,9 @@ class Window(QMainWindow):
         self.mix_toggle = QPushButton('START / 開始')
         self.mix_toggle.clicked.connect(self.toggle_mix_timer)
         setlist_head.addWidget(self.mix_toggle)
-        mix_reset = QPushButton('RESET / リセット')
-        mix_reset.clicked.connect(self.reset_mix_timer)
-        setlist_head.addWidget(mix_reset)
+        self.mix_reset = QPushButton('RESET / リセット')
+        self.mix_reset.clicked.connect(self.reset_mix_timer)
+        setlist_head.addWidget(self.mix_reset)
         self.setlist_open = QPushButton('開く / Open setlist JSON')
         self.setlist_open.setToolTip('セットリストを開く / Open setlist JSON')
         self.setlist_open.clicked.connect(self.open_setlist)
@@ -766,18 +817,20 @@ class Window(QMainWindow):
         # Offset matching the row layout: deck bar 5 + chip 22 +
         # status bar 6 + number 34 + the four 6px gaps between them.
         columns.addSpacing(5 + 6 + 22 + 6 + 6 + 6 + 34 + 6)
-        head_title = QLabel('TITLE / ARTIST')
-        head_title.setStyleSheet(SECTION_LABEL_QSS)
-        columns.addWidget(head_title, 1)
-        for text, width, align in [('BPM', 64, Qt.AlignmentFlag.AlignRight),
-                                   ('KEY', 56, Qt.AlignmentFlag.AlignCenter),
-                                   ('TIME', 52, Qt.AlignmentFlag.AlignRight),
-                                   ('STATUS', 84, Qt.AlignmentFlag.AlignCenter)]:
+        self.col_title = QLabel('TITLE / ARTIST')
+        self.col_title.setStyleSheet(SECTION_LABEL_QSS)
+        columns.addWidget(self.col_title, 1)
+        self.col_heads = {}
+        for key, text, width, align in [('bpm', 'BPM', 64, Qt.AlignmentFlag.AlignRight),
+                                   ('key', 'KEY', 56, Qt.AlignmentFlag.AlignCenter),
+                                   ('time', 'TIME', 52, Qt.AlignmentFlag.AlignRight),
+                                   ('status', 'STATUS', 84, Qt.AlignmentFlag.AlignCenter)]:
             head = QLabel(text)
             head.setStyleSheet(SECTION_LABEL_QSS)
             head.setFixedWidth(width)
             head.setAlignment(align)
             columns.addWidget(head)
+            self.col_heads[key] = head
         columns.addSpacing(70)
         setlist_layout.addLayout(columns)
         self.setlist_rows = QVBoxLayout()
@@ -790,34 +843,40 @@ class Window(QMainWindow):
         # are both set-up tools, not performance controls) — one row
         # instead of a caption line plus two rows. Same widgets,
         # same wiring; the audition's fine print rides as a tooltip.
-        utility_bar = QFrame()
+        self.utility_bar = QFrame()
+        utility_bar = self.utility_bar
         utility_bar.setObjectName('utility')
         utility_bar.setToolTip('Aの末尾 → Bの先頭（テンポ同期なし）')
         utility = QHBoxLayout(utility_bar)
         utility.setContentsMargins(8, 3, 8, 3)
         utility.setSpacing(6)
-        transition_label = QLabel('TRANSITION / 試聴')
-        transition_label.setStyleSheet(SECTION_LABEL_QSS)
-        utility.addWidget(transition_label)
+        self.transition_label = QLabel('TRANSITION / 試聴')
+        self.transition_label.setStyleSheet(SECTION_LABEL_QSS)
+        utility.addWidget(self.transition_label)
         self.duration = QComboBox()
+        # Pass 10: the items are re-texted on a language switch, so
+        # the combo must keep fitting its contents (the default
+        # adjust-on-first-show would freeze it at the first
+        # language's width and clip '8 seconds' after a switch).
+        self.duration.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         for seconds in [8,16,32,64]: self.duration.addItem(f'{seconds} seconds / 秒',seconds)
         utility.addWidget(self.duration)
         self.preview_button = QPushButton('▶ Preview transition / ミックス試聴')
         self.preview_button.clicked.connect(self.preview)
         utility.addWidget(self.preview_button)
-        stop = QPushButton('Stop preview / 試聴終了')
-        stop.clicked.connect(lambda:self.engine.command('stop_preview'))
-        utility.addWidget(stop)
-        export = QPushButton('Save events JSON / 操作保存')
-        export.clicked.connect(self.export)
-        utility.addWidget(export)
+        self.preview_stop = QPushButton('Stop preview / 試聴終了')
+        self.preview_stop.clicked.connect(lambda:self.engine.command('stop_preview'))
+        utility.addWidget(self.preview_stop)
+        self.export_button = QPushButton('Save events JSON / 操作保存')
+        self.export_button.clicked.connect(self.export)
+        utility.addWidget(self.export_button)
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.VLine)
         divider.setStyleSheet(f'color:{COLOR_BORDER_HI}')
         utility.addWidget(divider)
-        output_label = QLabel('OUTPUT / 出力')
-        output_label.setStyleSheet(SECTION_LABEL_QSS)
-        utility.addWidget(output_label)
+        self.output_label = QLabel('OUTPUT / 出力')
+        self.output_label.setStyleSheet(SECTION_LABEL_QSS)
+        utility.addWidget(self.output_label)
         self.devices = QComboBox()
         # The device list can hold very long names; the combo is the
         # bar's one flexible element, so let it shrink to fit.
@@ -831,9 +890,9 @@ class Window(QMainWindow):
                 if d['max_output_channels'] >= 2: self.devices.addItem(d['name']+' / '+hosts[d['hostapi']]['name'],i)
         except Exception: pass
         utility.addWidget(self.devices,1)
-        apply = QPushButton('Apply / 適用')
-        apply.clicked.connect(self.start_audio)
-        utility.addWidget(apply)
+        self.apply_button = QPushButton('Apply / 適用')
+        self.apply_button.clicked.connect(self.start_audio)
+        utility.addWidget(self.apply_button)
         layout.addWidget(utility_bar)
         # BOTTOM ZONE (pass 9 sketch): left, one compact MIXER BLOCK
         # gathering both decks' channel strips — from outside in:
@@ -847,9 +906,9 @@ class Window(QMainWindow):
         mix = QVBoxLayout(mixer)
         mix.setSpacing(4)
         mix_top = QHBoxLayout()
-        mixer_label = QLabel('MIXER')
-        mixer_label.setStyleSheet(SECTION_LABEL_QSS)
-        mix_top.addWidget(mixer_label)
+        self.mixer_label = QLabel('MIXER')
+        self.mixer_label.setStyleSheet(SECTION_LABEL_QSS)
+        mix_top.addWidget(self.mixer_label)
         mix_top.addStretch()
         # MASTER volume as a knob (pass 6): same Knob widget and the
         # same wiring the horizontal slider had — range 0-100, default
@@ -880,9 +939,9 @@ class Window(QMainWindow):
         deck_a_label.setStyleSheet(f'color:{COLOR_DECK_A};font-size:15px;font-weight:800')
         cross_head.addWidget(deck_a_label)
         cross_head.addStretch()
-        cross_label = QLabel('CROSSFADER')
-        cross_label.setStyleSheet(SECTION_LABEL_QSS)
-        cross_head.addWidget(cross_label)
+        self.cross_label = QLabel('CROSSFADER')
+        self.cross_label.setStyleSheet(SECTION_LABEL_QSS)
+        cross_head.addWidget(self.cross_label)
         cross_head.addStretch()
         deck_b_label = QLabel('B')
         deck_b_label.setStyleSheet(f'color:{COLOR_DECK_B};font-size:15px;font-weight:800')
@@ -911,14 +970,118 @@ class Window(QMainWindow):
         self.status = QLabel('Ready / 準備完了')
         self.status.setObjectName('status')
         layout.addWidget(self.status)
-        notice = QLabel('BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。MIDI入出力・ALS未対応。元ファイルは変更しません。')
-        notice.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px')
-        notice.setWordWrap(True)
-        layout.addWidget(notice)
+        self.notice_label = QLabel('BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。MIDI入出力・ALS未対応。元ファイルは変更しません。')
+        self.notice_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px')
+        self.notice_label.setWordWrap(True)
+        layout.addWidget(self.notice_label)
+        self._register_labels()
+        self._apply_status()
+        self.render_setlist()
+        self.refresh_mix_timer()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(40)
         if audio: self.start_audio()
+    # ------------------------------------------------------------------
+    # Language registry (pass 10): every static label registers an
+    # apply_fn(lang) here once; set_language() replays the registry
+    # and then re-renders the dynamic texts. Strings live in i18n.py.
+    # ------------------------------------------------------------------
+    def _reg(self, setter, key):
+        self._labels.append(lambda lang, s=setter, k=key: s(i18n.tr(k, lang)))
+    def _register_labels(self):
+        self._reg(self.mode_label.setText, 'header_mode')
+        for deck in self.decks:
+            self._reg(deck.load.setText, 'load')
+            self._reg(deck.cue.setText, 'reset')
+            self._reg(deck.volume_label.setText, 'channel_volume')
+            self._reg(deck.pad_cue_set.setText, 'cue_set')
+            self._reg(deck.pad_cue.setText, 'cue')
+            self._reg(deck.pad_hot1.setText, 'hot1')
+            self._reg(deck.pad_hot1s.setText, 'hot1_set')
+            self._reg(deck.quant.setText, 'quantize')
+            self._reg(deck.sync.setText, 'sync')
+            self._reg(deck.sync.setToolTip, 'sync_tip')
+        self._reg(self.set_bpm_label.setText, 'set_bpm')
+        self._reg(self.set_dial.set_caption, 'set_bpm')
+        self._reg(self.level_label.setText, 'level')
+        self._reg(self.transition_label.setText, 'transition')
+        self._reg(self.utility_bar.setToolTip, 'audition_tip')
+        self._reg(self.preview_button.setText, 'preview')
+        self._reg(self.preview_stop.setText, 'stop_preview')
+        self._reg(self.export_button.setText, 'save_events')
+        self._reg(self.output_label.setText, 'output')
+        self._reg(self.apply_button.setText, 'apply')
+        self._reg(self.setlist_label.setText, 'setlist_caption')
+        self._reg(self.mix_reset.setText, 'timer_reset')
+        self._reg(self.setlist_open.setText, 'open_setlist')
+        self._reg(self.setlist_open.setToolTip, 'open_setlist')
+        self._reg(self.col_title.setText, 'col_title')
+        self._reg(self.col_heads['time'].setText, 'col_time')
+        self._reg(self.col_heads['status'].setText, 'col_status')
+        self._reg(self.mixer_label.setText, 'mixer_caption')
+        self._reg(self.master.set_label, 'master')
+        self._reg(self.cross_label.setText, 'crossfader')
+        self._reg(self.notice_label.setText, 'notice')
+        # The two combos rebuild / re-text their static items,
+        # keeping the current selection (by item data).
+        def duration_items(lang):
+            current = self.duration.currentData()
+            self.duration.blockSignals(True)
+            self.duration.clear()
+            for seconds in (8, 16, 32, 64):
+                self.duration.addItem(
+                    i18n.tr('seconds_item', lang).format(n=seconds), seconds)
+            index = self.duration.findData(current)
+            if index >= 0: self.duration.setCurrentIndex(index)
+            self.duration.blockSignals(False)
+        self._labels.append(duration_items)
+        def device_items(lang):
+            if self.devices.count() >= 2:
+                self.devices.setItemText(0, i18n.tr('device_auto', lang))
+                self.devices.setItemText(1, i18n.tr('device_default', lang))
+        self._labels.append(device_items)
+        for apply_fn in self._labels:
+            apply_fn(self.lang)
+        self.lang_en.setChecked(self.lang == 'en')
+        self.lang_jp.setChecked(self.lang == 'jp')
+        self._refresh_deck_placeholders()
+    def set_language(self, lang):
+        """Header toggle handler: switch the whole window to one
+        language, immediately — registry first, then the dynamic
+        texts (status bar, mix timer, set-list rows, deck play
+        buttons via the next tick) re-render in the new language."""
+        if lang not in i18n.LANGS: return
+        self.lang = lang
+        i18n.set_current(lang)
+        for apply_fn in self._labels:
+            apply_fn(lang)
+        self.lang_en.setChecked(lang == 'en')
+        self.lang_jp.setChecked(lang == 'jp')
+        self._apply_status()
+        self.refresh_mix_timer()
+        self.render_setlist()
+        self._refresh_deck_placeholders()
+        for deck in self.decks:
+            deck.wave.update()
+    def _apply_status(self):
+        self.status.setText(self._status_fn(self.lang))
+    def _refresh_deck_placeholders(self):
+        """Per-deck info text on a language switch. The widget-side
+        wave.track is the UI's truth for 'loaded' (the engine applies
+        its command queue lazily, at render time). Empty decks show
+        the localized placeholder; loaded decks keep their file name
+        (not language text) and get their Key sub-line re-rendered
+        from the track the waveform already holds."""
+        for index, deck in enumerate(self.decks):
+            if index in self.loading:
+                continue
+            track = deck.wave.track
+            if track is None:
+                deck.name.setText(i18n.tr('no_track', self.lang))
+            elif track.key:
+                deck.sub.setText(i18n.tr('key_line', self.lang).format(
+                    key=track.key, camelot=track.camelot))
     def start_audio(self):
         if self.stream:
             self.stream.stop(); self.stream.close(); self.stream = None
@@ -940,9 +1103,13 @@ class Window(QMainWindow):
             self.stream.start()
             self.hostapi_name = hostapi_name
             latency_ms = (self.stream.latency or 0) * 1000
-            self.status.setText(f'Audio active • 48 kHz / 512 frames • {hostapi_name or "default host"} • latency {latency_ms:.0f} ms (報告値) • 操作を自動保存中')
+            self._status_fn = lambda lang, h=hostapi_name or 'default host', ms=f'{latency_ms:.0f}': \
+                i18n.tr('audio_active', lang).format(host=h, ms=ms)
+            self._apply_status()
         except Exception as error:
-            self.status.setText(f'Audio unavailable / 出力エラー: {error}')
+            self._status_fn = lambda lang, e=error: \
+                i18n.tr('audio_error', lang).format(error=e)
+            self._apply_status()
     def callback(self,outdata,frames,time_info,status):
         started = time.perf_counter()
         if status: self.audio_status_count += 1
@@ -954,7 +1121,7 @@ class Window(QMainWindow):
     def load(self,index,path):
         if index in self.loading: return
         self.loading.add(index)
-        self.decks[index].name.setText('Loading / 解析中… '+Path(path).name)
+        self.decks[index].name.setText(i18n.tr('loading', self.lang)+Path(path).name)
         self.decks[index].load.setEnabled(False)
         def work():
             try: self.result.ready.emit(index,load_track(path),'')
@@ -965,14 +1132,14 @@ class Window(QMainWindow):
         deck = self.decks[index]
         deck.load.setEnabled(True)
         if error:
-            deck.name.setText('Load failed / 読込失敗')
+            deck.name.setText(i18n.tr('load_failed', self.lang))
             QMessageBox.warning(self,'Audio load',error)
             return
         self.engine.command('stop_preview')
         self.engine.command('load',index,track)
         deck.wave.track = track
         deck.name.setText(Path(track.path).name)
-        deck.sub.setText(f'Key {track.key} ({track.camelot})' if track.key else '—')
+        deck.sub.setText(i18n.tr('key_line', self.lang).format(key=track.key, camelot=track.camelot) if track.key else '—')
         deck.bpm.setText(f'{track.bpm or "—"} BPM ≈')
         deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
         if index == 0:
@@ -980,7 +1147,8 @@ class Window(QMainWindow):
             self.refresh_set_bpm_dial()
     def preview(self):
         if not all(d['track'] for d in self.engine.decks):
-            self.status.setText('Load both decks first / 両デッキに音声を読み込んでください')
+            self._status_fn = lambda lang: i18n.tr('load_both_first', lang)
+            self._apply_status()
             return
         self.engine.command('preview',value=self.duration.currentData())
     def export(self):
@@ -990,19 +1158,25 @@ class Window(QMainWindow):
             try: self.journal.export(path)
             except OSError as e: QMessageBox.warning(self,'Save failed',str(e))
     def open_setlist(self):
-        path,_ = QFileDialog.getOpenFileName(self,'Setlist JSON / セットリスト','','Setlist JSON (*.json)')
+        path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist JSON (*.json)')
         if not path: return
         try:
             data = load_setlist(path)
         except SetlistFormatError as error:
-            self.status.setText(f'セットリスト読込エラー / Setlist error: {error}')
+            self._status_fn = lambda lang, e=error: \
+                i18n.tr('setlist_error', lang).format(error=e)
+            self._apply_status()
             return
         self.setlist_data = data
         self.clip_tracks = setlist_to_clip_tracks(data)
         self.render_setlist()
         self.refresh_set_bpm_dial()
         summary = display_summary(data)
-        self.status.setText(f'セットリスト読込 / Setlist loaded: {Path(path).name} • {summary["track_count"]} 曲 • 合計 {summary["total_text"]} • クリップ変換 {len(self.clip_tracks)} 件を保持中')
+        name, count = Path(path).name, summary['track_count']
+        total, clips = summary['total_text'], len(self.clip_tracks)
+        self._status_fn = lambda lang: i18n.tr('setlist_loaded', lang).format(
+            name=name, count=count, total=total, clips=clips)
+        self._apply_status()
     def mix_target_seconds(self):
         """Set target length for the mix timer: the loaded set list's
         target minutes (setlist.py carries target_minutes), else the
@@ -1027,10 +1201,11 @@ class Window(QMainWindow):
         elapsed = self.mix_timer['elapsed']
         self.mix_elapsed.setText(f'MIX {format_mix_clock(elapsed)}')
         remaining = format_mix_remaining(elapsed, self.mix_target_seconds())
-        caption = '超過' if remaining.startswith('+') else '残り'
+        caption = i18n.tr('over' if remaining.startswith('+') else 'remaining',
+                          self.lang)
         self.mix_remaining.setText(f'{caption} {remaining}')
         self.mix_toggle.setText(
-            'STOP / 停止' if self.mix_timer['running'] else 'START / 開始')
+            i18n.tr('stop' if self.mix_timer['running'] else 'start', self.lang))
     def refresh_set_bpm_dial(self):
         """Feed the centre SET BPM dial: the loaded set list's set
         BPM wins (the set runs at that fixed tempo); without a set
@@ -1047,11 +1222,20 @@ class Window(QMainWindow):
             item = self.setlist_rows.takeAt(0)
             widget = item.widget()
             if widget: widget.deleteLater()
-        if self.setlist_data is None: return
+        if self.setlist_data is None:
+            self.setlist_summary.setText(i18n.tr('setlist_empty', self.lang))
+            return
         summary = display_summary(self.setlist_data)
         bpm_text = f'{summary["set_bpm"]:g}' if summary['set_bpm'] is not None else '—'
-        self.setlist_summary.setText(
-            f'SET BPM {bpm_text}  •  {summary["track_count"]} TRACKS  •  TOTAL {summary["total_text"]}  •  {summary["state_text"]}')
+        # The summary line is composed per language (pass 10);
+        # display_summary's own state_text stays Japanese (shared
+        # with the CLI), so the state is re-derived from its fields.
+        state = i18n.summary_state_text(summary['started'],
+                                        summary['current_index'],
+                                        summary['track_count'], self.lang)
+        self.setlist_summary.setText(i18n.tr('summary_line', self.lang).format(
+            bpm=bpm_text, count=summary['track_count'],
+            total=summary['total_text'], state=state))
         colors = {'played': COLOR_STATE_PLAYED, 'playing': COLOR_STATE_PLAYING,
                   'next': COLOR_STATE_NEXT, 'queued': COLOR_STATE_QUEUED}
         for row_index, row in enumerate(display_rows(self.setlist_data)):
@@ -1089,7 +1273,7 @@ class Window(QMainWindow):
             number.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:14px;font-weight:700')
             number.setFixedWidth(34)
             line.addWidget(number)
-            title_text = row['title'] or '(無題)'
+            title_text = row['title'] or i18n.tr('untitled', self.lang)
             if row['artist']: title_text += f' — {row["artist"]}'
             title = QLabel(title_text)
             title.setStyleSheet(f'color:{COLOR_STATE_PLAYED if row["status"]=="played" else COLOR_TEXT};font-size:13px;font-weight:600')
@@ -1111,7 +1295,7 @@ class Window(QMainWindow):
             duration.setFixedWidth(52)
             duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             line.addWidget(duration)
-            badge = QLabel(row['status_label'])
+            badge = QLabel(i18n.status_badge(row['status'], self.lang))
             badge.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:11px;font-weight:700')
             badge.setFixedWidth(84)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1121,7 +1305,7 @@ class Window(QMainWindow):
             if row['link_url']:
                 link_layout = QHBoxLayout(link_slot)
                 link_layout.setContentsMargins(0, 0, 0, 0)
-                link_button = QPushButton('試聴 ↗')
+                link_button = QPushButton(i18n.tr('listen', self.lang))
                 link_button.setToolTip(row['link_url'])
                 link_button.clicked.connect(lambda _checked=False, url=row['link_url']: QDesktopServices.openUrl(QUrl(url)))
                 link_layout.addWidget(link_button)
@@ -1151,7 +1335,7 @@ class Window(QMainWindow):
                     or widget.wave.track is not d['track']):
                 widget.wave.position = d['position']
                 widget.wave.update()
-            widget.play.setText('Ⅱ Pause / 一時停止' if d['playing'] else '▶ Play / 再生')
+            widget.play.setText(i18n.tr('pause' if d['playing'] else 'play', self.lang))
             length = len(d['track'].audio)/RATE if d['track'] else 0
             def clock(s):
                 s = max(0.0, s)
@@ -1203,6 +1387,13 @@ STYLE = (
     f'QPushButton:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton:disabled {{ background:#121317; border-color:#1d1f24; color:#565b63; }}'
     f'QPushButton:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; font-weight:800; }}'
+    # Header language toggle (pass 10): same treatment as the normal
+    # buttons but slimmer — the header bar keeps its pass-9 height,
+    # so the bottom notice stays inside the 900px window.
+    f'QPushButton#langbtn {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e1f25, stop:1 #121317); border:1px solid #2c2e36; border-radius:4px; padding:2px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
+    f'QPushButton#langbtn:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
+    f'QPushButton#langbtn:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
+    f'QPushButton#langbtn:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; font-weight:800; }}'
     # Performance pads: near-black cells, hairline borders, small caps.
     f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:3px; padding:9px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
     f'QPushButton[pad="true"]:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b21, stop:1 #0e0f12); border-color:#3f434e; }}'
