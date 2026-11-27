@@ -406,6 +406,34 @@ def generate(base_path, events_source, out_path, set_bpm=None,
     return report
 
 
+def validate_base(path):
+    """ベース .als が書き出しに使えるかを先に確かめる (pass 24)。
+
+    (reason, has_donor) を返す。reason が None なら使える。
+    reason は 'missing' (ファイルが無い) / 'not_als' (Live の
+    セットとして読めない) / 'few_tracks' (AudioTrack が 2 本
+    未満 — inject_perf が要求する) のいずれか。has_donor は
+    複製元のクリップがあるかどうか (無い場合は generate が
+    スケルトン経路に落ちて警告する — 失敗ではない)。
+    UI は reason を平易な言葉に訳してその場で伝える。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return 'missing', False
+    try:
+        tree = als_writer.load_als(p)
+        tracks = als_writer._audio_tracks(tree.getroot())
+    except Exception:
+        return 'not_als', False
+    if len(tracks) < 2:
+        return 'few_tracks', False
+    try:
+        donor = als_writer._find_donor_clip(tracks, tree.getroot())
+    except Exception:
+        donor = None
+    return None, donor is not None
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

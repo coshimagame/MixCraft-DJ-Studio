@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import sys
@@ -17,13 +18,15 @@ from engine import (Engine, Journal, RATE,
                     frame_to_x, load_track,
                     mix_timer_auto_start, mix_timer_reset, mix_timer_start,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
-                    peak_span, scroll_window, seek_fraction)
+                    peak_span, scroll_window, seek_fraction,
+                    window_columns)
 from audio_config import resolve_output
 from midi_input import MidiController
 import i18n
 import perf_als
 from setlist import (SetlistFormatError, display_rows, display_summary,
-                     load_setlist, setlist_to_clip_tracks)
+                     load_setlist, normalize_track, setlist_to_clip_tracks)
+from setlist import _guess_artist_title
 
 # ---------------------------------------------------------------------------
 # UI palette — rekordbox-style dark theme (second pass, 2026-11-26).
@@ -285,7 +288,10 @@ class Waveform(QWidget):
         # Pass 9 (sketch layout): the stacked strips give the flowing
         # waveform real height again — the user: 「波形データ大きく
         # てもいいよ」. 100 total (scrolling area + 14 overview).
-        self.setMinimumHeight(100)
+        # Pass 24: the minimum gives a little back (84) so a short
+        # screen compresses the waveform before it scrolls — the
+        # design height still gets its full size from the stretch.
+        self.setMinimumHeight(84)
     def paintEvent(self, event):
         p = QPainter(self)
         # Pass 14: the waveform lives behind old-LCD glass — pale
@@ -320,42 +326,49 @@ class Waveform(QWidget):
             p.drawLine(x, 0, x, main_h)
         p.setPen(QColor(34, 43, 28, 48))
         p.drawLine(0, int(mid), w, int(mid))
-        # Each peak is a bar as wide as its bucket's span in the
-        # window, so long tracks (few buckets in view) still read
-        # dense. The playhead sits at the centre: peaks at or left
-        # of it have played (full ink), the rest are ahead (ghost).
-        peaks = self.track.peaks
-        count = len(peaks)
-        bucket_px = (total/count)/(end-start)*w if count else 1
-        pen_w = max(1, int(bucket_px))
-        ink_pen = QPen(QColor(COLOR_LCD_INK), pen_w)
-        ghost_pen = QPen(QColor(34, 43, 28, 100), pen_w)
-        lo, hi = peak_span(count, total, start, end)
-        for i in range(lo, hi):
-            x = int(frame_to_x((i+0.5)*total/count, start, end, w))
-            y = int(peaks[i]*(mid-6))
-            p.setPen(ink_pen if x <= w//2 else ghost_pen)
-            p.drawLine(x, int(mid)-y, x, int(mid)+y)
+        # Pass 24 (user report 2026-11-27: 「波形がまだガタガタ」):
+        # one 1px line per PIXEL COLUMN, each column carrying the
+        # true max of the peak buckets inside it (engine.window_
+        # columns over the pass-24 fine peaks, ~188 buckets/s).
+        # The old drawing stretched each of the ≤1400 whole-track
+        # buckets across ~10px of pen — the staircase he saw. The
+        # playhead sits at the centre: columns at or left of it
+        # have played (full ink), the rest are ahead (ghost); each
+        # side is one pass so the pen is set only twice.
+        cols = window_columns(self.track.peaks, total, start, end, w)
+        mid_i = int(mid)
+        p.setPen(QPen(QColor(COLOR_LCD_INK), 1))
+        for x in range(0, w//2 + 1):
+            y = int(cols[x]*(mid-6))
+            p.drawLine(x, mid_i-y, x, mid_i+y)
+        p.setPen(QPen(QColor(34, 43, 28, 100), 1))
+        for x in range(w//2 + 1, w):
+            y = int(cols[x]*(mid-6))
+            p.drawLine(x, mid_i-y, x, mid_i+y)
         # Playhead: fixed at the centre of the scrolling area — a
         # solid ink line on the glass.
         p.setPen(QPen(QColor(COLOR_LCD_INK), 2))
         p.drawLine(w//2, 0, w//2, main_h)
         # Overview strip: the whole track, thin, with the position
         # marker — the scrolling area's map, in the same ink
-        # densities (played full, ahead ghost).
+        # densities (played full, ahead ghost). Pass 24: also
+        # per-column true maxes — the old every-Nth-bucket sampling
+        # let transients fall between the drawn columns.
         oy = main_h + 1
         p.setPen(QColor(34, 43, 28, 70))
         p.drawLine(0, main_h, w, main_h)
         omid = oy + WAVE_OVERVIEW_HEIGHT/2
-        played_pen = QPen(QColor(COLOR_LCD_INK), 1)
-        ahead_pen = QPen(QColor(34, 43, 28, 100), 1)
         pos_x = int(self.position/max(1, total)*w)
-        step = max(1, count//max(1, w))
-        for i in range(0, count, step):
-            x = int((i+0.5)/count*w)
-            y = max(1, int(peaks[i]*(WAVE_OVERVIEW_HEIGHT/2-2)))
-            p.setPen(played_pen if x < pos_x else ahead_pen)
-            p.drawLine(x, int(omid)-y, x, int(omid)+y)
+        ocols = window_columns(self.track.peaks, total, 0, total, w)
+        omid_i = int(omid)
+        p.setPen(QPen(QColor(COLOR_LCD_INK), 1))
+        for x in range(0, min(pos_x, w)):
+            y = max(1, int(ocols[x]*(WAVE_OVERVIEW_HEIGHT/2-2)))
+            p.drawLine(x, omid_i-y, x, omid_i+y)
+        p.setPen(QPen(QColor(34, 43, 28, 100), 1))
+        for x in range(min(pos_x, w), w):
+            y = max(1, int(ocols[x]*(WAVE_OVERVIEW_HEIGHT/2-2)))
+            p.drawLine(x, omid_i-y, x, omid_i+y)
         p.setPen(QPen(QColor(COLOR_LCD_INK), 2))
         p.drawLine(pos_x, oy, pos_x, oy + WAVE_OVERVIEW_HEIGHT)
     def mousePressEvent(self, event):
@@ -595,6 +608,41 @@ class PanelFrame(QFrame):
         _paint_screws(QPainter(self), self.width(), self.height())
 
 
+class SetlistDropPanel(PanelFrame):
+    """The set-list panel (pass 24, user report 2026-11-27: 「セッ
+    トリストにドラッグしても音楽は入らない」): dropping audio
+    files anywhere on the panel adds them to the set list. The
+    panel's children (the LCD list, the rows, their labels) do
+    not accept drops, so Qt propagates the drag/drop events up
+    to this frame — the same mechanism the decks' drop loading
+    relies on. `drop_handler` is the callable the Window
+    installs; it receives the dropped local file paths."""
+    drop_handler = None
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls()
+                 if u.isLocalFile()]
+        if paths and self.drop_handler is not None:
+            self.drop_handler(paths)
+            event.acceptProposedAction()
+
+
+class SetlistRow(QFrame):
+    """One set-list row (pass 24): a double-click loads the
+    entry's file onto the standby deck (Window.load_setlist_
+    entry). The row's labels do not handle the click, so it
+    propagates up to this frame."""
+    def __init__(self, index, on_activate):
+        super().__init__()
+        self.entry_index = index
+        self._on_activate = on_activate
+    def mouseDoubleClickEvent(self, event):
+        self._on_activate(self.entry_index)
+        super().mouseDoubleClickEvent(event)
+
+
 class LcdWindow(QFrame):
     """An old-LCD display window set into the chassis (pass 14):
     the stylesheet paints the pale glass and the bezel, then the
@@ -787,6 +835,88 @@ def _path_matches(entry_path, target_path):
                                    and candidate.name == target.name)
 
 
+# ---------------------------------------------------------------------------
+# App settings (pass 24): a small JSON in the app data dir, beside
+# the session journals. Today it remembers the Live-export base
+# .als (so the picker is a once-ever question, not a per-export
+# stall) and the folders the export dialogs last visited.
+# ---------------------------------------------------------------------------
+
+SETTINGS_FILENAME = 'settings.json'
+
+def load_app_settings(data_dir):
+    """The settings dict, or {} when absent/unreadable."""
+    try:
+        data = json.loads((Path(data_dir) / SETTINGS_FILENAME)
+                          .read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_app_settings(data_dir, settings):
+    """Best-effort persist; a failed save must never break a
+    performance — the choice is simply asked again next time."""
+    try:
+        target = Path(data_dir) / SETTINGS_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(settings, ensure_ascii=False,
+                                     indent=2), encoding='utf-8')
+    except OSError:
+        pass
+
+def live_templates_dir(home=None):
+    """Ableton's User Library Templates folder — where Live's
+    'Save as Template' puts the base .als — or None when it does
+    not exist on this machine."""
+    home = Path(home) if home is not None else Path.home()
+    candidate = home / 'Documents' / 'Ableton' / 'User Library' / 'Templates'
+    return candidate if candidate.is_dir() else None
+
+def live_base_start_dir(settings, home=None):
+    """Where the base-.als picker opens (pass 24): Live's
+    Templates folder when it exists, else the folder the picker
+    last visited, else '' (the dialog's own default)."""
+    templates = live_templates_dir(home)
+    if templates is not None:
+        return str(templates)
+    last = (settings or {}).get('live_base_dir')
+    if last and Path(last).is_dir():
+        return last
+    return ''
+
+# Audio extensions the deck load dialog accepts — a set-list
+# drop accepts exactly the same files (pass 24).
+SETLIST_AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.aiff', '.aif'}
+
+def file_track_entry(path):
+    """A normalized set-list entry for a local audio file
+    (pass 24, set-list drag & drop). Title / artist come from
+    the file's embedded tags — the same soundfile read
+    deck_title_text uses — falling back to the 'Artist - Title'
+    filename guess (setlist._guess_artist_title, the preview
+    tooling's rule); the duration is measured from the file
+    header. BPM / key stay None on purpose: a drop must stay
+    instant, and the deck's own analysis fills them in when
+    the track is loaded."""
+    path = Path(path)
+    title = artist = None
+    duration = None
+    try:
+        with sf.SoundFile(str(path)) as handle:
+            title = (handle.title or '').strip() or None
+            artist = (handle.artist or '').strip() or None
+            if handle.samplerate:
+                duration = int(round(handle.frames / handle.samplerate))
+    except Exception:
+        title = artist = duration = None
+    if not title:
+        guess_artist, guess_title = _guess_artist_title(path.name)
+        title = guess_title or path.stem
+        artist = artist or guess_artist
+    return normalize_track({'title': title, 'artist': artist,
+                            'duration_seconds': duration,
+                            'path': str(path)})
+
 def deck_title_text(path, setlist_data=None):
     """Header title for a loaded deck track (pass 13).
 
@@ -880,6 +1010,11 @@ class Deck(QFrame):
         transport.setContentsMargins(0, 0, 0, 0)
         transport.setSpacing(4)
         for button in (self.load, self.play, self.cue):
+            # Pass 24: slimmer vertical padding (STYLE's
+            # [transport="true"] rule) — the stack's minimum
+            # height gives ~15px back to short screens; the
+            # buttons read the same at design size.
+            button.setProperty('transport', True)
             transport.addWidget(button)
         transport.addStretch()
         grid.addWidget(transport_box, 0, 0)
@@ -925,7 +1060,9 @@ class Deck(QFrame):
         # clock shows the remaining + elapsed pair again, undoing
         # pass 16 for the DECK clocks only (the MIX TIMER stays
         # elapsed-only).
-        self.clock = DotReadout(pitch=1.55, color=COLOR_LCD_INK_SOFT, height=28)
+        # Pass 24: height 28 -> 22 (the 16px glyph stays centred
+        # and unclipped; the readout's padding gives the pixels).
+        self.clock = DotReadout(pitch=1.55, color=COLOR_LCD_INK_SOFT, height=22)
         self.clock.setFixedWidth(164)
         self.clock.setText('00:00.0')
         readouts.addWidget(self.clock)
@@ -941,11 +1078,11 @@ class Deck(QFrame):
         state_row = QHBoxLayout()
         state_row.setSpacing(4)
         self.onair = QLabel('')
-        self.onair.setFixedHeight(22)
+        self.onair.setFixedHeight(19)   # pass 24: 22 -> 19 (11px text + its 2px padding still fits)
         self.onair.setAlignment(Qt.AlignmentFlag.AlignCenter)
         state_row.addWidget(self.onair)
         self.monitor_btn = QPushButton('')
-        self.monitor_btn.setFixedHeight(22)
+        self.monitor_btn.setFixedHeight(19)   # pass 24: matches the ON AIR chip
         self.monitor_btn.clicked.connect(
             lambda: window.toggle_monitor(index))
         state_row.addWidget(self.monitor_btn)
@@ -1039,6 +1176,13 @@ class Deck(QFrame):
         pads_row.setSpacing(5)
         for button in [cue_set, cue_jump, hot1, hot1s, quant, sync]:
             button.setProperty('pad', True)
+            # Pass 24: the six pads' text widths set the deck
+            # strip's minimum width (~500px of it). A 52px floor
+            # lets a narrow window compress the row instead of
+            # pushing the whole window's minimum past 1100px;
+            # at design width the buttons size to their text
+            # exactly as before.
+            button.setMinimumWidth(52)
             pads_row.addWidget(button)
         grid.addLayout(pads_row, 1, 2)
     def set_onair(self, on, force=False):
@@ -1110,6 +1254,7 @@ class Window(QMainWindow):
         # is built, whatever entry point created the window.
         load_dot_font()
         self.setWindowTitle('MixAble DJ Studio • Mw-fActory • Phase 2 Trial')
+        self._fit_done = False
         self.resize(1280,900)
         # Pass 23 (window fit, user report 2026-11-27: the window
         # opened larger than his screen — at >100% Windows display
@@ -1120,6 +1265,18 @@ class Window(QMainWindow):
         # scroll area absorbs what does not fit. The window itself
         # is freely resizable/maximizable (resize() only; no fixed
         # size is set on the window anywhere).
+        # Pass 24: that clamp compared the CLIENT size against the
+        # available geometry, but the available geometry is in
+        # FRAME terms — on Windows the opened window overflowed
+        # the work area by the title-bar/border size (~30px), so
+        # the bottom slid under the taskbar even after the clamp
+        # (「最大化すると下がツールバーより下にいってきれちゃう」 /
+        # 「縦横比がおかしい」). showEvent now re-fits the FRAME
+        # into the available geometry once the frame size is real.
+        # A sane minimum size keeps drag-resizing from crushing
+        # the window into a postage stamp — sized so the minimum
+        # plus a window frame still fits an 800px-wide screen.
+        self.setMinimumSize(760, 500)
         screen = QApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
@@ -1165,6 +1322,8 @@ class Window(QMainWindow):
         self._labels = []   # [(apply_fn)] — apply_fn(lang) re-labels one widget
         self._status_fn = lambda lang: i18n.tr('ready', lang)
         data = Path(os.getenv('LOCALAPPDATA', str(Path.home()/'.local/share'))) / 'MixCraftDJStudio'
+        self.data_dir = data
+        self.settings = load_app_settings(data)
         self.journal = Journal(data/'sessions'/f'{time.time_ns()}.jsonl')
         root = QWidget()
         scroll = QScrollArea()
@@ -1267,8 +1426,11 @@ class Window(QMainWindow):
         # Set list panel: independent of the decks. Loads the JSON exported
         # by the phone prep page (setlist.load_setlist) and shows the
         # track order with the phone design's status colours.
-        setlist_panel = PanelFrame()
+        setlist_panel = SetlistDropPanel()
         setlist_panel.setObjectName('setlist')
+        # Pass 24: files dropped on the panel join the set list.
+        setlist_panel.drop_handler = self.add_dropped_to_setlist
+        self.setlist_panel = setlist_panel
         setlist_layout = QVBoxLayout(setlist_panel)
         # Pass 9: the browser header and the MIX TIMER share one
         # bar — the performance clock belongs with the set it times,
@@ -1433,6 +1595,14 @@ class Window(QMainWindow):
         self.apply_button = QPushButton('Apply / 適用')
         self.apply_button.clicked.connect(self.start_audio)
         utility.addWidget(self.apply_button)
+        # Pass 24: the utility bar's controls wear the slimmer
+        # padding (STYLE's [util="true"] rules) — the bar's height
+        # is part of the window's floor on short screens.
+        for util_widget in (self.duration, self.preview_button,
+                            self.preview_stop, self.export_button,
+                            self.live_button, self.devices,
+                            self.apply_button):
+            util_widget.setProperty('util', True)
         layout.addWidget(utility_bar)
         # BOTTOM ZONE (pass 9 sketch): left, one compact MIXER BLOCK
         # gathering both decks' channel strips — from outside in:
@@ -1807,13 +1977,25 @@ class Window(QMainWindow):
         perf_als rebuilds the performance into it (Arrangement
         clips at the performed positions + automation envelopes).
         The SET BPM comes from the loaded set list, else Deck A's
-        track — without one there is no honest beat grid."""
+        track — without one there is no honest beat grid.
+
+        Pass 24 (user report 2026-11-27: 「ファイルを選ぶになっ
+        た」): the base picker opened unexplained, in the app's
+        own download folder, and he stalled there. Now the base
+        is remembered after the first pick, the picker explains
+        itself in plain words and opens at Live's Templates
+        folder, an unusable file is refused on the spot with its
+        reason, and every outcome — needs, failure, success —
+        is a message box, not just a status line."""
         self.journal.drain(self.engine)
         history = list(self.journal.history)
         if not history:
             self._status_fn = lambda lang: \
                 i18n.tr('live_need_performance', lang)
             self._apply_status()
+            QMessageBox.information(
+                self, i18n.tr('live_dialog_title', self.lang),
+                i18n.tr('live_need_performance', self.lang))
             return
         set_bpm = None
         if self.setlist_data is not None:
@@ -1824,17 +2006,24 @@ class Window(QMainWindow):
             self._status_fn = lambda lang: \
                 i18n.tr('live_need_tempo', lang)
             self._apply_status()
+            QMessageBox.information(
+                self, i18n.tr('live_dialog_title', self.lang),
+                i18n.tr('live_need_tempo', self.lang))
             return
-        base, _ = QFileDialog.getOpenFileName(
-            self, i18n.tr('live_base_dialog', self.lang), '',
-            'Ableton Live set (*.als)')
+        base = self._pick_live_base()
         if not base:
             return
+        out_dir = self.settings.get('live_out_dir')
+        if not out_dir or not Path(out_dir).is_dir():
+            out_dir = str(Path(base).parent)
         out, _ = QFileDialog.getSaveFileName(
             self, i18n.tr('live_out_dialog', self.lang),
-            'mixcraft-performance.als', 'Ableton Live set (*.als)')
+            str(Path(out_dir) / 'mixcraft-performance.als'),
+            'Ableton Live set (*.als)')
         if not out:
             return
+        self.settings['live_out_dir'] = str(Path(out).parent)
+        save_app_settings(self.data_dir, self.settings)
         # BPM sources for the reconstruction's SYNC math: the
         # tracks currently on the decks (perf_als adds the set
         # list's entries itself).
@@ -1852,6 +2041,10 @@ class Window(QMainWindow):
             self._status_fn = lambda lang, e=error: \
                 i18n.tr('live_export_error', lang).format(error=e)
             self._apply_status()
+            QMessageBox.warning(
+                self, i18n.tr('live_dialog_title', self.lang),
+                i18n.tr('live_export_error_dialog', self.lang)
+                .format(error=error))
             return
         clips = report['clips_written']
         envelopes = len(report['envelopes_written'])
@@ -1863,6 +2056,72 @@ class Window(QMainWindow):
             return text + (f' • {w}' if w else '')
         self._status_fn = status_fn
         self._apply_status()
+        done_text = i18n.tr('live_export_done_dialog', self.lang).format(
+            path=out, clips=clips, envelopes=envelopes, base=base)
+        if warning:
+            done_text += f'\n\n{warning}'
+        QMessageBox.information(
+            self, i18n.tr('live_dialog_title', self.lang), done_text)
+    def _pick_live_base(self):
+        """The template .als for the export, or None on cancel.
+
+        A remembered base is validated and used silently (the
+        pick is a once-ever question). A remembered base that
+        went bad is reported in plain words and re-picked. A
+        fresh pick is validated on the spot: an unusable file
+        is refused with its reason and the picker reopens."""
+        remembered = self.settings.get('live_base_als')
+        if remembered:
+            reason, _donor = perf_als.validate_base(remembered)
+            if reason is None:
+                return remembered
+            QMessageBox.warning(
+                self, i18n.tr('live_dialog_title', self.lang),
+                i18n.tr('live_base_remembered_bad', self.lang).format(
+                    path=remembered,
+                    reason=i18n.tr(f'live_base_reason_{reason}',
+                                   self.lang)))
+            self.settings.pop('live_base_als', None)
+            save_app_settings(self.data_dir, self.settings)
+        while True:
+            picked = self._ask_live_base()
+            if not picked:
+                return None
+            reason, _donor = perf_als.validate_base(picked)
+            if reason is None:
+                self.settings['live_base_als'] = picked
+                save_app_settings(self.data_dir, self.settings)
+                return picked
+            QMessageBox.warning(
+                self, i18n.tr('live_dialog_title', self.lang),
+                i18n.tr('live_base_unusable', self.lang).format(
+                    reason=i18n.tr(f'live_base_reason_{reason}',
+                                   self.lang)))
+    def _ask_live_base(self):
+        """The base-.als picker, with the plain-words explanation
+        inside it (pass 24). The non-native dialog is what lets
+        the explanation label live in the dialog itself; it
+        opens at Live's Templates folder when that exists."""
+        dialog = QFileDialog(
+            self, i18n.tr('live_base_dialog', self.lang),
+            live_base_start_dir(self.settings),
+            'Ableton Live set (*.als)')
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        label = QLabel(i18n.tr('live_base_explain', self.lang))
+        label.setWordWrap(True)
+        try:
+            layout = dialog.layout()
+            layout.addWidget(label, layout.rowCount(), 0, 1, -1)
+        except Exception:
+            pass  # the caption still names the file; never fatal
+        if dialog.exec():
+            files = dialog.selectedFiles()
+            if files:
+                self.settings['live_base_dir'] = str(Path(files[0]).parent)
+                save_app_settings(self.data_dir, self.settings)
+                return files[0]
+        return None
     def open_setlist(self):
         path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist JSON (*.json)')
         if not path: return
@@ -1914,6 +2173,74 @@ class Window(QMainWindow):
         if bpm is None:
             bpm = self.deck_a_bpm
         self.set_dial.set_bpm(bpm)
+    def standby_deck(self):
+        """The deck a set-list double-click loads onto (pass 24):
+        the one not playing; when both are stopped (or both are
+        somehow playing), the empty one, else Deck B — the
+        next-up deck in the app's A/B alternation."""
+        decks = self.engine.decks
+        if decks[0]['playing'] != decks[1]['playing']:
+            return 1 if decks[0]['playing'] else 0
+        for i in (0, 1):
+            if decks[i]['track'] is None:
+                return i
+        return 1
+    def load_setlist_entry(self, index):
+        """Double-click on a set-list row (pass 24): load the
+        entry's local file onto the standby deck. Entries from
+        the phone page may carry no local file at all — that is
+        said in the status bar, never silently ignored."""
+        entries = (self.setlist_data or {}).get('tracks') or []
+        if not 0 <= index < len(entries):
+            return
+        entry = entries[index]
+        path = entry.get('path')
+        if not path or not Path(path).is_file():
+            self._status_fn = lambda lang: \
+                i18n.tr('setlist_entry_no_file', lang)
+            self._apply_status()
+            return
+        deck = self.standby_deck()
+        self.load(deck, path)
+        title = entry.get('title') or Path(path).stem
+        self._status_fn = lambda lang, t=title, d='AB'[deck]: \
+            i18n.tr('setlist_entry_loaded', lang).format(title=t, deck=d)
+        self._apply_status()
+    def add_dropped_to_setlist(self, paths):
+        """Files dropped on the set-list panel (pass 24): audio
+        files become real set-list entries (tags/filename title,
+        measured duration); anything else is reported by name
+        in the status bar — never a silent no-op."""
+        added, rejected = [], []
+        for raw in paths:
+            candidate = Path(raw)
+            if candidate.suffix.lower() in SETLIST_AUDIO_EXTS \
+                    and candidate.is_file():
+                added.append(file_track_entry(candidate))
+            else:
+                rejected.append(candidate.name)
+        if added:
+            if self.setlist_data is None:
+                self.setlist_data = {
+                    'format': 'mixcraft-setlist', 'version': 1,
+                    'exported_at': None, 'set_bpm': None,
+                    'target_minutes': None, 'started': False,
+                    'current_index': -1, 'tracks': []}
+            self.setlist_data['tracks'].extend(added)
+            self.clip_tracks = setlist_to_clip_tracks(self.setlist_data)
+            self.render_setlist()
+        if added or rejected:
+            def status_fn(lang, a=len(added), r=tuple(rejected)):
+                parts = []
+                if a:
+                    parts.append(i18n.tr('setlist_drop_added', lang)
+                                 .format(count=a))
+                if r:
+                    parts.append(i18n.tr('setlist_drop_rejected', lang)
+                                 .format(names=', '.join(r)))
+                return ' • '.join(parts)
+            self._status_fn = status_fn
+            self._apply_status()
     def render_setlist(self):
         while self.setlist_rows.count():
             item = self.setlist_rows.takeAt(0)
@@ -2031,11 +2358,15 @@ class Window(QMainWindow):
             # Pass 14: the rows are flat lines on the glass with a
             # hairline under each (see the STYLE rules), and the
             # NOW PLAYING row's container is the inverted ink block.
-            container = QFrame()
+            # Pass 24: the row is a SetlistRow — a double-click
+            # loads the entry's file onto the standby deck.
+            container = SetlistRow(row['index'],
+                                   self.load_setlist_entry)
             if row['status'] == 'playing':
                 container.setObjectName('setrowplaying')
             else:
                 container.setObjectName(f'setrow{row_index % 2}')
+            container.setToolTip(i18n.tr('setlist_row_tip', self.lang))
             container.setLayout(line)
             self.setlist_rows.addWidget(container)
     def tick(self):
@@ -2096,6 +2427,36 @@ class Window(QMainWindow):
         # Pass 23: DDJ-RB — drain hardware messages into the UI,
         # retry the connection, refresh the PLAY / monitor LEDs.
         self.midi.poll()
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._fit_done:
+            self._fit_done = True
+            self._fit_frame_to_screen()
+    def _fit_frame_to_screen(self):
+        """Pass 24: fit the window's FRAME (title bar + borders
+        included) inside the screen's available geometry. resize()
+        sets the client size, so the pass-23 clamp alone left the
+        frame sticking out past the work area by the frame's size.
+        Runs once, at first show, when frameGeometry() is real;
+        on frame-less platforms it is a no-op."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        frame = self.frameGeometry()
+        extra_w = frame.width() - self.width()
+        extra_h = frame.height() - self.height()
+        new_w = min(self.width(), max(200, avail.width() - extra_w))
+        new_h = min(self.height(), max(200, avail.height() - extra_h))
+        if (new_w, new_h) != (self.width(), self.height()):
+            self.resize(new_w, new_h)
+            frame = self.frameGeometry()
+        x = min(max(frame.x(), avail.left()),
+                max(avail.left(), avail.right() - frame.width() + 1))
+        y = min(max(frame.y(), avail.top()),
+                max(avail.top(), avail.bottom() - frame.height() + 1))
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(x, y)
     def closeEvent(self,event):
         self.timer.stop()
         self.midi.close()
@@ -2139,6 +2500,14 @@ STYLE = (
     f'QPushButton:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton:disabled {{ background:#121317; border-color:#1d1f24; color:#565b63; }}'
     f'QPushButton:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; font-weight:800; }}'
+    # Pass 24: the deck transport stack wears slimmer vertical
+    # padding — its minimum height is part of the window's floor
+    # on short screens.
+    f'QPushButton[transport="true"] {{ padding:3px 10px; }}'
+    # Pass 24: same for the utility bar's buttons and the device
+    # combo — set-up controls, not performance surfaces.
+    f'QPushButton[util="true"] {{ padding:3px 10px; }}'
+    f'QComboBox[util="true"] {{ padding:3px 9px; }}'
     # Header language toggle (pass 10): same treatment as the normal
     # buttons but slimmer — the header bar keeps its pass-9 height,
     # so the bottom notice stays inside the 900px window.
@@ -2147,7 +2516,7 @@ STYLE = (
     f'QPushButton#langbtn:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton#langbtn:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; font-weight:800; }}'
     # Performance pads: near-black cells, hairline borders, small caps.
-    f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:2px; padding:4px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
+    f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:2px; padding:2px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
     f'QPushButton[pad="true"]:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b21, stop:1 #0e0f12); border-color:#3f434e; }}'
     f'QPushButton[pad="true"]:pressed {{ background:#060607; }}'
     f'QPushButton[pad="true"]:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; }}'
@@ -2162,11 +2531,18 @@ STYLE = (
     f'QProgressBar::chunk {{ background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1fa34a, stop:0.75 #2ee66b, stop:0.92 #ffc233, stop:1 #ff3838); border-radius:1px; }}'
     f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid {COLOR_BORDER}; border-radius:2px; padding:2px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
     f'QToolTip {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; padding:4px 6px; }}'
-    f'QScrollBar:vertical {{ background:{COLOR_BG}; width:12px; margin:0; }}'
-    f'QScrollBar::handle:vertical {{ background:#2c2f36; border-radius:2px; min-height:30px; }}'
+    # Pass 24: when the content truly does not fit, the scroll
+    # bars are the way down — they must READ as controls, not
+    # hide as 12px of near-black on black (the pass-23 handles
+    # were #2c2f36 on the app background; the user read the
+    # overflow as content being cut off).
+    f'QScrollBar:vertical {{ background:{COLOR_BG}; width:14px; margin:0; }}'
+    f'QScrollBar::handle:vertical {{ background:#4b515b; border-radius:3px; min-height:30px; }}'
+    f'QScrollBar::handle:vertical:hover {{ background:#6a7280; }}'
     f'QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}'
-    f'QScrollBar:horizontal {{ background:{COLOR_BG}; height:12px; margin:0; }}'
-    f'QScrollBar::handle:horizontal {{ background:#2c2f36; border-radius:2px; min-width:30px; }}'
+    f'QScrollBar:horizontal {{ background:{COLOR_BG}; height:14px; margin:0; }}'
+    f'QScrollBar::handle:horizontal {{ background:#4b515b; border-radius:3px; min-width:30px; }}'
+    f'QScrollBar::handle:horizontal:hover {{ background:#6a7280; }}'
     f'QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}'
 )
 

@@ -118,6 +118,61 @@ STRINGS = {
         "en": "Live export failed: {error}",
         "jp": "Live書き出し失敗: {error}",
     },
+    # Pass 24 (user report 2026-11-27: 「ファイルを選ぶになった」
+    # — the base picker opened unexplained, in the app's own
+    # folder, and he stalled): the picker explains itself in
+    # plain words, the choice is remembered, and every failure
+    # is a message box, not a silent status line.
+    "live_dialog_title": {
+        "en": "Export for Live",
+        "jp": "Live用に書き出し",
+    },
+    "live_base_explain": {
+        "en": "Choose the template set (.als) you saved from Live — "
+              "the one with Cue Out set to 3/4, Cue mode on, and one "
+              "test clip in it. If you saved it with Live's 'Save as "
+              "Template', look in Documents > Ableton > User Library "
+              "> Templates.",
+        "jp": "Liveで保存したテンプレートのセット（.als）を選んでください。"
+              "Cue Out 3/4・Cueモードで、テストクリップが1つ入った物です。"
+              "Liveの「テンプレートとして保存」を使った場合は、ドキュメントの "
+              "Ableton > User Library > Templates フォルダにあります。",
+    },
+    "live_base_reason_missing": {
+        "en": "That file could not be found.",
+        "jp": "そのファイルが見つかりませんでした。",
+    },
+    "live_base_reason_not_als": {
+        "en": "That file could not be read as a Live set (.als).",
+        "jp": "Liveのセット（.als）として読めませんでした。",
+    },
+    "live_base_reason_few_tracks": {
+        "en": "That set has fewer than two audio tracks "
+              "(two are needed, for decks A and B).",
+        "jp": "オーディオトラックが2本ありません"
+              "（デッキA/B用に2本必要です）。",
+    },
+    "live_base_unusable": {
+        "en": "That file cannot be used: {reason} Please choose again.",
+        "jp": "選んだファイルは使えません： {reason} もう一度選んでください。",
+    },
+    "live_base_remembered_bad": {
+        "en": "The remembered template ({path}) cannot be used: "
+              "{reason} Please choose it again.",
+        "jp": "前に選んだテンプレート（{path}）が使えませんでした： "
+              "{reason} 選び直してください。",
+    },
+    "live_export_done_dialog": {
+        "en": "Your Live set is written.\n\nSaved to: {path}\n"
+              "{clips} clips • {envelopes} envelopes\nTemplate: {base}",
+        "jp": "Live用セットを書き出しました。\n\n保存先: {path}\n"
+              "クリップ {clips} • エンベロープ {envelopes}\n"
+              "テンプレート: {base}",
+    },
+    "live_export_error_dialog": {
+        "en": "The export could not be completed.\n\n{error}",
+        "jp": "書き出しできませんでした。\n\n{error}",
+    },
     "device_auto": {"en": "AUTOMATIC", "jp": "自動（ASIO優先）"},
     # Pass 23: DDJ-RB MIDI connection state (status bar).
     "midi_connected": {"en": "DDJ-RB connected", "jp": "DDJ-RB 接続済み"},
@@ -168,6 +223,27 @@ STRINGS = {
     "setlist_error": {
         "en": "Setlist error: {error}",
         "jp": "セットリスト読込エラー: {error}",
+    },
+    # Pass 24: set-list drag & drop and row double-click loading.
+    "setlist_drop_added": {
+        "en": "Added {count} track(s) to the set list",
+        "jp": "セットリストに {count} 曲追加しました",
+    },
+    "setlist_drop_rejected": {
+        "en": "Not audio files, skipped: {names}",
+        "jp": "音声ファイルではないので追加できませんでした: {names}",
+    },
+    "setlist_entry_no_file": {
+        "en": "That entry has no local file to load",
+        "jp": "その曲には読み込めるファイルがありません",
+    },
+    "setlist_entry_loaded": {
+        "en": "Loading '{title}' to Deck {deck}",
+        "jp": "「{title}」をデッキ{deck}に読み込んでいます",
+    },
+    "setlist_row_tip": {
+        "en": "Double-click: load to the standby deck",
+        "jp": "ダブルクリックで待機デッキに読込",
     },
     "setlist_loaded": {
         "en": "Setlist loaded: {name} • {count} tracks • total {total} "
