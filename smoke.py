@@ -23,7 +23,8 @@ def schedule(app,window,directory,hardware):
         if not hardware:
             for _ in range(200): window.engine.render(512)
         window.tick()
-        result=dict(frames=window.engine.frame,peak=window.engine.peak,
+        result=dict(midi_available=bool(getattr(window,'midi',None) and window.midi.available),
+            frames=window.engine.frame,peak=window.engine.peak,
             positions=[d['position'] for d in window.engine.decks],
             overloads=window.engine.overloads,stream_active=bool(window.stream and window.stream.active),
             latency=window.stream.latency if window.stream else None,

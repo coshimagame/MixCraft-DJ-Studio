@@ -119,6 +119,9 @@ STRINGS = {
         "jp": "Live書き出し失敗: {error}",
     },
     "device_auto": {"en": "AUTOMATIC", "jp": "自動（WASAPI優先）"},
+    # Pass 23: DDJ-RB MIDI connection state (status bar).
+    "midi_connected": {"en": "DDJ-RB connected", "jp": "DDJ-RB 接続済み"},
+    "midi_disconnected": {"en": "DDJ-RB not connected", "jp": "DDJ-RB 未接続"},
     "device_default": {"en": "SYSTEM DEFAULT", "jp": "システム既定"},
     "apply": {"en": "APPLY", "jp": "適用"},
     # --- set list / mix timer ---------------------------------------

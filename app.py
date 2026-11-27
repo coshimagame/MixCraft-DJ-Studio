@@ -19,6 +19,7 @@ from engine import (Engine, Journal, RATE,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
+from midi_input import MidiController
 import i18n
 import perf_als
 from setlist import (SetlistFormatError, display_rows, display_summary,
@@ -1521,6 +1522,13 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.tick)
         self.timer.start(40)
         if audio: self.start_audio()
+        # Pass 23: DDJ-RB MIDI input — auto-connects in the
+        # background (poll() runs off this same tick); every
+        # hardware gesture is performed on the on-screen widgets,
+        # so it takes the identical command path into the engine
+        # and the performance journal. Absent hardware or library
+        # changes nothing for mouse use.
+        self.midi = MidiController(self)
     # ------------------------------------------------------------------
     # Language registry (pass 10): every static label registers an
     # apply_fn(lang) here once; set_language() replays the registry
@@ -2029,8 +2037,12 @@ class Window(QMainWindow):
         self.meter.setToolTip(f'Limiter: {self.engine.overloads} / Audio status: {self.audio_status_count}')
         self.cross.setEnabled(self.engine.preview is None)
         self.preview_button.setEnabled(self.engine.preview is None)
+        # Pass 23: DDJ-RB — drain hardware messages into the UI,
+        # retry the connection, refresh the PLAY / monitor LEDs.
+        self.midi.poll()
     def closeEvent(self,event):
         self.timer.stop()
+        self.midi.close()
         self.pool.shutdown(wait=True)
         if self.stream: self.stream.stop(); self.stream.close()
         self.journal.drain(self.engine)

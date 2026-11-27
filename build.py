@@ -14,4 +14,9 @@ subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--win
     # Pass 12: bundle the DotGothic16 dot font (app.py finds it via
     # sys._MEIPASS/assets/fonts; assets/fonts/OFL.txt rides along).
     '--add-data',f'assets/fonts{os.pathsep}assets/fonts',
+    # Pass 23: mido loads its rtmidi backend by module name at
+    # runtime, which PyInstaller's static analysis cannot see —
+    # name both modules so the packaged exe keeps DDJ-RB input.
+    '--hidden-import','mido.backends.rtmidi',
+    '--hidden-import','rtmidi',
     'app.py',*sys.argv[1:]],cwd=root,env=env,check=True)
