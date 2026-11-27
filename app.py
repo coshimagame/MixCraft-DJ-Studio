@@ -932,8 +932,8 @@ class Deck(QFrame):
         grid.setColumnStretch(2, 1)
         # Channel strip parts — built here, PLACED by Window in the
         # mixer block (pass 9 sketch layout): the fader in its own
-        # box, the five knobs (GAIN / EQ HIGH / EQ MID / EQ LOW /
-        # FILTER, centre = neutral) in their own column box. Only the
+        # box, the five knobs (GAIN / HIGH / MID / LOW / FILTER,
+        # centre = neutral) in their own column box. Only the
         # widgets' homes changed — the value domain (0-100), the
         # defaults (volume 80, parameters 50) and every engine command
         # below are exactly what they sent from inside the deck.
@@ -956,10 +956,18 @@ class Deck(QFrame):
         self.knob_box = QWidget()
         knob_column = QVBoxLayout(self.knob_box)
         knob_column.setContentsMargins(0, 0, 0, 0)
-        knob_column.setSpacing(2)
+        knob_column.setSpacing(5)
         self.controls = {}
-        for label, action, default in [('GAIN', 'gain', 50), ('EQ HIGH', 'eq_high', 50),
-                                       ('EQ MID', 'eq_mid', 50), ('EQ LOW', 'eq_low', 50),
+        # Pass 17 (user direction, 2026-11-27: 「eqって文字いらな
+        # い」+「HIGH/MIDの文字だけ消す」): the captions are GAIN /
+        # (none) / (none) / LOW / FILTER — the 'EQ' prefix is gone
+        # everywhere and the HIGH / MID knobs wear NO caption at
+        # all. All five knobs stay, fully wired; HIGH and MID are
+        # identified by position (the standard mixer order: GAIN,
+        # HIGH, MID, LOW, FILTER, top to bottom). The column
+        # spacing opens up slightly into the freed visual room.
+        for label, action, default in [('GAIN', 'gain', 50), ('', 'eq_high', 50),
+                                       ('', 'eq_mid', 50), ('LOW', 'eq_low', 50),
                                        ('FILTER', 'filter', 50)]:
             knob = Knob(label, COLOR_TEXT_SUB, bipolar=(action != 'gain'))
             knob.setRange(0, 100); knob.setValue(default)
