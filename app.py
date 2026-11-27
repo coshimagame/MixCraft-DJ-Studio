@@ -9,8 +9,12 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QDesktopServices
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
-from engine import (Engine, Journal, RATE, WAVE_WINDOW_SECONDS, frame_to_x,
-                    load_track, peak_span, scroll_window, seek_fraction)
+from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
+                    WAVE_WINDOW_SECONDS, format_mix_clock,
+                    format_mix_remaining, frame_to_x, load_track,
+                    mix_timer_auto_start, mix_timer_reset, mix_timer_start,
+                    mix_timer_stop, mix_timer_update, new_mix_timer,
+                    peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
@@ -573,6 +577,7 @@ class Window(QMainWindow):
         self.setlist_data = None   # loaded set list (normalized dict)
         self.clip_tracks = []      # setlist_to_clip_tracks() result, for the Live hand-off
         self.deck_a_bpm = None     # Deck A track BPM — fallback for the centre SET BPM dial
+        self.mix_timer = new_mix_timer()   # pass 8: performance elapsed timer
         data = Path(os.getenv('LOCALAPPDATA', str(Path.home()/'.local/share'))) / 'MixCraftDJStudio'
         self.journal = Journal(data/'sessions'/f'{time.time_ns()}.jsonl')
         root = QWidget()
@@ -679,6 +684,32 @@ class Window(QMainWindow):
         self.setlist_open.clicked.connect(self.open_setlist)
         setlist_head.addWidget(self.setlist_open)
         setlist_layout.addLayout(setlist_head)
+        # Mix timer (pass 8, user direction 2026-11-27: 「今何分ミック
+        # スしたとかもわかるといいね」): how long the performance has
+        # been running, at a glance, directly above the set summary —
+        # MIX mm:ss elapsed, the time left to the set's target length
+        # beside it (overage as +mm:ss past the target), and small
+        # START/STOP + RESET controls. The timer auto-starts on the
+        # first deck play; the math lives in engine.py (pure,
+        # unit-tested) and tick() drives it with time.monotonic().
+        mix_timer_row = QHBoxLayout()
+        mix_timer_caption = QLabel('MIX TIMER / 経過時間')
+        mix_timer_caption.setStyleSheet(SECTION_LABEL_QSS)
+        mix_timer_row.addWidget(mix_timer_caption)
+        self.mix_elapsed = QLabel('MIX 00:00')
+        self.mix_elapsed.setStyleSheet(lcd_qss(20))
+        mix_timer_row.addWidget(self.mix_elapsed)
+        self.mix_remaining = QLabel('残り 60:00')
+        self.mix_remaining.setStyleSheet(lcd_qss(14, fg=COLOR_TEXT_SUB))
+        mix_timer_row.addWidget(self.mix_remaining)
+        mix_timer_row.addStretch()
+        self.mix_toggle = QPushButton('START / 開始')
+        self.mix_toggle.clicked.connect(self.toggle_mix_timer)
+        mix_timer_row.addWidget(self.mix_toggle)
+        mix_reset = QPushButton('RESET / リセット')
+        mix_reset.clicked.connect(self.reset_mix_timer)
+        mix_timer_row.addWidget(mix_reset)
+        setlist_layout.addLayout(mix_timer_row)
         self.setlist_summary = QLabel('未読込 — スマホの下ごしらえページで書き出した JSON を開いてください')
         self.setlist_summary.setStyleSheet(
             f'background:{COLOR_PANEL_HI};color:{COLOR_TEXT};font-family:{MONO_STACK};'
@@ -840,6 +871,34 @@ class Window(QMainWindow):
         self.refresh_set_bpm_dial()
         summary = display_summary(data)
         self.status.setText(f'セットリスト読込 / Setlist loaded: {Path(path).name} • {summary["track_count"]} 曲 • 合計 {summary["total_text"]} • クリップ変換 {len(self.clip_tracks)} 件を保持中')
+    def mix_target_seconds(self):
+        """Set target length for the mix timer: the loaded set list's
+        target minutes (setlist.py carries target_minutes), else the
+        60-minute default."""
+        minutes = None
+        if self.setlist_data is not None:
+            minutes = self.setlist_data.get('target_minutes')
+        if minutes is None:
+            minutes = DEFAULT_TARGET_MINUTES
+        return float(minutes) * 60
+    def toggle_mix_timer(self):
+        now = time.monotonic()
+        if self.mix_timer['running']:
+            mix_timer_stop(self.mix_timer, now)
+        else:
+            mix_timer_start(self.mix_timer, now)
+        self.refresh_mix_timer()
+    def reset_mix_timer(self):
+        mix_timer_reset(self.mix_timer)
+        self.refresh_mix_timer()
+    def refresh_mix_timer(self):
+        elapsed = self.mix_timer['elapsed']
+        self.mix_elapsed.setText(f'MIX {format_mix_clock(elapsed)}')
+        remaining = format_mix_remaining(elapsed, self.mix_target_seconds())
+        caption = '超過' if remaining.startswith('+') else '残り'
+        self.mix_remaining.setText(f'{caption} {remaining}')
+        self.mix_toggle.setText(
+            'STOP / 停止' if self.mix_timer['running'] else 'START / 開始')
     def refresh_set_bpm_dial(self):
         """Feed the centre SET BPM dial: the loaded set list's set
         BPM wins (the set runs at that fixed tempo); without a set
@@ -961,6 +1020,14 @@ class Window(QMainWindow):
             elapsed = d['position']/RATE
             # rekordbox shows remaining time big, elapsed beside it.
             widget.clock.setText(f'-{clock(length-elapsed)}  {clock(elapsed)}')
+        # Pass 8: drive the mix timer off this same tick — auto-start
+        # on the first deck play (audition playback counts), then
+        # accumulate from monotonic deltas and refresh the readouts.
+        now = time.monotonic()
+        mix_timer_auto_start(self.mix_timer,
+                             any(d['playing'] for d in self.engine.decks), now)
+        mix_timer_update(self.mix_timer, now)
+        self.refresh_mix_timer()
         self.meter.setValue(int(self.engine.peak*100))
         self.meter.setToolTip(f'Limiter: {self.engine.overloads} / Audio status: {self.audio_status_count}')
         self.cross.setEnabled(self.engine.preview is None)

@@ -110,6 +110,70 @@ def seek_fraction(x, y, width, height, overview_height, position, total,
         frac = (start + x / width * (end - start)) / total
     return min(1.0, max(0.0, frac))
 
+# Mix timer math (pass 8, user direction 2026-11-27:
+# 「今何分ミックスしたとかもわかるといいね」). The window's 40 ms tick
+# drives these with time.monotonic(); the functions are pure (the
+# caller passes `now` in), so the tests can pin the accumulation,
+# start/stop/reset semantics and the remaining/overage formatting
+# without a clock. Elapsed only ever accumulates from monotonic
+# deltas while running — no wall-clock reads inside.
+DEFAULT_TARGET_MINUTES = 60   # set target when no set list is loaded
+
+def new_mix_timer():
+    """Fresh mix-timer state: stopped, untouched, zeroed."""
+    return dict(running=False, started=False, elapsed=0.0, last=None)
+
+def mix_timer_update(timer, now):
+    """Accumulate the monotonic delta since the last update while
+    running; returns the elapsed seconds. A stopped timer is frozen:
+    its elapsed never moves and `last` stays cleared."""
+    if timer['running'] and timer['last'] is not None:
+        timer['elapsed'] += max(0.0, now - timer['last'])
+        timer['last'] = now
+    return timer['elapsed']
+
+def mix_timer_start(timer, now):
+    timer['running'] = True
+    timer['started'] = True
+    timer['last'] = now
+
+def mix_timer_stop(timer, now):
+    """Freeze the timer at its current elapsed (accumulating up to
+    `now` first). `started` stays set, so a later deck play does not
+    silently auto-restart a timer the user stopped on purpose."""
+    mix_timer_update(timer, now)
+    timer['running'] = False
+    timer['last'] = None
+
+def mix_timer_reset(timer):
+    timer['running'] = False
+    timer['started'] = False
+    timer['elapsed'] = 0.0
+    timer['last'] = None
+
+def mix_timer_auto_start(timer, any_playing, now):
+    """Start on the first deck play, from the untouched state only
+    (never started since the last reset). Returns True if it fired."""
+    if any_playing and not timer['started']:
+        mix_timer_start(timer, now)
+        return True
+    return False
+
+def format_mix_clock(seconds):
+    """mm:ss for the mix readouts; minutes keep counting past 59
+    (a 75-minute mix reads 75:00, never 1:15:00)."""
+    total = max(0, int(seconds))
+    return f'{total // 60:02}:{total % 60:02}'
+
+def format_mix_remaining(elapsed, target_seconds):
+    """Time left to the target as mm:ss; once the performance runs
+    past the target, the overage with a leading '+' (+02:30) instead
+    of a negative remainder."""
+    remaining = target_seconds - elapsed
+    if remaining >= 0:
+        return format_mix_clock(remaining)
+    return '+' + format_mix_clock(-remaining)
+
 def estimate_bpm(audio):
     mono = audio[:RATE * 180].mean(axis=1)
     hop = 480
