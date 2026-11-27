@@ -24,18 +24,18 @@ jobs:
         timeout-minutes: 2
         shell: pwsh
         run: |
-          $trial = Start-Process dist/MixCraftDJStudio/MixCraftDJStudio.exe -ArgumentList '--smoke-test', 'smoke' -WindowStyle Hidden -Wait -PassThru
+          $trial = Start-Process dist/MixAble/MixAble.exe -ArgumentList '--smoke-test', 'smoke' -WindowStyle Hidden -Wait -PassThru
           if ($trial.ExitCode -ne 0) { throw 'Packaged smoke test failed' }
           if (-not (Test-Path smoke/smoke.json)) { throw 'Missing smoke result' }
-      - run: python collect_licenses.py dist/MixCraftDJStudio/third-party-licenses
-      - run: Copy-Item demo,*.md -Destination dist/MixCraftDJStudio -Recurse
+      - run: python collect_licenses.py dist/MixAble/third-party-licenses
+      - run: Copy-Item demo,*.md -Destination dist/MixAble -Recurse
       - uses: actions/upload-artifact@v4
         with:
-          name: MixCraftDJStudio-Windows-x64
-          path: dist/MixCraftDJStudio
+          name: MixAble-Windows-x64
+          path: dist/MixAble
       - uses: actions/upload-artifact@v4
         with:
-          name: MixCraftDJStudio-smoke-evidence
+          name: MixAble-smoke-evidence
           path: |
             smoke/smoke.json
             smoke/screenshot.png

@@ -9,14 +9,14 @@ python -m venv .venv
 .venv\Scripts\python make_demo.py demo
 .venv\Scripts\python app.py
 .venv\Scripts\python build.py
-.venv\Scripts\python collect_licenses.py dist/MixCraftDJStudio/third-party-licenses
-Copy-Item demo,README.md,LICENSES.md,BUILD_GUIDE.md,ABLETON_COMPATIBILITY.md,assets -Destination dist/MixCraftDJStudio -Recurse
+.venv\Scripts\python collect_licenses.py dist/MixAble/third-party-licenses
+Copy-Item demo,README.md,LICENSES.md,BUILD_GUIDE.md,ABLETON_COMPATIBILITY.md,assets -Destination dist/MixAble -Recurse
 ```
 
-dist/MixCraftDJStudioフォルダー全体を配布する。exe単体では動かない。
+dist/MixAbleフォルダー全体を配布する。exe単体では動かない。
 build.pyはPATHをPythonとWindows標準ディレクトリに限定し、別アプリの同名DLL混入を防ぐ。
-`MixCraftDJStudio.exe --smoke-test smoke` でデバイス不要の起動・ミックス検証。
-`MixCraftDJStudio.exe --audio-smoke-test smoke-audio` で実出力を約4秒検証する。
+`MixAble.exe --smoke-test smoke` でデバイス不要の起動・ミックス検証。
+`MixAble.exe --audio-smoke-test smoke-audio` で実出力を約4秒検証する。
 後者は合成音が鳴る。結果JSON・画面PNG・イベントJSONを指定フォルダーに保存する。
 署名・インストーラーは未実装。CIはPRとmain pushでテスト後にビルドしArtifactを保存。
 Windows 10/Ubuntuの実機検証は未実施。Ubuntuでのビルドは別パッケージが必要。
