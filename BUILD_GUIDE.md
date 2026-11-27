@@ -10,7 +10,7 @@ python -m venv .venv
 .venv\Scripts\python app.py
 .venv\Scripts\python build.py
 .venv\Scripts\python collect_licenses.py dist/MixCraftDJStudio/third-party-licenses
-Copy-Item demo,README.md,LICENSES.md,BUILD_GUIDE.md,ABLETON_COMPATIBILITY.md -Destination dist/MixCraftDJStudio -Recurse
+Copy-Item demo,README.md,LICENSES.md,BUILD_GUIDE.md,ABLETON_COMPATIBILITY.md,assets -Destination dist/MixCraftDJStudio -Recurse
 ```
 
 dist/MixCraftDJStudioフォルダー全体を配布する。exe単体では動かない。

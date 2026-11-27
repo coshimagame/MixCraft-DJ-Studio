@@ -6,8 +6,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sounddevice as sd
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QRectF
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient,
-    QPainter, QPen, QDesktopServices, QRadialGradient)
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
+    QLinearGradient, QPainter, QPen, QDesktopServices, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
 from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
@@ -17,7 +17,6 @@ from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction)
 from audio_config import resolve_output
-import dotfont
 import i18n
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      load_setlist, setlist_to_clip_tracks)
@@ -80,8 +79,70 @@ COLOR_WAVE_GRID = THEME['wave_grid']
 COLOR_WAVEFORM_LOW = '#ff3838'
 COLOR_WAVEFORM_MID = '#2ee66b'
 COLOR_WAVEFORM_HIGH = '#2e9bff'
-FONT_STACK = '"Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
-MONO_STACK = 'Consolas, "DejaVu Sans Mono", "Courier New", monospace'
+FONT_STACK = '"DotGothic16", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
+MONO_STACK = '"DotGothic16", Consolas, "DejaVu Sans Mono", "Courier New", monospace'
+CONSOLE_FAMILIES = ['DotGothic16', 'Consolas', 'DejaVu Sans Mono',
+                    'Courier New', 'monospace']
+
+# ---------------------------------------------------------------------------
+# Bundled dot font (pass 12, user direction 2026-11-27: 「文字全体を
+# 変えたいんだ。そういうフォントに」). Pass 11 dotted only the numeric
+# readouts with a hand-drawn 5x7 table; the user wants the WHOLE window
+# in that letterform, Japanese included — so the app now bundles
+# DotGothic16 (Fontworks, SIL Open Font License 1.1; see
+# assets/fonts/README.md and OFL.txt), registers it at startup and
+# puts it first in every font stack. If the file cannot be found or
+# loaded, the stacks fall through to the previous system fonts and
+# the app still runs — the look degrades, nothing breaks.
+# ---------------------------------------------------------------------------
+DOT_FONT_FAMILY = 'DotGothic16'
+DOT_FONT_FILE = 'DotGothic16-Regular.ttf'
+_dot_font_loaded = False
+
+
+def dot_font_path():
+    """Locate the bundled DotGothic16 TTF across run layouts:
+    beside app.py in a repo checkout, inside the PyInstaller bundle
+    (sys._MEIPASS, fed by build.py's --add-data), or in an assets
+    folder beside the frozen executable. None when not found."""
+    rel = Path('assets') / 'fonts' / DOT_FONT_FILE
+    candidates = [Path(__file__).resolve().parent / rel]
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        candidates.append(Path(meipass) / rel)
+    candidates.append(Path(sys.executable).resolve().parent / rel)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def load_dot_font():
+    """Register the bundled dot font with Qt (idempotent). True when
+    the DotGothic16 family is available afterwards."""
+    global _dot_font_loaded
+    if _dot_font_loaded:
+        return True
+    path = dot_font_path()
+    if path is not None:
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        if font_id >= 0 and DOT_FONT_FAMILY in \
+                QFontDatabase.applicationFontFamilies(font_id):
+            _dot_font_loaded = True
+    return _dot_font_loaded
+
+
+def console_font(pixel_size=None, point_size=None, bold=False):
+    """A QFont in the console letterform: DotGothic16 first, the old
+    mono stack as fallback for systems where the bundle is missing."""
+    font = QFont()
+    font.setFamilies(CONSOLE_FAMILIES)
+    if pixel_size is not None:
+        font.setPixelSize(pixel_size)
+    if point_size is not None:
+        font.setPointSize(point_size)
+    font.setBold(bold)
+    return font
 SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:9px;font-weight:700;letter-spacing:2px'
 LCD_GRADIENT = ('qlineargradient(x1:0, y1:0, x2:0, y2:1, '
                 'stop:0 #0a0a0c, stop:0.45 #050506, stop:1 #070708)')
@@ -261,17 +322,20 @@ class JogDial(QWidget):
             p.setBrush(QColor(COLOR_WAVEFORM_LOW))
             p.drawEllipse(int(mx)-3, int(my)-3, 6, 6)
         bpm_text = f'{self.bpm:.2f}' if self.bpm else '--.--'
-        # Pass 11: the dial's number is dot-matrix, like the rest
-        # of the console readouts; the caption below stays font
-        # text (it carries the Japanese label in JP mode).
-        pitch = 3.4 if self.width() > 124 else 3.0
-        units = dotfont.text_units(bpm_text)
-        _paint_dot_run(p, bpm_text, rect.center().x() - units * pitch / 2,
-                       rect.center().y() - dotfont.GLYPH_H * pitch / 2 - 10,
-                       pitch, QColor(COLOR_TEXT), ghost_alpha=12)
-        mono = QFont()
-        mono.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New', 'monospace'])
-        mono.setPointSize(9)
+        # Pass 12: the dial's number is drawn in the bundled
+        # DotGothic16 — the same letterform as the whole window —
+        # sized to fit the dial's inner width, never clipped.
+        number_font = console_font(pixel_size=36)
+        advance = QFontMetrics(number_font).horizontalAdvance(bpm_text)
+        max_width = rect.width() - 34
+        if advance > max_width:
+            number_font.setPixelSize(
+                max(10, int(36 * max_width / advance)))
+        p.setFont(number_font)
+        p.setPen(QColor(COLOR_TEXT))
+        p.drawText(rect.adjusted(0, -12, 0, -12),
+                   Qt.AlignmentFlag.AlignCenter, bpm_text)
+        mono = console_font(point_size=9)
         p.setFont(mono)
         if self.caption is not None:
             p.setPen(QColor(COLOR_TEXT_SUB))
@@ -324,39 +388,19 @@ class MeterLamp(QWidget):
             p.setPen(QPen(QColor(COLOR_BORDER_HI), 1.2))
             p.drawEllipse(QRectF(cx - 11, cy - 11, 22, 22))
 
-def _paint_dot_run(p, text, x, y, pitch, color, ghost_alpha=16):
-    """Paint one run of dot-matrix text with the painter at (x, y);
-    returns the run's visual width in px. Every glyph cell first
-    shows its unlit ghost dots (the classic LCD look), the lit dots
-    drawn over them in the full colour."""
-    ghost = QColor(color)
-    ghost.setAlpha(ghost_alpha)
-    d = pitch * 0.74
-    off = (pitch - d) / 2.0
-    p.setPen(Qt.PenStyle.NoPen)
-    for i, ch in enumerate(text):
-        glyph = dotfont.glyph_for(ch) or dotfont.BLANK
-        ox = x + i * dotfont.ADVANCE * pitch
-        for row in range(dotfont.GLYPH_H):
-            line = glyph[row]
-            for col in range(dotfont.GLYPH_W):
-                p.setBrush(color if line[col] == '#' else ghost)
-                p.drawEllipse(QRectF(ox + col * pitch + off,
-                                     y + row * pitch + off, d, d))
-    return dotfont.text_units(text) * pitch
-
-
 class DotReadout(QWidget):
-    """Dot-matrix console readout (pass 11, user direction
-    2026-11-27: 「ビットマップ文字みたいな無骨なコンソールにしたい」).
-    Paints its text on dark glass: characters the embedded 5x7 dot
-    font knows (digits, A-Z, . : + - / ≈) become dot grids with a
-    faint unlit ghost behind each glyph; anything else (kana/kanji)
-    is drawn in a bold mono-leaning font in the same colour, so a
-    Japanese readout like '残り 36:12' still gets dotted digits.
-    setText()/text() mirror the QLabel API the readouts had, so the
-    tick()/loaded() wiring is unchanged. If the text would overflow
-    the glass, the pitch scales down to fit — never clipped."""
+    """Console readout on dark glass. Pass 11 painted the digits as
+    hand-drawn 5x7 dot grids (the retired dotfont module) and left
+    kana/kanji in a system font; pass 12 (user direction 2026-11-27:
+    「文字全体を変えたいんだ。そういうフォントに」) draws the WHOLE
+    string — Japanese included — in the bundled DotGothic16, the
+    same letterform as the rest of the window. The dark-glass
+    background, accent colour and layout are pass 11's; setText() /
+    text() mirror the QLabel API the readouts had, so the tick() /
+    loaded() wiring is unchanged. `pitch` keeps the pass-11 call
+    sites' sizing: it scales the font's pixel size, and if the text
+    would overflow the glass the size scales down to fit — never
+    clipped."""
     def __init__(self, pitch=2.0, color=COLOR_DISPLAY_FG, align='left',
                  height=28):
         super().__init__()
@@ -371,13 +415,11 @@ class DotReadout(QWidget):
             self.update()
     def text(self):
         return self._text
-    def _font(self, pitch):
-        font = QFont()
-        font.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New',
-                          'monospace'])
-        font.setBold(True)
-        font.setPixelSize(max(9, int(dotfont.GLYPH_H * pitch * 0.98)))
-        return font
+    def _pixel_size(self):
+        # The pass-11 dot runs stood GLYPH_H(7) * pitch px tall;
+        # DotGothic16's ink nearly fills its em, so a slightly
+        # larger pixel size keeps the same visual weight.
+        return max(10, int(round(self.pitch * 10.5)))
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -390,36 +432,17 @@ class DotReadout(QWidget):
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         if not self._text:
             return
-        runs = dotfont.segments(self._text)
-        pitch = self.pitch
-
-        def widths(pitch):
-            font = self._font(pitch)
-            metrics = QFontMetrics(font)
-            out = []
-            for run, is_dot in runs:
-                out.append(dotfont.text_units(run) * pitch if is_dot
-                           else metrics.horizontalAdvance(run))
-            return out, font
-
-        ws, font = widths(pitch)
-        total = sum(ws) + 2 * (len(runs) - 1)
-        if total > self.width() - 8:
-            pitch = pitch * (self.width() - 8) / total
-            ws, font = widths(pitch)
-            total = sum(ws) + 2 * (len(runs) - 1)
-        x = (self.width() - total) / 2 if self.align == 'center' else 6.0
-        y = (self.height() - dotfont.GLYPH_H * pitch) / 2
+        font = console_font(pixel_size=self._pixel_size(), bold=True)
+        advance = QFontMetrics(font).horizontalAdvance(self._text)
+        if advance > self.width() - 8:
+            font.setPixelSize(max(
+                8, int(self._pixel_size() * (self.width() - 8) / advance)))
         p.setFont(font)
         p.setPen(self.color)
-        for (run, is_dot), run_w in zip(runs, ws):
-            if is_dot:
-                _paint_dot_run(p, run, x, y, pitch, self.color)
-            else:
-                p.drawText(QRectF(x, 0, run_w + 4, self.height()),
-                           Qt.AlignmentFlag.AlignLeft |
-                           Qt.AlignmentFlag.AlignVCenter, run)
-            x += run_w + 2
+        flags = Qt.AlignmentFlag.AlignVCenter
+        flags |= (Qt.AlignmentFlag.AlignCenter if self.align == 'center'
+                  else Qt.AlignmentFlag.AlignLeft)
+        p.drawText(self.rect().adjusted(4, 0, -4, 0), flags, self._text)
 
 
 def _paint_screws(p, width, height):
@@ -585,11 +608,7 @@ class Knob(QWidget):
         p.setPen(QPen(self.color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawLine(int(x1), int(y1), int(x2), int(y2))
         # Label beneath the knob.
-        mono = QFont()
-        mono.setFamilies(['Consolas', 'DejaVu Sans Mono', 'Courier New', 'monospace'])
-        mono.setPointSize(8)
-        mono.setBold(True)
-        p.setFont(mono)
+        p.setFont(console_font(point_size=8, bold=True))
         p.setPen(QColor(COLOR_TEXT_MUTE))
         p.drawText(QRectF(0, self.height() - 12, self.width(), 12), Qt.AlignmentFlag.AlignCenter, self.label)
 
@@ -671,7 +690,8 @@ class Deck(QFrame):
         info.addWidget(self.sub)
         readouts = QHBoxLayout()
         readouts.setSpacing(4)
-        # Pass 11: both readouts are dot-matrix console displays.
+        # Pass 11: both readouts are dot-matrix console displays
+        # (pass 12: drawn in the bundled DotGothic16, like everything).
         # Fixed widths sized to their longest texts at their pitch,
         # so the digits never clip (the old LCD label squeezed the
         # clock's last digit at the box edge).
@@ -774,6 +794,9 @@ class Deck(QFrame):
 class Window(QMainWindow):
     def __init__(self, audio=True):
         super().__init__()
+        # Pass 12: register the bundled dot font before any widget
+        # is built, whatever entry point created the window.
+        load_dot_font()
         self.setWindowTitle('MixAble DJ Studio • Mw-fActory • Phase 2 Trial')
         self.resize(1280,900)
         self.engine = Engine()
@@ -817,8 +840,12 @@ class Window(QMainWindow):
         # header / TOP BAND (deck strips stacked + SET BPM cluster) /
         # utility bar / BOTTOM ZONE (mixer block left, big set list
         # right) / status. Everything fits 1280x900 without scrolling.
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(5)
+        # Pass 12 retune: DotGothic16's line heights run ~11px
+        # taller over the whole window than the old stacks, so the
+        # root margins/spacing (and the status/notice sizes below)
+        # give those pixels back — 1280x900 still fits uncut.
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
         # Slim dark header bar (rekordbox toolbar style) — product name
         # and version stay, the big light title block is gone.
         header_bar = PanelFrame()
@@ -920,9 +947,9 @@ class Window(QMainWindow):
         # (Pass 9: the MIX TIMER caption label left the head row —
         # the readout's own 'MIX' prefix says it, and the row shares
         # the bottom zone's width with the mixer block now.)
-        # Pass 11: the MIX TIMER readouts are dot-matrix too (the
-        # remaining readout mixes dotted digits with its kanji
-        # caption in Japanese mode — see DotReadout).
+        # Pass 11: the MIX TIMER readouts are dot-matrix too
+        # (pass 12: kanji caption and digits alike in DotGothic16 —
+        # see DotReadout).
         self.mix_elapsed = DotReadout(pitch=2.3, align='center', height=30)
         self.mix_elapsed.setFixedWidth(134)
         self.mix_elapsed.setText('MIX 00:00')
@@ -1111,7 +1138,7 @@ class Window(QMainWindow):
         self.status.setObjectName('status')
         layout.addWidget(self.status)
         self.notice_label = QLabel('BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。MIDI入出力・ALS未対応。元ファイルは変更しません。')
-        self.notice_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px')
+        self.notice_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:10px')
         self.notice_label.setWordWrap(True)
         layout.addWidget(self.notice_label)
         self._register_labels()
@@ -1548,7 +1575,7 @@ STYLE = (
     f'QSlider::handle:horizontal {{ width:14px; height:24px; margin:-9px 0; background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d8d8d8, stop:0.44 #d8d8d8, stop:0.5 #1c1d1f, stop:0.56 #d8d8d8, stop:1 #d8d8d8); border:2px solid #000000; border-radius:2px; }}'
     f'QProgressBar {{ background:{COLOR_DISPLAY_BG}; border:1px solid {COLOR_BORDER}; border-radius:3px; min-height:15px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; }}'
     f'QProgressBar::chunk {{ background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1fa34a, stop:0.75 #2ee66b, stop:0.92 #ffc233, stop:1 #ff3838); border-radius:1px; }}'
-    f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid {COLOR_BORDER}; border-radius:2px; padding:5px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
+    f'QLabel#status {{ background:{LCD_GRADIENT}; border:1px solid {COLOR_BORDER}; border-radius:2px; padding:3px 10px; color:{COLOR_DISPLAY_FG}; font-family:{MONO_STACK}; font-size:13px; }}'
     f'QToolTip {{ background:{COLOR_PANEL_HI}; color:{COLOR_TEXT}; border:1px solid {COLOR_BORDER_HI}; padding:4px 6px; }}'
     f'QScrollBar:vertical {{ background:{COLOR_BG}; width:12px; margin:0; }}'
     f'QScrollBar::handle:vertical {{ background:#2c2f36; border-radius:2px; min-height:30px; }}'
@@ -1560,6 +1587,13 @@ STYLE = (
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    # Pass 12: the bundled DotGothic16 becomes the application font;
+    # the stylesheet's stacks name it first as well, so widgets the
+    # stylesheet does not reach (dialogs, menus) match the window.
+    if load_dot_font():
+        app_font = app.font()
+        app_font.setFamily(DOT_FONT_FAMILY)
+        app.setFont(app_font)
     app.setStyleSheet(STYLE)
     smoke_mode = len(sys.argv)>2 and sys.argv[1] in ('--smoke-test','--audio-smoke-test')
     window = Window(audio=not smoke_mode)
