@@ -6,9 +6,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sounddevice as sd
 import soundfile as sf
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF, QPointF
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
-    QLinearGradient, QPainter, QPen, QRadialGradient)
+    QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea,
     QSizePolicy)
@@ -81,6 +81,29 @@ COLOR_WAVE_GRID = THEME['wave_grid']
 COLOR_WAVEFORM_LOW = '#ff3838'
 COLOR_WAVEFORM_MID = '#2ee66b'
 COLOR_WAVEFORM_HIGH = '#2e9bff'
+# ---------------------------------------------------------------------------
+# Pass 14 (user direction, 2026-11-27: 「昔の液晶みたいな感じやっぱり
+# してほしいよね」): the DISPLAY surfaces become old-LCD windows set
+# into the dark rugged chassis — the pale grey-green glass of old
+# calculators / MD-CD players / early CDJ screens, dark green-charcoal
+# ink, and a faint unlit dot-matrix ghost grid across the glass. The
+# dot font (pass 12) reads as LCD pixels on it. LCD surfaces: the deck
+# info + waveform windows, the SET BPM dial centre, the level meter,
+# the MIX TIMER readouts and the set-list rows window. Everything
+# else — chassis, knobs, faders, pads, transport — stays hardware.
+# Ink-on-glass contrast (WCAG): ink ≈ 7.9:1, ink-soft ≈ 5.6:1
+# against the lightest glass stop; ink-dim ≈ 3:1 is de-emphasis
+# only (played rows), by design.
+COLOR_LCD_GLASS = '#a9b494'      # LCD glass, top edge
+COLOR_LCD_GLASS_HI = '#b6c0a3'   # LCD glass, centre band (lightest)
+COLOR_LCD_GLASS_LO = '#96a285'   # LCD glass, bottom edge
+COLOR_LCD_INK = '#222b1c'        # LCD ink: primary text / waveform
+COLOR_LCD_INK_SOFT = '#37422c'   # LCD ink: secondary text on glass
+COLOR_LCD_INK_DIM = '#5e6b50'    # LCD ink: de-emphasised (played)
+COLOR_LCD_PALE = '#b6c0a3'       # glass-pale text on an inverted row
+COLOR_LCD_PALE_DIM = '#8f997f'   # pale secondary on an inverted row
+LCD_GLASS_GRADIENT = ('qlineargradient(x1:0, y1:0, x2:0, y2:1, '
+                      'stop:0 #a9b494, stop:0.5 #b6c0a3, stop:1 #96a285)')
 FONT_STACK = '"DotGothic16", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
 MONO_STACK = '"DotGothic16", Consolas, "DejaVu Sans Mono", "Courier New", monospace'
 CONSOLE_FAMILIES = ['DotGothic16', 'Consolas', 'DejaVu Sans Mono',
@@ -146,6 +169,7 @@ def console_font(pixel_size=None, point_size=None, bold=False):
     font.setBold(bold)
     return font
 SECTION_LABEL_QSS = f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:9px;font-weight:700;letter-spacing:2px'
+LCD_LABEL_QSS = f'color:{COLOR_LCD_INK_SOFT};font-family:{MONO_STACK};font-size:9px;font-weight:700;letter-spacing:2px'
 LCD_GRADIENT = ('qlineargradient(x1:0, y1:0, x2:0, y2:1, '
                 'stop:0 #0a0a0c, stop:0.45 #050506, stop:1 #070708)')
 
@@ -155,6 +179,57 @@ def lcd_qss(size, bold=True, fg=None):
             f'font-family:{MONO_STACK};font-size:{size}px;letter-spacing:1px;'
             f'font-weight:{700 if bold else 400};'
             f'border:1px solid {COLOR_BORDER};border-radius:3px;padding:3px 10px')
+
+# ---------------------------------------------------------------------------
+# Old-LCD glass painting (pass 14), shared by every LCD surface: the
+# Waveform, DotReadout, JogDial centre, the segment meter and the
+# LcdWindow frames. One helper so all the windows share one glass.
+# ---------------------------------------------------------------------------
+def _lcd_gradient(top, bottom):
+    glass = QLinearGradient(0, top, 0, bottom)
+    glass.setColorAt(0.0, QColor(COLOR_LCD_GLASS))
+    glass.setColorAt(0.5, QColor(COLOR_LCD_GLASS_HI))
+    glass.setColorAt(1.0, QColor(COLOR_LCD_GLASS_LO))
+    return glass
+
+
+def _paint_lcd_overlay(p, rect):
+    """The unlit dot-matrix ghost grid and the inset shading over an
+    LCD glass surface: the grid is deliberately faint (alpha 13) —
+    visible on a close look, never noisy behind text — and the dark
+    top/left shading with the faint light bottom edge is what makes
+    the surface read as a window SET INTO the chassis."""
+    points = []
+    x = rect.left() + 3
+    while x < rect.right() - 1:
+        y = rect.top() + 3
+        while y < rect.bottom() - 1:
+            points.append(QPointF(x, y))
+            y += 6
+        x += 6
+    p.setPen(QPen(QColor(34, 43, 28, 13), 2, Qt.PenStyle.SolidLine,
+                  Qt.PenCapStyle.RoundCap))
+    p.drawPoints(QPolygonF(points))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(18, 24, 14, 70))
+    p.drawRect(rect.left(), rect.top(), rect.width(), 2)
+    p.setBrush(QColor(18, 24, 14, 36))
+    p.drawRect(rect.left(), rect.top() + 2, rect.width(), 1)
+    p.drawRect(rect.left(), rect.top(), 2, rect.height())
+    p.setBrush(QColor(255, 255, 255, 28))
+    p.drawRect(rect.left(), rect.bottom() - 1, rect.width(), 1)
+
+
+def paint_lcd_glass(p, rect, bezel=True):
+    """Fill a rect with old-LCD glass and finish it with the ghost
+    grid + inset shading; the dark bezel line (optional) sets the
+    window into the chassis."""
+    p.fillRect(rect, _lcd_gradient(rect.top(), rect.bottom()))
+    _paint_lcd_overlay(p, rect)
+    if bezel:
+        p.setPen(QPen(QColor('#131709'), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(rect.adjusted(0, 0, -1, -1))
 
 class Result(QObject):
     ready = Signal(int, object, str)
@@ -170,11 +245,16 @@ class Waveform(QWidget):
     a zoomed WAVE_WINDOW_SECONDS window flows past a playhead fixed at
     the centre as the engine position advances. Under it, a thin
     full-track overview strip keeps the whole song (and the position
-    marker) in sight. Both areas draw the same track.peaks data and
-    the same blue scheme on both decks. Window/position math lives in
-    engine.py (scroll_window / peak_span / seek_fraction), Qt-free and
-    unit-tested. Clicking the overview seeks by track fraction;
-    clicking the scrolling area seeks to the time shown at that x."""
+    marker) in sight. Both areas draw the same track.peaks data.
+    Window/position math lives in engine.py (scroll_window /
+    peak_span / seek_fraction), Qt-free and unit-tested. Clicking
+    the overview seeks by track fraction; clicking the scrolling
+    area seeks to the time shown at that x.
+
+    Pass 14: the widget is an old-LCD window — pale glass, ink peaks
+    (see paintEvent). The constructor's `color` argument (the old
+    rekordbox blue) is kept for the call sites' sake but no longer
+    paints anything."""
     seek = Signal(float)
     def __init__(self, color):
         super().__init__()
@@ -187,70 +267,61 @@ class Waveform(QWidget):
         self.setMinimumHeight(100)
     def paintEvent(self, event):
         p = QPainter(self)
-        # Pass 9: the waveform glass gets a subtle vertical sheen —
-        # darker at the centre line, a touch of light at the edges.
-        glass = QLinearGradient(0, 0, 0, self.height())
-        glass.setColorAt(0.0, QColor('#0a0a0d'))
-        glass.setColorAt(0.5, QColor(COLOR_WAVE_BG))
-        glass.setColorAt(1.0, QColor('#08080a'))
-        p.fillRect(self.rect(), glass)
+        # Pass 14: the waveform lives behind old-LCD glass — pale
+        # grey-green with the ghost dot grid (paint_lcd_glass), and
+        # the peaks are drawn in INK, like an old MD/CD player's
+        # display: what has played is full ink, what is ahead is
+        # lighter ghost ink. (Pass 9's overview dimmed the played
+        # part instead; the LCD density rule is the brief's, and it
+        # applies to both areas alike.)
+        paint_lcd_glass(p, self.rect())
         w, h = self.width(), self.height()
         main_h = h - WAVE_OVERVIEW_HEIGHT - 1
         mid = main_h/2
         if not self.track:
-            p.setPen(QColor(COLOR_TEXT_MUTE))
+            p.setPen(QColor(COLOR_LCD_INK_DIM))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, i18n.tr('drop_hint'))
             return
         total = len(self.track.audio)
         start, end = scroll_window(self.position)
         # One-second grid lines scroll WITH the music, so the flow is
-        # visible even in a steady passage.
-        p.setPen(QColor(COLOR_WAVE_GRID))
+        # visible even in a steady passage. On the glass they are
+        # faint ink rulings.
+        p.setPen(QColor(34, 43, 28, 26))
         for s in range(math.ceil(start/RATE), int(end//RATE)+1):
             x = int(frame_to_x(s*RATE, start, end, w))
             p.drawLine(x, 0, x, main_h)
-        p.setPen(QColor('#1a1c20'))
+        p.setPen(QColor(34, 43, 28, 48))
         p.drawLine(0, int(mid), w, int(mid))
-        # rekordbox blue scheme, pass 9 gradient treatment: each peak
-        # is drawn in three passes — a deep-blue base at full height,
-        # the body blue at 72%, the bright core at 42% — so the wave
-        # reads as lit from inside, the same on both decks. Each peak
-        # is a bar as wide as its bucket's span in the window, so
-        # long tracks (few buckets in view) still read dense.
+        # Each peak is a bar as wide as its bucket's span in the
+        # window, so long tracks (few buckets in view) still read
+        # dense. The playhead sits at the centre: peaks at or left
+        # of it have played (full ink), the rest are ahead (ghost).
         peaks = self.track.peaks
         count = len(peaks)
         bucket_px = (total/count)/(end-start)*w if count else 1
         pen_w = max(1, int(bucket_px))
-        base = QPen(QColor('#144a86'), pen_w)
-        body = QPen(QColor(self.color), pen_w)
-        core = QPen(QColor(COLOR_WAVE_LIGHT), pen_w)
+        ink_pen = QPen(QColor(COLOR_LCD_INK), pen_w)
+        ghost_pen = QPen(QColor(34, 43, 28, 100), pen_w)
         lo, hi = peak_span(count, total, start, end)
         for i in range(lo, hi):
             x = int(frame_to_x((i+0.5)*total/count, start, end, w))
             y = int(peaks[i]*(mid-6))
-            p.setPen(base)
+            p.setPen(ink_pen if x <= w//2 else ghost_pen)
             p.drawLine(x, int(mid)-y, x, int(mid)+y)
-            mid_y = int(y*0.72)
-            p.setPen(body)
-            p.drawLine(x, int(mid)-mid_y, x, int(mid)+mid_y)
-            inner = int(y*0.42)
-            p.setPen(core)
-            p.drawLine(x, int(mid)-inner, x, int(mid)+inner)
-        # Playhead: fixed at the centre of the scrolling area.
-        # Pass 11 drops pass 9's glow pass — the bright line alone
-        # is the active indicator on the matte console.
-        p.setPen(QPen(QColor('#ffffff'), 2))
+        # Playhead: fixed at the centre of the scrolling area — a
+        # solid ink line on the glass.
+        p.setPen(QPen(QColor(COLOR_LCD_INK), 2))
         p.drawLine(w//2, 0, w//2, main_h)
         # Overview strip: the whole track, thin, with the position
-        # marker — the scrolling area's map. Pass 9: the part already
-        # played (left of the marker) is dimmed, what is ahead stays
-        # full-bright, like rekordbox's overview.
+        # marker — the scrolling area's map, in the same ink
+        # densities (played full, ahead ghost).
         oy = main_h + 1
-        p.setPen(QColor(COLOR_BORDER))
+        p.setPen(QColor(34, 43, 28, 70))
         p.drawLine(0, main_h, w, main_h)
         omid = oy + WAVE_OVERVIEW_HEIGHT/2
-        played_pen = QPen(QColor(46, 155, 255, 96), 1)
-        ahead_pen = QPen(QColor(self.color), 1)
+        played_pen = QPen(QColor(COLOR_LCD_INK), 1)
+        ahead_pen = QPen(QColor(34, 43, 28, 100), 1)
         pos_x = int(self.position/max(1, total)*w)
         step = max(1, count//max(1, w))
         for i in range(0, count, step):
@@ -258,7 +329,7 @@ class Waveform(QWidget):
             y = max(1, int(peaks[i]*(WAVE_OVERVIEW_HEIGHT/2-2)))
             p.setPen(played_pen if x < pos_x else ahead_pen)
             p.drawLine(x, int(omid)-y, x, int(omid)+y)
-        p.setPen(QPen(QColor('#ffffff'), 2))
+        p.setPen(QPen(QColor(COLOR_LCD_INK), 2))
         p.drawLine(pos_x, oy, pos_x, oy + WAVE_OVERVIEW_HEIGHT)
     def mousePressEvent(self, event):
         if self.track:
@@ -312,16 +383,28 @@ class JogDial(QWidget):
         p.setBrush(face)
         p.drawEllipse(rect)
         inner = rect.adjusted(8, 8, -8, -8)
-        p.setPen(QPen(QColor(COLOR_WAVE_BLUE), 2))
+        p.setPen(QPen(QColor('#10130c'), 2))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(inner)
+        # Pass 14: the dial's display centre is an old-LCD window —
+        # pale glass and ink digits inside the chassis bezel ring.
+        # The glass is clipped to the disc; its ghost grid and the
+        # top shading chord read as the LCD's own shading.
+        disc = inner.adjusted(3, 3, -3, -3)
+        clip = QPainterPath()
+        clip.addEllipse(QRectF(disc))
+        p.save()
+        p.setClipPath(clip)
+        p.fillRect(disc, _lcd_gradient(disc.top(), disc.bottom()))
+        _paint_lcd_overlay(p, disc)
+        p.restore()
         if self.caption is None:
             cx, cy = rect.center().x(), rect.center().y()
             radius = rect.width()/2 - 3
             angle = -math.pi/2 + self.fraction*2*math.pi
             mx, my = cx + radius*math.cos(angle), cy + radius*math.sin(angle)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(COLOR_WAVEFORM_LOW))
+            p.setBrush(QColor(COLOR_LCD_INK))
             p.drawEllipse(int(mx)-3, int(my)-3, 6, 6)
         bpm_text = f'{self.bpm:.2f}' if self.bpm else '--.--'
         # Pass 12: the dial's number is drawn in the bundled
@@ -334,61 +417,77 @@ class JogDial(QWidget):
             number_font.setPixelSize(
                 max(10, int(36 * max_width / advance)))
         p.setFont(number_font)
-        p.setPen(QColor(COLOR_TEXT))
+        p.setPen(QColor(COLOR_LCD_INK))
         p.drawText(rect.adjusted(0, -12, 0, -12),
                    Qt.AlignmentFlag.AlignCenter, bpm_text)
         mono = console_font(point_size=9)
         p.setFont(mono)
         if self.caption is not None:
-            p.setPen(QColor(COLOR_TEXT_SUB))
+            p.setPen(QColor(COLOR_LCD_INK_SOFT))
             p.drawText(inner.adjusted(0, 22, 0, 0), Qt.AlignmentFlag.AlignCenter, self.caption)
             return
-        p.setPen(QColor(COLOR_TEXT_SUB))
+        p.setPen(QColor(COLOR_LCD_INK_SOFT))
         p.drawText(inner.adjusted(0, 22, 0, 0), Qt.AlignmentFlag.AlignCenter, '0.0%')
-        p.setPen(QColor(COLOR_METER))
+        p.setPen(QColor(COLOR_LCD_INK))
         p.drawText(inner.adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignCenter, '±6')
 
 class MeterLamp(QWidget):
-    """Two round level lamps (pass 9): the user's layout sketch draws
-    two small circles beside the big SET BPM dial, so the bar meter
-    becomes a pair of lamps. Same contract Window.tick() used on the
-    old QProgressBar — setRange / setValue(int) / setToolTip — driven
-    by the engine's single peak value: lamp 1 lights green with any
-    real signal, lamp 2 runs amber then red as the level nears the
-    limiter. A two-step glanceable readout, not a precision meter."""
+    """Level meter. Pass 9 made it two round lamps (the two small
+    circles in the user's layout sketch); pass 14 (old-LCD
+    direction) makes it a SEGMENT BAR behind LCD glass: eight
+    segment blocks, lit = solid ink, unlit = ghost ink, and the
+    last block — the near-limiter segment — wears a marker (a pale
+    notch cut into it, with a tick above) when it lights. Same
+    contract Window.tick() used on the old QProgressBar —
+    setRange / setValue(int) / setToolTip — driven by the engine's
+    single peak value. The class name stays: the wiring names it."""
+    SEGMENTS = 8
     def __init__(self):
         super().__init__()
         self._value = 0
-        self.setFixedSize(72, 32)
+        self.setFixedSize(76, 32)
     def setRange(self, minimum, maximum):
-        pass  # the lamps are threshold-based; the range is not used
+        pass  # the segments are threshold-based; the range is not used
     def setValue(self, value):
         value = int(value)
         if value != self._value:
             self._value = value
             self.update()
+    def lit_segments(self):
+        """Segments lit at the current value: any real signal (the
+        old lamp 1's >4 threshold) lights the first block, then the
+        bar fills proportionally to the peak."""
+        if self._value <= 4:
+            return 0
+        return min(self.SEGMENTS,
+                   max(1, round(self._value * self.SEGMENTS / 100)))
     def paintEvent(self, event):
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        lamps = [(18, QColor(COLOR_METER) if self._value > 4 else None),
-                 (54, QColor('#ff3838') if self._value > 92 else
-                      QColor('#ffc233') if self._value > 70 else None)]
-        for cx, lit in lamps:
-            cy = self.height() / 2
-            if lit is not None:
-                glow = QColor(lit)
-                glow.setAlpha(46)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(glow)
-                p.drawEllipse(QRectF(cx - 15, cy - 15, 30, 30))
-                face = QRadialGradient(cx - 4, cy - 4, 13)
-                face.setColorAt(0.0, lit.lighter(160))
-                face.setColorAt(1.0, lit)
-                p.setBrush(face)
+        paint_lcd_glass(p, self.rect())
+        lit = self.lit_segments()
+        gap = 2
+        left, top = 6, 11
+        seg_w = (self.width() - 2 * left
+                 - gap * (self.SEGMENTS - 1)) / self.SEGMENTS
+        seg_h = self.height() - top - 6
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(self.SEGMENTS):
+            x = left + i * (seg_w + gap)
+            if i < lit:
+                p.setBrush(QColor(COLOR_LCD_INK))
             else:
-                p.setBrush(QColor('#101216'))
-            p.setPen(QPen(QColor(COLOR_BORDER_HI), 1.2))
-            p.drawEllipse(QRectF(cx - 11, cy - 11, 22, 22))
+                p.setBrush(QColor(34, 43, 28, 30))
+            p.drawRect(QRectF(x, top, seg_w, seg_h))
+            if i == self.SEGMENTS - 1 and i < lit:
+                # Near-limiter marker: a pale notch cut into the
+                # last block, and a small ink tick above it.
+                p.setBrush(QColor(COLOR_LCD_GLASS_HI))
+                p.drawRect(QRectF(x + seg_w / 2 - 1, top + 2, 2, 4))
+                cx = x + seg_w / 2
+                p.setBrush(QColor(COLOR_LCD_INK))
+                p.drawPolygon(QPolygonF([QPointF(cx - 3, 3),
+                                         QPointF(cx + 3, 3),
+                                         QPointF(cx, 7)]))
 
 class DotReadout(QWidget):
     """Console readout on dark glass. Pass 11 painted the digits as
@@ -396,14 +495,15 @@ class DotReadout(QWidget):
     kana/kanji in a system font; pass 12 (user direction 2026-11-27:
     「文字全体を変えたいんだ。そういうフォントに」) draws the WHOLE
     string — Japanese included — in the bundled DotGothic16, the
-    same letterform as the rest of the window. The dark-glass
-    background, accent colour and layout are pass 11's; setText() /
-    text() mirror the QLabel API the readouts had, so the tick() /
-    loaded() wiring is unchanged. `pitch` keeps the pass-11 call
-    sites' sizing: it scales the font's pixel size, and if the text
-    would overflow the glass the size scales down to fit — never
-    clipped."""
-    def __init__(self, pitch=2.0, color=COLOR_DISPLAY_FG, align='left',
+    same letterform as the rest of the window. Pass 14: the glass
+    itself is old-LCD now (pale grey-green, ghost dot grid, ink
+    text — paint_lcd_glass), so the readouts are small LCD windows
+    in the chassis. setText() / text() mirror the QLabel API the
+    readouts had, so the tick() / loaded() wiring is unchanged.
+    `pitch` keeps the pass-11 call sites' sizing: it scales the
+    font's pixel size, and if the text would overflow the glass
+    the size scales down to fit — never clipped."""
+    def __init__(self, pitch=2.0, color=COLOR_LCD_INK, align='left',
                  height=28):
         super().__init__()
         self._text = ''
@@ -425,13 +525,7 @@ class DotReadout(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        glass = QLinearGradient(0, 0, 0, self.height())
-        glass.setColorAt(0, QColor('#080809'))
-        glass.setColorAt(1, QColor('#040405'))
-        p.fillRect(self.rect(), glass)
-        p.setPen(QColor(COLOR_BORDER))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        paint_lcd_glass(p, self.rect())
         if not self._text:
             return
         font = console_font(pixel_size=self._pixel_size(), bold=True)
@@ -468,6 +562,18 @@ class PanelFrame(QFrame):
     def paintEvent(self, event):
         super().paintEvent(event)
         _paint_screws(QPainter(self), self.width(), self.height())
+
+
+class LcdWindow(QFrame):
+    """An old-LCD display window set into the chassis (pass 14):
+    the stylesheet paints the pale glass and the bezel, then the
+    ghost dot grid + inset shading are drawn over it — the children
+    paint above both, so their text sits ON the glass. Used for the
+    deck info block and the set-list rows area. No screws: a display
+    window is glass, not a screwed-down panel."""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        _paint_lcd_overlay(QPainter(self), self.rect())
 
 
 class Knob(QWidget):
@@ -714,22 +820,29 @@ class Deck(QFrame):
         grid.addWidget(transport_box, 0, 0)
         # Info block: deck chip + big title, key sub-line, and the
         # BPM / clock readouts in a row under them.
-        info_box = QWidget()
+        # Info block: deck chip + big title, key sub-line, and the
+        # BPM / clock readouts in a row under them. Pass 14: the
+        # block is an old-LCD window set into the deck chassis —
+        # its text is ink on the pale glass, the chip an ink-outline
+        # box (its left bar keeps the deck colour, a chassis-side
+        # accent), and the readouts are LCD windows of their own.
+        info_box = LcdWindow()
+        info_box.setObjectName('lcdinfo')
         info_box.setFixedWidth(292)
         info = QVBoxLayout(info_box)
-        info.setContentsMargins(0, 0, 0, 0)
+        info.setContentsMargins(8, 6, 8, 6)
         info.setSpacing(3)
         title_row = QHBoxLayout()
         chip = QLabel('DECK '+('A' if index == 0 else 'B'))
-        chip.setStyleSheet(f'color:{color};background:{COLOR_PANEL_HI};font-size:12px;font-weight:800;padding:4px 8px;border:1px solid {COLOR_BORDER};border-left:6px solid {color};border-radius:2px')
+        chip.setStyleSheet(f'color:{COLOR_LCD_INK};background:transparent;font-size:12px;font-weight:800;padding:4px 8px;border:1px solid {COLOR_LCD_INK};border-left:6px solid {color};border-radius:2px')
         title_row.addWidget(chip)
         self.name = QLabel('No track loaded / 未読込')
-        self.name.setStyleSheet(f'color:{COLOR_TEXT};font-size:17px;font-weight:800;letter-spacing:0.3px')
+        self.name.setStyleSheet(f'color:{COLOR_LCD_INK};font-size:17px;font-weight:800;letter-spacing:0.3px')
         self.name.setWordWrap(True)
         title_row.addWidget(self.name, 1)
         info.addLayout(title_row)
         self.sub = QLabel('—')
-        self.sub.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-size:11px')
+        self.sub.setStyleSheet(f'color:{COLOR_LCD_INK_SOFT};font-size:11px')
         info.addWidget(self.sub)
         readouts = QHBoxLayout()
         readouts.setSpacing(4)
@@ -742,7 +855,7 @@ class Deck(QFrame):
         self.bpm.setFixedWidth(118)
         self.bpm.setText('— BPM')
         readouts.addWidget(self.bpm)
-        self.clock = DotReadout(pitch=1.55, color=COLOR_TEXT_SUB, height=28)
+        self.clock = DotReadout(pitch=1.55, color=COLOR_LCD_INK_SOFT, height=28)
         self.clock.setFixedWidth(164)
         self.clock.setText('-00:00.0  00:00.0')
         readouts.addWidget(self.clock)
@@ -951,9 +1064,10 @@ class Window(QMainWindow):
         bpm_lay.addWidget(self.set_bpm_label)
         self.set_dial = JogDial(caption='SET BPM', size=148)
         bpm_lay.addWidget(self.set_dial, 0, Qt.AlignmentFlag.AlignCenter)
-        # The sketch's two small circles: the level meter as a pair
-        # of lamps (MeterLamp keeps the QProgressBar contract tick()
-        # already used — setRange / setValue / setToolTip).
+        # The level meter (MeterLamp keeps the QProgressBar contract
+        # tick() already used — setRange / setValue / setToolTip).
+        # Pass 9 drew it as the sketch's two small lamps; pass 14
+        # makes it an LCD segment bar (see the class).
         self.level_label = QLabel('LEVEL')
         self.level_label.setStyleSheet(SECTION_LABEL_QSS)
         self.level_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1001,7 +1115,7 @@ class Window(QMainWindow):
         self.mix_elapsed.setFixedWidth(134)
         self.mix_elapsed.setText('MIX 00:00')
         setlist_head.addWidget(self.mix_elapsed)
-        self.mix_remaining = DotReadout(pitch=2.0, color=COLOR_TEXT_SUB,
+        self.mix_remaining = DotReadout(pitch=2.0, color=COLOR_LCD_INK_SOFT,
                                         align='center', height=30)
         self.mix_remaining.setFixedWidth(142)
         self.mix_remaining.setText('残り 60:00')
@@ -1024,6 +1138,15 @@ class Window(QMainWindow):
         # SET BPM duplicates the dial, the now-playing state
         # duplicates the green row, and the total duplicates the mix
         # timer's remaining math. The rows speak for themselves.
+        # Pass 14: the column headers and the rows live inside an
+        # old-LCD window set into the panel — the head row (timer
+        # readouts, hardware buttons) stays on the chassis above it,
+        # like the display surround on real gear.
+        lcd_list = LcdWindow()
+        lcd_list.setObjectName('lcdlist')
+        lcd_layout = QVBoxLayout(lcd_list)
+        lcd_layout.setContentsMargins(4, 4, 4, 4)
+        lcd_layout.setSpacing(3)
         # Browser-style column header for the track rows below.
         columns = QHBoxLayout()
         columns.setContentsMargins(6, 2, 6, 2)
@@ -1031,7 +1154,7 @@ class Window(QMainWindow):
         # status bar 6 + number 34 + the four 6px gaps between them.
         columns.addSpacing(5 + 6 + 22 + 6 + 6 + 6 + 34 + 6)
         self.col_title = QLabel('TITLE / ARTIST')
-        self.col_title.setStyleSheet(SECTION_LABEL_QSS)
+        self.col_title.setStyleSheet(LCD_LABEL_QSS)
         columns.addWidget(self.col_title, 1)
         self.col_heads = {}
         for key, text, width, align in [('bpm', 'BPM', 64, Qt.AlignmentFlag.AlignRight),
@@ -1039,7 +1162,7 @@ class Window(QMainWindow):
                                    ('time', 'TIME', 52, Qt.AlignmentFlag.AlignRight),
                                    ('status', 'STATUS', 84, Qt.AlignmentFlag.AlignCenter)]:
             head = QLabel(text)
-            head.setStyleSheet(SECTION_LABEL_QSS)
+            head.setStyleSheet(LCD_LABEL_QSS)
             head.setFixedWidth(width)
             head.setAlignment(align)
             columns.addWidget(head)
@@ -1047,16 +1170,17 @@ class Window(QMainWindow):
         # Pass 13: no trailing spacing — the rows' old rightmost
         # slot (an empty dark box on every row without a link) is
         # gone, so the header ends with the STATUS column too.
-        setlist_layout.addLayout(columns)
+        lcd_layout.addLayout(columns)
         self.setlist_rows = QVBoxLayout()
         self.setlist_rows.setSpacing(2)
-        setlist_layout.addLayout(self.setlist_rows)
-        # Pass 13: pin the panel's contents to the top — with the
-        # summary line gone, the panel's surplus height would
-        # otherwise spread between the head row, the column headers
-        # and the rows, leaving a hole above the first row. The
-        # stretch takes it all, below the last row, browser-style.
-        setlist_layout.addStretch(1)
+        lcd_layout.addLayout(self.setlist_rows)
+        # Pass 13: pin the contents to the top — the panel's surplus
+        # height would otherwise spread between the head row, the
+        # column headers and the rows, leaving a hole above the
+        # first row. The stretch takes it all, below the last row,
+        # browser-style (inside the LCD window now: empty glass).
+        lcd_layout.addStretch(1)
+        setlist_layout.addWidget(lcd_list, 1)
         # Added to the window layout further down: the set list is the
         # browser panel, so it sits at the bottom (rekordbox layout).
         # Pass 9: transition audition and audio output share ONE
@@ -1460,22 +1584,38 @@ class Window(QMainWindow):
             return
         # Pass 13: no summary line is composed here any more (see
         # the panel build) — render_setlist only renders the rows.
-        colors = {'played': COLOR_STATE_PLAYED, 'playing': COLOR_STATE_PLAYING,
-                  'next': COLOR_STATE_NEXT, 'queued': COLOR_STATE_QUEUED}
         for row_index, row in enumerate(display_rows(self.setlist_data)):
-            color = colors[row['status']]
+            # Pass 14: the rows live on old-LCD glass now, and an old
+            # LCD has no colour — the fixed status colours become
+            # INK DENSITIES plus the text badges: played = dim ink,
+            # queued = mid-density bar, next = full ink, and the
+            # NOW PLAYING row is INVERTED (ink background, glass-pale
+            # text), the way old LCDs highlight a selection. The
+            # status semantics are unchanged; only their LCD rendering
+            # is. (The COLOR_STATE_* constants keep the phone
+            # design's colours on record; they no longer paint here.)
+            if row['status'] == 'playing':
+                fg, fg_soft = COLOR_LCD_PALE, COLOR_LCD_PALE_DIM
+                bar_color, chip_color = COLOR_LCD_PALE, COLOR_LCD_PALE
+            elif row['status'] == 'played':
+                fg = fg_soft = COLOR_LCD_INK_DIM
+                bar_color, chip_color = '#8a9678', COLOR_LCD_INK_DIM
+            elif row['status'] == 'next':
+                fg, fg_soft = COLOR_LCD_INK, COLOR_LCD_INK_SOFT
+                bar_color, chip_color = COLOR_LCD_INK, COLOR_LCD_INK_SOFT
+            else:  # queued
+                fg, fg_soft = COLOR_LCD_INK, COLOR_LCD_INK_SOFT
+                bar_color, chip_color = '#5c6651', COLOR_LCD_INK_SOFT
             # Deck indicator (pass 6, user direction 2026-11-26): the
             # decks are colour-coded (A blue / B red-orange) and the
-            # track list now shows the same coding, so the deck a track
+            # track list shows the same coding, so the deck a track
             # belongs to reads at a glance. Assignment follows the
             # established alternation (live_plan.py): odd positions
-            # (1,3,5...) -> Deck A, even (2,4,6...) -> Deck B, from the
-            # row's position in the list. This is a COMPLEMENT to the
-            # status colours, not a replacement: the status bar, number
-            # and badge below keep the fixed played / playing / next /
-            # queued colours exactly as they are — the deck channel is
-            # separate: a deck-coloured bar at the row's left edge plus
-            # an 'A' / 'B' letter chip.
+            # (1,3,5...) -> Deck A, even (2,4,6...) -> Deck B, from
+            # the row's position in the list. Pass 14: the deck BAR
+            # keeps its deck colour (a chassis-side accent colour is
+            # allowed on the glass edge), while the letter chip joins
+            # the LCD rendering as an ink-outline box.
             deck_color = COLOR_DECK_A if row['number'] % 2 == 1 else COLOR_DECK_B
             deck_letter = 'A' if row['number'] % 2 == 1 else 'B'
             line = QHBoxLayout()
@@ -1487,23 +1627,23 @@ class Window(QMainWindow):
             chip = QLabel(deck_letter)
             chip.setFixedWidth(22)
             chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chip.setStyleSheet(f'color:{deck_color};background:{COLOR_PANEL_HI};border:1px solid {deck_color};border-radius:2px;font-size:11px;font-weight:800')
+            chip.setStyleSheet(f'color:{chip_color};background:transparent;border:1px solid {chip_color};border-radius:2px;font-size:11px;font-weight:800')
             line.addWidget(chip)
             bar = QFrame()
             bar.setFixedWidth(6)
-            bar.setStyleSheet(f'background:{color};border:none')
+            bar.setStyleSheet(f'background:{bar_color};border:none')
             line.addWidget(bar)
             number = QLabel(f'{row["number"]:02d}')
-            number.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:14px;font-weight:700')
+            number.setStyleSheet(f'color:{fg};font-family:{MONO_STACK};font-size:14px;font-weight:700')
             number.setFixedWidth(34)
             line.addWidget(number)
             title_text = row['title'] or i18n.tr('untitled', self.lang)
             if row['artist']: title_text += f' — {row["artist"]}'
             title = QLabel(title_text)
-            title.setStyleSheet(f'color:{COLOR_STATE_PLAYED if row["status"]=="played" else COLOR_TEXT};font-size:13px;font-weight:600')
+            title.setStyleSheet(f'color:{fg};font-size:13px;font-weight:600')
             title.setWordWrap(True)
             line.addWidget(title, 1)
-            meta_qss = f'color:{COLOR_TEXT_SUB};font-family:{MONO_STACK};font-size:12px'
+            meta_qss = f'color:{fg_soft};font-family:{MONO_STACK};font-size:12px'
             bpm = QLabel(f'{row["bpm"]:g}' if row['bpm'] is not None else '—')
             bpm.setStyleSheet(meta_qss)
             bpm.setFixedWidth(64)
@@ -1520,7 +1660,7 @@ class Window(QMainWindow):
             duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             line.addWidget(duration)
             badge = QLabel(i18n.status_badge(row['status'], self.lang))
-            badge.setStyleSheet(f'color:{color};font-family:{MONO_STACK};font-size:11px;font-weight:700')
+            badge.setStyleSheet(f'color:{fg};font-family:{MONO_STACK};font-size:11px;font-weight:700')
             badge.setFixedWidth(84)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             line.addWidget(badge)
@@ -1529,11 +1669,9 @@ class Window(QMainWindow):
             # row that had no link, which is exactly the clutter the
             # user named. The URL stays in the set-list data; only
             # the slot (and its rare LISTEN button) leaves the row.
-            # Striped browser rows, like his collection table.
-            # Pass 9: the NOW PLAYING row also gets a faint green
-            # wash of its own (object name below) — a restrained
-            # glow on top of the fixed status colours, which the
-            # bar / number / badge keep unchanged.
+            # Pass 14: the rows are flat lines on the glass with a
+            # hairline under each (see the STYLE rules), and the
+            # NOW PLAYING row's container is the inverted ink block.
             container = QFrame()
             if row['status'] == 'playing':
                 container.setObjectName('setrowplaying')
@@ -1598,9 +1736,17 @@ STYLE = (
     f'QFrame#mixer, QFrame#bpmframe {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.5 #131418, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:8px 12px; }}'
     f'QFrame#setlist {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b2d35, stop:0.004 #1a1b20, stop:0.4 #121317, stop:1 #0f1013); border:1px solid #26282f; border-radius:3px; padding:8px 12px; }}'
     f'QFrame#utility {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #24262d, stop:0.005 #15161a, stop:1 #101114); border:1px solid #26282f; border-radius:3px; }}'
-    f'QFrame#setrow0 {{ background:#101114; border:1px solid #1b1c21; border-radius:2px; }}'
-    f'QFrame#setrow1 {{ background:#16171c; border:1px solid #1e2026; border-radius:2px; }}'
-    f'QFrame#setrowplaying {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #16280f, stop:1 #0d1a0a); border:1px solid #33512a; border-radius:2px; }}'
+    # Pass 14: the LCD windows — pale grey-green glass with a dark
+    # bezel, set into the chassis panels (the ghost grid + inset
+    # shading are painted over this by LcdWindow / the widgets).
+    f'QFrame#lcdinfo, QFrame#lcdlist {{ background:{LCD_GLASS_GRADIENT}; border:1px solid #131709; border-radius:3px; }}'
+    # Pass 14: set-list rows are flat lines ON the glass — a whisper
+    # of striping and a hairline under each row; the NOW PLAYING row
+    # is the inverted ink block (its labels wear the pale styles
+    # render_setlist gives them).
+    f'QFrame#setrow0 {{ background:rgba(34,43,28,0.05); border:none; border-bottom:1px solid rgba(34,43,28,0.25); border-radius:0px; }}'
+    f'QFrame#setrow1 {{ background:transparent; border:none; border-bottom:1px solid rgba(34,43,28,0.25); border-radius:0px; }}'
+    f'QFrame#setrowplaying {{ background:{COLOR_LCD_INK}; border:none; border-bottom:1px solid {COLOR_LCD_INK}; border-radius:0px; }}'
     f'QPushButton {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b20, stop:1 #121317); border:1px solid #2c2e36; border-radius:3px; padding:6px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
     f'QPushButton:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
     f'QPushButton:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
