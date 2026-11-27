@@ -5,7 +5,9 @@ Pass 23 (user direction, 2026-11-27: 「音もRBのASIOとおさないとぶつ
   1. the DDJ-RB on its ASIO host (the controller's own low-latency
      driver path; what the user asked the sound to go through),
   2. the DDJ-RB on WASAPI (the same hardware through Windows' API
-     when the bundled PortAudio exposes no ASIO host),
+     when no ASIO device is visible — pass 24 ships an ASIO
+     PortAudio in sounddevice's -asio slot, so rung 1 is live
+     whenever the RB's ASIO driver is installed),
   3. the WASAPI default output device (the pre-pass-23 behaviour),
   4. the system default.
 Explicit selections (a device index, or None for the system

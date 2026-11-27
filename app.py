@@ -5,6 +5,42 @@ import sys
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+
+def _enable_bundled_asio(roots=None):
+    """Pass 24, item 6 — the user's 「asioもrbの使って」 (use the
+    DDJ-RB's real ASIO, not the WASAPI substitute). sounddevice
+    0.5.6 has an official slot for this: when the environment
+    variable SD_ENABLE_ASIO is set, it loads
+    libportaudio64bit-asio.dll from its portaudio-binaries
+    folder instead of the bundled DLL (whose build has no ASIO
+    host — pass 23's smoke evidence). CI builds that DLL with
+    vcpkg's portaudio[asio] and places it there; the Steinberg
+    SDK is fetched inside CI only and never committed. The
+    variable is set ONLY when the DLL is really present — with
+    it set and the file missing, sounddevice's import would
+    fail outright. Must run before `import sounddevice`.
+    Returns True when ASIO was enabled."""
+    if os.environ.get('SD_ENABLE_ASIO'):
+        return True
+    if roots is None:
+        roots = []
+        try:
+            import _sounddevice_data
+            roots.append(Path(next(iter(
+                _sounddevice_data.__path__))) / 'portaudio-binaries')
+        except Exception:
+            pass
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            roots.append(Path(meipass) / '_sounddevice_data'
+                         / 'portaudio-binaries')
+    for folder in roots:
+        if (Path(folder) / 'libportaudio64bit-asio.dll').exists():
+            os.environ['SD_ENABLE_ASIO'] = '1'
+            return True
+    return False
+
+_enable_bundled_asio()
 import sounddevice as sd
 import soundfile as sf
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF, QPointF
@@ -1848,17 +1884,19 @@ class Window(QMainWindow):
         except Exception:
             extra = None
             device = None if selection == 'auto' else selection
-        # Pass 23: the attempt chain. The shipped PortAudio build
-        # exposes NO ASIO host (proven by the CI smoke inventory:
-        # MME / DirectSound / WASAPI / WDM-KS only — the Steinberg
-        # SDK is not in the open wheel), so for a WASAPI device the
-        # realistic low-latency path is EXCLUSIVE mode: try it
-        # first, then shared mode on the same device, then the
-        # system default. An ASIO device (if a future PortAudio
-        # ever exposes one) is tried directly, then the default.
-        # A device that will not open must never leave the app
-        # silent — the last attempt is always the system default,
-        # and the status bar says when we landed there.
+        # Pass 23: the attempt chain; pass 24 completes its top
+        # rung. The sounddevice WHEEL's PortAudio exposes no ASIO
+        # host, so CI places a vcpkg-built ASIO PortAudio in
+        # sounddevice's official -asio slot (see
+        # _enable_bundled_asio at the top of this file) — with it,
+        # the ladder's first choice really is the DDJ-RB's ASIO
+        # driver. For a WASAPI device the low-latency path is
+        # EXCLUSIVE mode: try it first, then shared mode on the
+        # same device, then the system default. An ASIO device is
+        # tried directly, then the default. A device that will
+        # not open must never leave the app silent — the last
+        # attempt is always the system default, and the status
+        # bar says when we landed there.
         attempts = []
         if 'WASAPI' in hostapi_name:
             attempts = [(device, sd.WasapiSettings(exclusive=True), True),
