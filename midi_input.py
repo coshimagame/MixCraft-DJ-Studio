@@ -305,7 +305,13 @@ class MidiController:
             _, deck, delta = intent
             state = engine.decks[deck]
             if state['track'] is not None:
-                target = state['position'] + delta * JOG_FRAMES_PER_TICK
+                # Pass 24 (user hardware report, 2026-11-27: 「スク
+                # ラッチ（なっじの方向逆）」): the v1 sign felt
+                # backwards at the platter, so the seek runs
+                # AGAINST the raw delta. translate() still decodes
+                # the wire value faithfully; the inversion lives
+                # here, in what the app does with it.
+                target = state['position'] - delta * JOG_FRAMES_PER_TICK
                 target = min(max(0, target), len(state['track'].audio))
                 engine.command('seek', deck, int(target))
         elif kind == 'tempo':

@@ -264,12 +264,22 @@ def test_jog_seeks_the_loaded_deck(rig):
     stub.path = 'stub.wav'
     stub.audio = np.zeros((48000 * 10, 2), dtype=np.float32)
     window.engine.command('load', 0, stub)
+    window.engine.command('seek', 0, 48000 * 5)   # park mid-track
     window.engine.apply_pending()
     window.journal.history.clear()
+    # Pass 24: the seek direction is INVERTED vs pass 23 (the v1
+    # sign felt backwards at the platter — the user's hardware
+    # report), so a positive jog delta seeks BACKWARD from here.
     backend.inject(('cc', 0, 34, 10))     # +10 ticks
     ctl.poll(now=100.1)
     _journal_actions(window)
     seeks = [e for e in window.journal.history
              if e['action'] == 'seek' and e['deck'] == 0]
-    assert seeks and seeks[-1]['value'] == 10 * (48000 // 200)
+    assert seeks and seeks[-1]['value'] == 48000 * 5 - 10 * (48000 // 200)
+    backend.inject(('cc', 0, 33, 118))    # -10 ticks (raw 118 = -10)
+    ctl.poll(now=100.2)
+    _journal_actions(window)
+    seeks = [e for e in window.journal.history
+             if e['action'] == 'seek' and e['deck'] == 0]
+    assert seeks[-1]['value'] == 48000 * 5
     window.engine.command('load', 0, stub)  # leave deck as found-ish
