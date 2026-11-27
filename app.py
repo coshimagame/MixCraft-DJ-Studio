@@ -5,11 +5,13 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sounddevice as sd
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QRectF
+import soundfile as sf
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
-    QLinearGradient, QPainter, QPen, QDesktopServices, QRadialGradient)
+    QLinearGradient, QPainter, QPen, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea)
+    QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea,
+    QSizePolicy)
 from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
                     WAVE_WINDOW_SECONDS, format_mix_clock,
                     format_mix_remaining, frame_to_x, load_track,
@@ -612,6 +614,43 @@ class Knob(QWidget):
         p.setPen(QColor(COLOR_TEXT_MUTE))
         p.drawText(QRectF(0, self.height() - 12, self.width(), 12), Qt.AlignmentFlag.AlignCenter, self.label)
 
+def deck_title_text(path, setlist_data=None):
+    """Header title for a loaded deck track (pass 13).
+
+    'Title — Artist' from the metadata the app already knows, in
+    order: (1) the loaded set list's entry for this file — matched
+    on its `path` field (exactly, or by file name when the entry
+    carries a bare name); (2) the file's embedded title / artist
+    tags. Only when neither source knows a title does the raw file
+    name (deck-letter prefix and all) show.
+    """
+    title = artist = None
+    if setlist_data:
+        target = Path(path)
+        for entry in setlist_data.get('tracks') or []:
+            entry_path = entry.get('path')
+            if not entry_path:
+                continue
+            candidate = Path(entry_path)
+            if candidate == target or (not candidate.is_absolute()
+                                       and candidate.name == target.name):
+                title = entry.get('title') or None
+                artist = entry.get('artist')
+                break
+    if not title:
+        try:
+            with sf.SoundFile(str(path)) as handle:
+                title = (handle.title or '').strip() or None
+                artist = (handle.artist or '').strip() or None
+        except Exception:
+            title = artist = None
+    if title and artist:
+        return f'{title} — {artist}'
+    if title:
+        return title
+    return Path(path).name
+
+
 class Deck(QFrame):
     def __init__(self, window, index):
         super().__init__()
@@ -650,6 +689,10 @@ class Deck(QFrame):
         grid = QGridLayout(self)
         grid.setSpacing(6)
         grid.setContentsMargins(0, 0, 0, 0)
+        # Pass 13: the strip's height goes to the waveform row —
+        # height freed elsewhere in the window (notice / summary
+        # line removed) lands here, not in the pads row.
+        grid.setRowStretch(0, 1)
         # Transport: three buttons stacked at the strip's left end,
         # before the title. Same buttons, same wiring as the old row;
         # Deck B's stack mirrors Deck A's top-to-bottom.
@@ -708,6 +751,8 @@ class Deck(QFrame):
         info.addStretch()
         grid.addWidget(info_box, 0, 1)
         self.wave = Waveform(COLOR_WAVE_BLUE)
+        self.wave.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Expanding)
         self.wave.seek.connect(lambda x: window.engine.command('seek', index, int(x*len(self.wave.track.audio))))
         grid.addWidget(self.wave, 0, 2)
         grid.setColumnStretch(2, 1)
@@ -842,8 +887,8 @@ class Window(QMainWindow):
         # right) / status. Everything fits 1280x900 without scrolling.
         # Pass 12 retune: DotGothic16's line heights run ~11px
         # taller over the whole window than the old stacks, so the
-        # root margins/spacing (and the status/notice sizes below)
-        # give those pixels back — 1280x900 still fits uncut.
+        # root margins/spacing (and the status size below) give
+        # those pixels back — 1280x900 still fits uncut.
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(4)
         # Slim dark header bar (rekordbox toolbar style) — product name
@@ -855,13 +900,11 @@ class Window(QMainWindow):
         title = QLabel(f'MixAble  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
         title.setStyleSheet('font-size:16px;font-weight:800;letter-spacing:0.5px')
         header.addWidget(title)
-        self.mode_label = QLabel('DJ MODE  •  2 DECK PERFORMANCE  •  PHASE 2 / 試遊版')
-        self.mode_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:11px;font-weight:600')
-        header.addWidget(self.mode_label)
+        # Pass 13 (user direction 2026-11-27: 「情報量もへらしてい
+        # こう」): the header's subtitle and the right-side meta line
+        # (MW-FACTORY / OFFLINE / version) are gone — the brand title
+        # and the language toggle are all the header carries now.
         header.addStretch()
-        brand = QLabel('MW-FACTORY   /   OFFLINE   /   v0.2.0-trial')
-        brand.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-family:{MONO_STACK};font-size:11px')
-        header.addWidget(brand)
         # Language toggle (pass 10): a small segmented pair at the
         # header's right end — EN | 日本語, each labelled in its own
         # language (the standard convention). The checked button
@@ -891,8 +934,8 @@ class Window(QMainWindow):
         top_band = QHBoxLayout()
         strips = QVBoxLayout()
         strips.setSpacing(4)
-        strips.addWidget(self.decks[0])
-        strips.addWidget(self.decks[1])
+        strips.addWidget(self.decks[0], 1)
+        strips.addWidget(self.decks[1], 1)
         top_band.addLayout(strips, 1)
         bpm_frame = PanelFrame()
         bpm_frame.setObjectName('bpmframe')
@@ -920,10 +963,14 @@ class Window(QMainWindow):
         bpm_lay.addWidget(self.meter, 0, Qt.AlignmentFlag.AlignCenter)
         bpm_lay.addStretch()
         top_band.addWidget(bpm_frame)
-        layout.addLayout(top_band)
+        # Pass 13: the top band shares the window's flexible height
+        # with the bottom zone (was: bottom zone took it all), so
+        # the pixels freed by the declutter grow the waveforms as
+        # well as the set list.
+        layout.addLayout(top_band, 1)
         # Set list panel: independent of the decks. Loads the JSON exported
-        # by the phone prep page (setlist.load_setlist) and shows the set
-        # summary + track order with the phone design's status colours.
+        # by the phone prep page (setlist.load_setlist) and shows the
+        # track order with the phone design's status colours.
         setlist_panel = PanelFrame()
         setlist_panel.setObjectName('setlist')
         setlist_layout = QVBoxLayout(setlist_panel)
@@ -972,12 +1019,11 @@ class Window(QMainWindow):
         setlist_head.addWidget(self.setlist_open)
         setlist_layout.addLayout(setlist_head)
         setlist_layout.setSpacing(5)
-        self.setlist_summary = QLabel('未読込 — スマホの下ごしらえページで書き出した JSON を開いてください')
-        self.setlist_summary.setStyleSheet(
-            f'background:{COLOR_PANEL_HI};color:{COLOR_TEXT};font-family:{MONO_STACK};'
-            f'font-size:12px;border:1px solid {COLOR_BORDER};border-radius:2px;padding:6px 10px')
-        self.setlist_summary.setWordWrap(True)
-        setlist_layout.addWidget(self.setlist_summary)
+        # Pass 13: the summary line under the head row ('セットBPM
+        # 122 • 5 曲 • 合計 24:19 • 再生中 2 曲目') is removed — the
+        # SET BPM duplicates the dial, the now-playing state
+        # duplicates the green row, and the total duplicates the mix
+        # timer's remaining math. The rows speak for themselves.
         # Browser-style column header for the track rows below.
         columns = QHBoxLayout()
         columns.setContentsMargins(6, 2, 6, 2)
@@ -998,11 +1044,19 @@ class Window(QMainWindow):
             head.setAlignment(align)
             columns.addWidget(head)
             self.col_heads[key] = head
-        columns.addSpacing(70)
+        # Pass 13: no trailing spacing — the rows' old rightmost
+        # slot (an empty dark box on every row without a link) is
+        # gone, so the header ends with the STATUS column too.
         setlist_layout.addLayout(columns)
         self.setlist_rows = QVBoxLayout()
         self.setlist_rows.setSpacing(2)
         setlist_layout.addLayout(self.setlist_rows)
+        # Pass 13: pin the panel's contents to the top — with the
+        # summary line gone, the panel's surplus height would
+        # otherwise spread between the head row, the column headers
+        # and the rows, leaving a hole above the first row. The
+        # stretch takes it all, below the last row, browser-style.
+        setlist_layout.addStretch(1)
         # Added to the window layout further down: the set list is the
         # browser panel, so it sits at the bottom (rekordbox layout).
         # Pass 9: transition audition and audio output share ONE
@@ -1017,9 +1071,10 @@ class Window(QMainWindow):
         utility = QHBoxLayout(utility_bar)
         utility.setContentsMargins(8, 3, 8, 3)
         utility.setSpacing(6)
-        self.transition_label = QLabel('TRANSITION / 試聴')
-        self.transition_label.setStyleSheet(SECTION_LABEL_QSS)
-        utility.addWidget(self.transition_label)
+        # Pass 13: the bar's small section captions ('試聴' / '出力')
+        # are gone — the controls (duration combo, preview buttons,
+        # device combo, apply) stay exactly as wired and read fine
+        # without them.
         self.duration = QComboBox()
         # Pass 10: the items are re-texted on a language switch, so
         # the combo must keep fitting its contents (the default
@@ -1041,9 +1096,6 @@ class Window(QMainWindow):
         divider.setFrameShape(QFrame.Shape.VLine)
         divider.setStyleSheet(f'color:{COLOR_BORDER_HI}')
         utility.addWidget(divider)
-        self.output_label = QLabel('OUTPUT / 出力')
-        self.output_label.setStyleSheet(SECTION_LABEL_QSS)
-        utility.addWidget(self.output_label)
         self.devices = QComboBox()
         # The device list can hold very long names; the combo is the
         # bar's one flexible element, so let it shrink to fit.
@@ -1137,10 +1189,10 @@ class Window(QMainWindow):
         self.status = QLabel('Ready / 準備完了')
         self.status.setObjectName('status')
         layout.addWidget(self.status)
-        self.notice_label = QLabel('BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。MIDI入出力・ALS未対応。元ファイルは変更しません。')
-        self.notice_label.setStyleSheet(f'color:{COLOR_TEXT_MUTE};font-size:10px')
-        self.notice_label.setWordWrap(True)
-        layout.addWidget(self.notice_label)
+        # Pass 13: the bottom notice paragraph (the 'BPM・キーは推定
+        # 値。SYNCは…' fine print) is removed entirely — the SYNC
+        # caveat still rides on the SYNC pad's tooltip, and the freed
+        # height goes to the deck strips / set list below.
         self._register_labels()
         self._apply_status()
         self.render_setlist()
@@ -1157,7 +1209,6 @@ class Window(QMainWindow):
     def _reg(self, setter, key):
         self._labels.append(lambda lang, s=setter, k=key: s(i18n.tr(k, lang)))
     def _register_labels(self):
-        self._reg(self.mode_label.setText, 'header_mode')
         for deck in self.decks:
             self._reg(deck.load.setText, 'load')
             self._reg(deck.cue.setText, 'reset')
@@ -1172,12 +1223,10 @@ class Window(QMainWindow):
         self._reg(self.set_bpm_label.setText, 'set_bpm')
         self._reg(self.set_dial.set_caption, 'set_bpm')
         self._reg(self.level_label.setText, 'level')
-        self._reg(self.transition_label.setText, 'transition')
         self._reg(self.utility_bar.setToolTip, 'audition_tip')
         self._reg(self.preview_button.setText, 'preview')
         self._reg(self.preview_stop.setText, 'stop_preview')
         self._reg(self.export_button.setText, 'save_events')
-        self._reg(self.output_label.setText, 'output')
         self._reg(self.apply_button.setText, 'apply')
         self._reg(self.setlist_label.setText, 'setlist_caption')
         self._reg(self.mix_reset.setText, 'timer_reset')
@@ -1189,7 +1238,6 @@ class Window(QMainWindow):
         self._reg(self.mixer_label.setText, 'mixer_caption')
         self._reg(self.master.set_label, 'master')
         self._reg(self.cross_label.setText, 'crossfader')
-        self._reg(self.notice_label.setText, 'notice')
         # The two combos rebuild / re-text their static items,
         # keeping the current selection (by item data).
         def duration_items(lang):
@@ -1233,22 +1281,35 @@ class Window(QMainWindow):
             deck.wave.update()
     def _apply_status(self):
         self.status.setText(self._status_fn(self.lang))
+    def _render_deck_key(self, deck, track):
+        """Deck info sub-line (pass 13): ONE key notation — the
+        Camelot code, the same notation as the set list's KEY
+        column. The key name ('A minor') is not deleted, it rides
+        as the sub-line's tooltip instead of a second notation in
+        parentheses."""
+        shown = track.camelot or track.key
+        deck.sub.setText(i18n.tr('key_line', self.lang).format(camelot=shown)
+                         if shown else '—')
+        deck.sub.setToolTip(track.key if track.camelot and track.key else '')
     def _refresh_deck_placeholders(self):
-        """Per-deck info text on a language switch. The widget-side
-        wave.track is the UI's truth for 'loaded' (the engine applies
-        its command queue lazily, at render time). Empty decks show
-        the localized placeholder; loaded decks keep their file name
-        (not language text) and get their Key sub-line re-rendered
-        from the track the waveform already holds."""
+        """Per-deck info text on a language switch (and after a set
+        list opens). The widget-side wave.track is the UI's truth
+        for 'loaded' (the engine applies its command queue lazily,
+        at render time). Empty decks show the localized placeholder;
+        loaded decks re-derive their header title from the known
+        metadata (pass 13: set list / file tags, file name last) and
+        get their Key sub-line re-rendered from the track the
+        waveform already holds."""
         for index, deck in enumerate(self.decks):
             if index in self.loading:
                 continue
             track = deck.wave.track
             if track is None:
                 deck.name.setText(i18n.tr('no_track', self.lang))
-            elif track.key:
-                deck.sub.setText(i18n.tr('key_line', self.lang).format(
-                    key=track.key, camelot=track.camelot))
+            else:
+                deck.name.setText(deck_title_text(track.path,
+                                                  self.setlist_data))
+                self._render_deck_key(deck, track)
     def start_audio(self):
         if self.stream:
             self.stream.stop(); self.stream.close(); self.stream = None
@@ -1305,9 +1366,11 @@ class Window(QMainWindow):
         self.engine.command('stop_preview')
         self.engine.command('load',index,track)
         deck.wave.track = track
-        deck.name.setText(Path(track.path).name)
-        deck.sub.setText(i18n.tr('key_line', self.lang).format(key=track.key, camelot=track.camelot) if track.key else '—')
-        deck.bpm.setText(f'{track.bpm or "—"} BPM ≈')
+        deck.name.setText(deck_title_text(track.path, self.setlist_data))
+        self._render_deck_key(deck, track)
+        # Pass 13: no '≈' estimate mark on the BPM readout — the
+        # estimate caveat lives in the readout's tooltip below.
+        deck.bpm.setText(f'{track.bpm or "—"} BPM')
         deck.bpm.setToolTip(f'Estimate confidence: {track.confidence:.0%}. Half/double tempo errors possible.')
         if index == 0:
             self.deck_a_bpm = track.bpm
@@ -1337,6 +1400,10 @@ class Window(QMainWindow):
         self.setlist_data = data
         self.clip_tracks = setlist_to_clip_tracks(data)
         self.render_setlist()
+        # Pass 13: a set list opened after the decks were loaded
+        # brings their 'Title — Artist' metadata with it — refresh
+        # the deck headers from it.
+        self._refresh_deck_placeholders()
         self.refresh_set_bpm_dial()
         summary = display_summary(data)
         name, count = Path(path).name, summary['track_count']
@@ -1390,19 +1457,9 @@ class Window(QMainWindow):
             widget = item.widget()
             if widget: widget.deleteLater()
         if self.setlist_data is None:
-            self.setlist_summary.setText(i18n.tr('setlist_empty', self.lang))
             return
-        summary = display_summary(self.setlist_data)
-        bpm_text = f'{summary["set_bpm"]:g}' if summary['set_bpm'] is not None else '—'
-        # The summary line is composed per language (pass 10);
-        # display_summary's own state_text stays Japanese (shared
-        # with the CLI), so the state is re-derived from its fields.
-        state = i18n.summary_state_text(summary['started'],
-                                        summary['current_index'],
-                                        summary['track_count'], self.lang)
-        self.setlist_summary.setText(i18n.tr('summary_line', self.lang).format(
-            bpm=bpm_text, count=summary['track_count'],
-            total=summary['total_text'], state=state))
+        # Pass 13: no summary line is composed here any more (see
+        # the panel build) — render_setlist only renders the rows.
         colors = {'played': COLOR_STATE_PLAYED, 'playing': COLOR_STATE_PLAYING,
                   'next': COLOR_STATE_NEXT, 'queued': COLOR_STATE_QUEUED}
         for row_index, row in enumerate(display_rows(self.setlist_data)):
@@ -1467,16 +1524,11 @@ class Window(QMainWindow):
             badge.setFixedWidth(84)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             line.addWidget(badge)
-            link_slot = QWidget()
-            link_slot.setFixedWidth(70)
-            if row['link_url']:
-                link_layout = QHBoxLayout(link_slot)
-                link_layout.setContentsMargins(0, 0, 0, 0)
-                link_button = QPushButton(i18n.tr('listen', self.lang))
-                link_button.setToolTip(row['link_url'])
-                link_button.clicked.connect(lambda _checked=False, url=row['link_url']: QDesktopServices.openUrl(QUrl(url)))
-                link_layout.addWidget(link_button)
-            line.addWidget(link_slot)
+            # Pass 13: the row ends at the status badge — the old
+            # 70px link slot rendered as an empty dark box on every
+            # row that had no link, which is exactly the clutter the
+            # user named. The URL stays in the set-list data; only
+            # the slot (and its rare LISTEN button) leaves the row.
             # Striped browser rows, like his collection table.
             # Pass 9: the NOW PLAYING row also gets a faint green
             # wash of its own (object name below) — a restrained

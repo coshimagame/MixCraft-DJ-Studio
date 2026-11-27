@@ -7,9 +7,15 @@ now shows ONE language at a time, switched by the header toggle.
 
 This module is the pure half of that: the (en, jp) string table and
 the small formatters for the dynamic texts (set-list status badges,
-the summary line's state text, the mix timer's remaining caption).
-No Qt imports — app.py owns the widgets and the registry of setters;
-everything here is unit-tested in tests/test_i18n.py.
+the mix timer's remaining caption). No Qt imports — app.py owns the
+widgets and the registry of setters; everything here is
+unit-tested in tests/test_i18n.py.
+
+Pass 13 (user direction, 2026-11-27: 「情報量もへらしていこう」)
+removed the strings whose displays left the window: the header
+subtitle, the bottom notice paragraph, the set-list summary line
+(and its state text), and the utility bar's section captions. The
+key line also changed: one notation only (Camelot) — see key_line.
 
 Conventions: DEFAULT_LANG is 'jp' (the user's language). Strings
 that are already single-language DJ/hardware terminology in BOTH
@@ -29,11 +35,6 @@ DEFAULT_LANG = "jp"
 LANGS = ("en", "jp")
 
 STRINGS = {
-    # --- header ---------------------------------------------------
-    "header_mode": {
-        "en": "DJ MODE  •  2 DECK PERFORMANCE  •  PHASE 2 TRIAL",
-        "jp": "DJモード  •  2デッキ パフォーマンス  •  試遊版",
-    },
     # --- transport / deck info ------------------------------------
     "load": {"en": "LOAD", "jp": "読込"},
     "play": {"en": "▶ PLAY", "jp": "▶ 再生"},
@@ -42,7 +43,10 @@ STRINGS = {
     "no_track": {"en": "NO TRACK LOADED", "jp": "未読込"},
     "loading": {"en": "LOADING… ", "jp": "解析中… "},
     "load_failed": {"en": "LOAD FAILED", "jp": "読込失敗"},
-    "key_line": {"en": "KEY {key} ({camelot})", "jp": "キー {key} ({camelot})"},
+    # Pass 13: ONE notation — the Camelot code, matching the set
+    # list's KEY column. The key name rides as the sub-line's
+    # tooltip (app.py), not as a second notation in parentheses.
+    "key_line": {"en": "KEY {camelot}", "jp": "キー {camelot}"},
     "drop_hint": {"en": "DROP AUDIO HERE", "jp": "音声ファイルをドロップ"},
     # --- performance pads ------------------------------------------
     "cue_set": {"en": "CUE SET", "jp": "キュー設定"},
@@ -64,7 +68,6 @@ STRINGS = {
     "master": {"en": "MASTER", "jp": "マスター"},
     "crossfader": {"en": "CROSSFADER", "jp": "クロスフェーダー"},
     # --- utility bar (transition audition + audio output) -----------
-    "transition": {"en": "TRANSITION", "jp": "試聴"},
     "audition_tip": {
         "en": "A's tail → B's head (no tempo sync)",
         "jp": "Aの末尾 → Bの先頭（テンポ同期なし）",
@@ -73,7 +76,6 @@ STRINGS = {
     "preview": {"en": "▶ PREVIEW TRANSITION", "jp": "▶ ミックス試聴"},
     "stop_preview": {"en": "STOP PREVIEW", "jp": "試聴終了"},
     "save_events": {"en": "SAVE EVENTS JSON", "jp": "操作保存"},
-    "output": {"en": "OUTPUT", "jp": "出力"},
     "device_auto": {"en": "AUTOMATIC", "jp": "自動（WASAPI優先）"},
     "device_default": {"en": "SYSTEM DEFAULT", "jp": "システム既定"},
     "apply": {"en": "APPLY", "jp": "適用"},
@@ -86,17 +88,6 @@ STRINGS = {
     "timer_reset": {"en": "RESET", "jp": "リセット"},
     "open_setlist": {"en": "OPEN SETLIST JSON", "jp": "セットリストを開く"},
     "setlist_dialog": {"en": "Setlist JSON", "jp": "セットリスト"},
-    "setlist_empty": {
-        "en": "No setlist loaded — open the JSON exported from the phone prep page",
-        "jp": "未読込 — スマホの下ごしらえページで書き出した JSON を開いてください",
-    },
-    "summary_line": {
-        "en": "SET BPM {bpm}  •  {count} TRACKS  •  TOTAL {total}  •  {state}",
-        "jp": "セットBPM {bpm}  •  {count} 曲  •  合計 {total}  •  {state}",
-    },
-    "state_not_started": {"en": "NOT STARTED", "jp": "未開始"},
-    "state_playing": {"en": "PLAYING TRACK {n}", "jp": "再生中 {n} 曲目"},
-    "state_started": {"en": "STARTED", "jp": "開始済み"},
     "col_title": {"en": "TITLE / ARTIST", "jp": "タイトル / アーティスト"},
     "col_time": {"en": "TIME", "jp": "時間"},
     "col_status": {"en": "STATUS", "jp": "状態"},
@@ -105,16 +96,8 @@ STRINGS = {
     "badge_next": {"en": "NEXT", "jp": "次"},
     "badge_queued": {"en": "QUEUED", "jp": "待機"},
     "untitled": {"en": "(untitled)", "jp": "(無題)"},
-    "listen": {"en": "LISTEN ↗", "jp": "試聴 ↗"},
-    # --- status bar / notices ---------------------------------------
+    # --- status bar -------------------------------------------------
     "ready": {"en": "Ready", "jp": "準備完了"},
-    "notice": {
-        "en": "BPM and key are estimates. SYNC matches tempo only and "
-              "shifts pitch. No MIDI I/O or ALS support. Source files "
-              "are never modified.",
-        "jp": "BPM・キーは推定値。SYNCはテンポのみ一致し音程も変わります。"
-              "MIDI入出力・ALS未対応。元ファイルは変更しません。",
-    },
     "audio_active": {
         "en": "Audio active • 48 kHz / 512 frames • {host} • latency "
               "{ms} ms (reported) • autosaving actions",
@@ -165,15 +148,3 @@ def status_badge(status, lang=None):
     """Set-list status badge for a language-neutral status key
     ('played' / 'playing' / 'next' / 'queued')."""
     return tr("badge_" + status, lang)
-
-
-def summary_state_text(started, current_index, track_count, lang=None):
-    """The summary line's state text, derived from the same fields
-    setlist.display_summary exposes (its own state_text stays
-    Japanese — it is shared with the CLI; the window localizes)."""
-    lang = lang or _current
-    if not started:
-        return tr("state_not_started", lang)
-    if 0 <= current_index < track_count:
-        return tr("state_playing", lang).format(n=current_index + 1)
-    return tr("state_started", lang)
