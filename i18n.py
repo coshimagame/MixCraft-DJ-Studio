@@ -90,8 +90,8 @@ STRINGS = {
     "apply": {"en": "APPLY", "jp": "適用"},
     # --- set list / mix timer ---------------------------------------
     "setlist_caption": {"en": "SET LIST", "jp": "セットリスト"},
-    "remaining": {"en": "LEFT", "jp": "残り"},
-    "over": {"en": "OVER", "jp": "超過"},
+    # Pass 16: the mix timer's 'remaining' / 'over' captions left
+    # with their readout — the timer shows elapsed only.
     "start": {"en": "START", "jp": "開始"},
     "stop": {"en": "STOP", "jp": "停止"},
     "timer_reset": {"en": "RESET", "jp": "リセット"},

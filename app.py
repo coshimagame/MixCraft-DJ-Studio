@@ -12,9 +12,9 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea,
     QSizePolicy)
-from engine import (DEFAULT_TARGET_MINUTES, Engine, Journal, RATE,
+from engine import (Engine, Journal, RATE,
                     WAVE_WINDOW_SECONDS, format_mix_clock,
-                    format_mix_remaining, frame_to_x, load_track,
+                    frame_to_x, load_track,
                     mix_timer_auto_start, mix_timer_reset, mix_timer_start,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction)
@@ -891,8 +891,10 @@ class Deck(QFrame):
         self.bpm.setText('— BPM')
         readouts.addWidget(self.bpm)
         self.clock = DotReadout(pitch=1.55, color=COLOR_LCD_INK_SOFT, height=28)
-        self.clock.setFixedWidth(164)
-        self.clock.setText('-00:00.0  00:00.0')
+        # Pass 16: elapsed only ('00:00.0') — the readout shrinks
+        # from the old remaining+elapsed pair's width to fit.
+        self.clock.setFixedWidth(96)
+        self.clock.setText('00:00.0')
         readouts.addWidget(self.clock)
         readouts.addStretch()
         info.addLayout(readouts)
@@ -1210,12 +1212,13 @@ class Window(QMainWindow):
         setlist_head.addWidget(self.setlist_label)
         # Mix timer (pass 8, user direction 2026-11-27: 「今何分ミック
         # スしたとかもわかるといいね」): how long the performance has
-        # been running, at a glance — MIX mm:ss elapsed, the time left
-        # to the set's target length beside it (overage as +mm:ss past
-        # the target), and small START/STOP + RESET controls. The
-        # timer auto-starts on the first deck play; the math lives in
-        # engine.py (pure, unit-tested) and tick() drives it with
-        # time.monotonic().
+        # been running, at a glance — MIX mm:ss elapsed, and small
+        # START/STOP + RESET controls. The timer auto-starts on the
+        # first deck play; the math lives in engine.py (pure,
+        # unit-tested) and tick() drives it with time.monotonic().
+        # Pass 16 (user direction 2026-11-27: 「残りの時間もいらね
+        # な」): the remaining-to-target readout that pass 8 added
+        # beside it is gone — elapsed only, as originally asked.
         # (Pass 9: the MIX TIMER caption label left the head row —
         # the readout's own 'MIX' prefix says it, and the row shares
         # the bottom zone's width with the mixer block now.)
@@ -1226,11 +1229,6 @@ class Window(QMainWindow):
         self.mix_elapsed.setFixedWidth(134)
         self.mix_elapsed.setText('MIX 00:00')
         setlist_head.addWidget(self.mix_elapsed)
-        self.mix_remaining = DotReadout(pitch=2.0, color=COLOR_LCD_INK_SOFT,
-                                        align='center', height=30)
-        self.mix_remaining.setFixedWidth(142)
-        self.mix_remaining.setText('残り 60:00')
-        setlist_head.addWidget(self.mix_remaining)
         setlist_head.addStretch()
         self.mix_toggle = QPushButton('START / 開始')
         self.mix_toggle.clicked.connect(self.toggle_mix_timer)
@@ -1676,16 +1674,6 @@ class Window(QMainWindow):
         self._status_fn = lambda lang: i18n.tr('setlist_loaded', lang).format(
             name=name, count=count, total=total, clips=clips)
         self._apply_status()
-    def mix_target_seconds(self):
-        """Set target length for the mix timer: the loaded set list's
-        target minutes (setlist.py carries target_minutes), else the
-        60-minute default."""
-        minutes = None
-        if self.setlist_data is not None:
-            minutes = self.setlist_data.get('target_minutes')
-        if minutes is None:
-            minutes = DEFAULT_TARGET_MINUTES
-        return float(minutes) * 60
     def toggle_mix_timer(self):
         now = time.monotonic()
         if self.mix_timer['running']:
@@ -1697,12 +1685,9 @@ class Window(QMainWindow):
         mix_timer_reset(self.mix_timer)
         self.refresh_mix_timer()
     def refresh_mix_timer(self):
+        # Pass 16: elapsed only — no remaining / over-target readout.
         elapsed = self.mix_timer['elapsed']
         self.mix_elapsed.setText(f'MIX {format_mix_clock(elapsed)}')
-        remaining = format_mix_remaining(elapsed, self.mix_target_seconds())
-        caption = i18n.tr('over' if remaining.startswith('+') else 'remaining',
-                          self.lang)
-        self.mix_remaining.setText(f'{caption} {remaining}')
         self.mix_toggle.setText(
             i18n.tr('stop' if self.mix_timer['running'] else 'start', self.lang))
     def refresh_set_bpm_dial(self):
@@ -1861,13 +1846,14 @@ class Window(QMainWindow):
                 widget.wave.position = d['position']
                 widget.wave.update()
             widget.play.setText(i18n.tr('pause' if d['playing'] else 'play', self.lang))
-            length = len(d['track'].audio)/RATE if d['track'] else 0
             def clock(s):
                 s = max(0.0, s)
                 return f'{int(s)//60:02}:{s%60:04.1f}'
-            elapsed = d['position']/RATE
-            # rekordbox shows remaining time big, elapsed beside it.
-            widget.clock.setText(f'-{clock(length-elapsed)}  {clock(elapsed)}')
+            # Pass 16 (user direction, 2026-11-27: 「残りの時間もい
+            # らねな」): the deck clock shows ELAPSED only — the
+            # '-mm:ss.s' remaining figure is gone. The waveform and
+            # its overview still show the position in the track.
+            widget.clock.setText(clock(d['position']/RATE))
         # Pass 8: drive the mix timer off this same tick — auto-start
         # on the first deck play (audition playback counts), then
         # accumulate from monotonic deltas and refresh the readouts.

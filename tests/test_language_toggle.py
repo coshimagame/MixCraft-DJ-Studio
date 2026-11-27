@@ -80,13 +80,13 @@ def test_window_starts_in_japanese(window):
     assert window.set_dial.caption == 'セットBPM'
     assert window.master.label == 'マスター'
     assert window.mix_toggle.text() == '開始'
-    assert window.mix_remaining.text().startswith('残り')
     assert window.col_title.text() == 'タイトル / アーティスト'
     assert window.col_heads['status'].text() == '状態'
     assert window.status.text() == '準備完了'
     # Pass 13: the decluttered displays are gone, not just reworded.
+    # Pass 16: the mix timer's remaining readout joins them.
     for gone in ('mode_label', 'notice_label', 'setlist_summary',
-                 'transition_label', 'output_label'):
+                 'transition_label', 'output_label', 'mix_remaining'):
         assert not hasattr(window, gone), gone
     assert _badge_texts(window) == ['済', '再生中', '次']
     assert window.devices.itemText(0) == '自動（WASAPI優先）'
@@ -105,7 +105,6 @@ def test_switch_to_english_relables_everything(window):
     assert window.set_dial.caption == 'SET BPM'
     assert window.master.label == 'MASTER'
     assert window.mix_toggle.text() == 'START'
-    assert window.mix_remaining.text().startswith('LEFT')
     assert window.col_title.text() == 'TITLE / ARTIST'
     assert window.col_heads['status'].text() == 'STATUS'
     assert window.status.text() == 'Ready'
