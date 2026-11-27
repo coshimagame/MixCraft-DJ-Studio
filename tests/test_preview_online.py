@@ -329,6 +329,7 @@ def test_online_entry_needs_no_processing(tmp_path):
 
 def _setup_track(monkeypatch, tmp_path, name="Daft Punk - Get Lucky.wav",
                  tags=None):
+    monkeypatch.setattr(pm, "ffmpeg_available", lambda: True)
     monkeypatch.setattr(pm, "probe_duration", lambda p: 400.0)
     monkeypatch.setattr(pm, "probe_tags",
                         lambda p: tags if tags is not None else

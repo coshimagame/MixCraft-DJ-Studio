@@ -200,6 +200,7 @@ def test_process_pending_without_ffmpeg_is_a_noop(monkeypatch, tmp_path):
 
 
 def test_process_file_updates_manifest(monkeypatch, tmp_path):
+    monkeypatch.setattr(pm, "ffmpeg_available", lambda: True)
     monkeypatch.setattr(pm, "probe_duration", lambda p: 400.0)
 
     def fake_make(source, dest, start, length):
