@@ -322,10 +322,16 @@ class Engine:
             elif action == 'preview':
                 self._restore_preview()
                 if all(x['track'] is not None for x in self.decks):
+                    # Pass 15: the command's deck is the audition's
+                    # TARGET — the deck the transition runs INTO
+                    # (the app's monitored deck). deck=None keeps
+                    # the original A -> B direction (target = 1).
+                    target = index if index in (0, 1) else 1
+                    source = 1 - target
                     duration = min(int(value * RATE), *(len(x['track'].audio) for x in self.decks))
-                    self.preview = [0, duration, [{k: x[k] for k in ('position', 'playing', 'rate', 'sync', 'loop_active')} for x in self.decks], self.cross]
-                    self.decks[0]['position'] = len(self.decks[0]['track'].audio)-duration
-                    self.decks[1]['position'] = 0
+                    self.preview = [0, duration, [{k: x[k] for k in ('position', 'playing', 'rate', 'sync', 'loop_active')} for x in self.decks], self.cross, target]
+                    self.decks[source]['position'] = len(self.decks[source]['track'].audio)-duration
+                    self.decks[target]['position'] = 0
                     for x in self.decks: x.update(playing=True, rate=1.0, sync=False, loop_active=False)
             elif action == 'stop_preview': self._restore_preview()
             self.events.put(dict(frame=self.frame, sample_rate=RATE, action=action, deck=index, value=value))
@@ -394,8 +400,12 @@ class Engine:
         out = np.zeros((frames, 2), dtype='float32')
         if self.preview:
             x = np.clip((self.preview[0]+np.arange(frames))/max(1,self.preview[1]-1), 0, 1)
-            self.cross = float(x[-1]); self._cur['cross'] = self.cross
-            gains = [np.cos(x*np.pi/2)[:,None], np.sin(x*np.pi/2)[:,None]]
+            # Pass 15: the sweep runs toward the audition's target
+            # deck (preview[4]): cross 0->1 into deck 1, 1->0 into
+            # deck 0; the deck gains follow the same sweep.
+            sweep = x if self.preview[4] == 1 else 1.0 - x
+            self.cross = float(sweep[-1]); self._cur['cross'] = self.cross
+            gains = [np.cos(sweep*np.pi/2)[:,None], np.sin(sweep*np.pi/2)[:,None]]
             active_frames = min(frames, self.preview[1]-self.preview[0])
         else:
             cross_arr = _smooth(self._cur, 'cross', self.cross, frames)

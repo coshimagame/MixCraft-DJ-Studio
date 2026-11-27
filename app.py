@@ -45,8 +45,8 @@ THEME = {
     'text': '#edeef0',
     'text_sub': '#9aa0a8',
     'text_mute': '#6d7278',
-    'deck_a': '#0e9bff',       # deck 1 blue accent (his FX/SYNC blue)
-    'deck_b': '#ff4a2d',       # deck 2 red-orange accent (slider fills / chip only)
+    'deck_a': '#3a3d46',       # pass 15: deck colour coding retired —
+    'deck_b': '#3a3d46',       # both decks wear the same neutral grey
     'display_bg': '#050506',   # numeric readout / waveform glass
     'wave_grid': '#17191d',
 }
@@ -60,8 +60,9 @@ COLOR_BORDER_HI = THEME['border_hi']
 COLOR_TEXT = THEME['text']
 COLOR_TEXT_SUB = THEME['text_sub']
 COLOR_TEXT_MUTE = THEME['text_mute']
-COLOR_DECK_A = THEME['deck_a']   # Deck A accent (blue, rekordbox deck 1)
-COLOR_DECK_B = THEME['deck_b']   # Deck B accent (red, rekordbox deck 2)
+COLOR_DECK_A = THEME['deck_a']   # pass 15: retired deck accent (neutral grey)
+COLOR_DECK_B = THEME['deck_b']   # pass 15: retired deck accent (neutral grey)
+COLOR_FADER_FILL = '#565b63'     # pass 15: neutral channel-fader fill
 COLOR_DISPLAY_BG = THEME['display_bg']
 COLOR_DISPLAY_FG = '#edeef0'     # numeric readouts: white on dark glass
 COLOR_DISPLAY_DIM = '#9aa0a8'    # secondary readouts
@@ -102,6 +103,15 @@ COLOR_LCD_INK_SOFT = '#37422c'   # LCD ink: secondary text on glass
 COLOR_LCD_INK_DIM = '#5e6b50'    # LCD ink: de-emphasised (played)
 COLOR_LCD_PALE = '#b6c0a3'       # glass-pale text on an inverted row
 COLOR_LCD_PALE_DIM = '#8f997f'   # pale secondary on an inverted row
+# Pass 15 (user direction, 2026-11-27: 「デッキの色分けいらねかも
+# 今なってるのと今モニターしてるのわかるようにしてほしいな」): the
+# deck A=blue / B=red colour coding is GONE — the A/B letters carry
+# the identity, and two STATE markers carry the meaning instead:
+# ON AIR (a FILLED ink chip + the heavy LCD frame) for the deck
+# actually playing, and MONITOR (a HOLLOW ink chip) for the deck
+# selected for monitoring. Filled vs hollow keeps the two states
+# unmistakable even in monochrome. The constants above keep the old
+# names so nothing else breaks; they no longer paint deck colours.
 LCD_GLASS_GRADIENT = ('qlineargradient(x1:0, y1:0, x2:0, y2:1, '
                       'stop:0 #a9b494, stop:0.5 #b6c0a3, stop:1 #96a285)')
 FONT_STACK = '"DotGothic16", "Segoe UI", "Yu Gothic UI", "Meiryo UI", sans-serif'
@@ -260,6 +270,7 @@ class Waveform(QWidget):
         super().__init__()
         self.track = None
         self.position = 0
+        self.playing = False   # pass 15: heavy ink frame while playing
         self.color = color
         # Pass 9 (sketch layout): the stacked strips give the flowing
         # waveform real height again — the user: 「波形データ大きく
@@ -275,6 +286,12 @@ class Waveform(QWidget):
         # part instead; the LCD density rule is the brief's, and it
         # applies to both areas alike.)
         paint_lcd_glass(p, self.rect())
+        if self.playing:
+            # Pass 15: the playing deck's waveform window wears the
+            # same heavy ink frame as its info window.
+            p.setPen(QPen(QColor(COLOR_LCD_INK), 3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(self.rect().adjusted(1, 1, -2, -2))
         w, h = self.width(), self.height()
         main_h = h - WAVE_OVERVIEW_HEIGHT - 1
         mid = main_h/2
@@ -571,6 +588,16 @@ class LcdWindow(QFrame):
     paint above both, so their text sits ON the glass. Used for the
     deck info block and the set-list rows area. No screws: a display
     window is glass, not a screwed-down panel."""
+    def set_heavy_frame(self, heavy):
+        """Pass 15: the PLAYING deck's info window wears a heavier
+        ink frame (the STYLE rule for QFrame#lcdinfo[heavy="true"])
+        — one of the two state signals that replaced deck colours."""
+        heavy = bool(heavy)
+        if self.property('heavy') == heavy:
+            return
+        self.setProperty('heavy', heavy)
+        self.style().unpolish(self)
+        self.style().polish(self)
     def paintEvent(self, event):
         super().paintEvent(event)
         _paint_lcd_overlay(QPainter(self), self.rect())
@@ -683,7 +710,8 @@ class Knob(QWidget):
                    for i in range(steps + 1)]
             for a, b in zip(pts, pts[1:]):
                 p.drawLine(int(a[0]), int(a[1]), int(b[0]), int(b[1]))
-        # Full-sweep track, then the value arc in the deck colour.
+        # Full-sweep track, then the value arc in the knob colour
+        # (pass 15: the same neutral grey on every knob).
         arc(0.0, 1.0, QPen(QColor(COLOR_BORDER_HI), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         fraction = self._fraction()
         arc(0.5 if self.bipolar else 0.0, fraction,
@@ -700,9 +728,8 @@ class Knob(QWidget):
             p.setPen(QPen(QColor(COLOR_TEXT), 2))
             p.drawLine(int(x1), int(y1), int(x2), int(y2))
         # Knob cap (pass 9): radial shading lit from the upper left
-        # like a machined metal cap, and the indicator line now wears
-        # the deck colour instead of white, so each column reads as
-        # its deck's at a glance.
+        # like a machined metal cap; the indicator line wears the
+        # knob colour (pass 15: neutral grey, like the MASTER knob).
         cap = QRadialGradient(cx - radius * 0.4, cy - radius * 0.4, radius * 1.35)
         cap.setColorAt(0.0, QColor('#24252b'))
         cap.setColorAt(0.55, QColor('#15161a'))
@@ -720,6 +747,17 @@ class Knob(QWidget):
         p.setPen(QColor(COLOR_TEXT_MUTE))
         p.drawText(QRectF(0, self.height() - 12, self.width(), 12), Qt.AlignmentFlag.AlignCenter, self.label)
 
+def _path_matches(entry_path, target_path):
+    """Set-list entry path vs a loaded track's path: exact match,
+    or by file name when the entry carries a bare name. Shared by
+    deck_title_text (pass 13) and the pass-15 monitor-row marker."""
+    if not entry_path:
+        return False
+    candidate, target = Path(entry_path), Path(target_path)
+    return candidate == target or (not candidate.is_absolute()
+                                   and candidate.name == target.name)
+
+
 def deck_title_text(path, setlist_data=None):
     """Header title for a loaded deck track (pass 13).
 
@@ -732,14 +770,8 @@ def deck_title_text(path, setlist_data=None):
     """
     title = artist = None
     if setlist_data:
-        target = Path(path)
         for entry in setlist_data.get('tracks') or []:
-            entry_path = entry.get('path')
-            if not entry_path:
-                continue
-            candidate = Path(entry_path)
-            if candidate == target or (not candidate.is_absolute()
-                                       and candidate.name == target.name):
+            if _path_matches(entry.get('path'), path):
                 title = entry.get('title') or None
                 artist = entry.get('artist')
                 break
@@ -763,10 +795,12 @@ class Deck(QFrame):
         self.window, self.index = window, index
         self.setAcceptDrops(True)
         self.setObjectName('deck')
-        color = COLOR_DECK_A if index == 0 else COLOR_DECK_B
+        # Pass 15: no per-deck colour any more — the fader fill, the
+        # chip bar and the knob indicators all wear the same neutral
+        # greys on both decks (see the pass-15 palette note).
         # Channel fader styling (vertical, mixer-strip style): for a
         # vertical slider Qt paints the region above the handle (toward
-        # maximum) as the sub-page, so the deck colour goes on the
+        # maximum) as the sub-page, so the fill colour goes on the
         # add-page — the fill then rises from the bottom up to the
         # handle, like a level. The handle is a wide bar with a centre
         # grip line. Pass 6 (user direction, 2026-11-26): the fader is
@@ -782,7 +816,7 @@ class Deck(QFrame):
         # centre grip line kept.
         fader_qss = (f'QSlider::groove:vertical {{width:24px;background:#0c0d0e;border:1px solid {COLOR_BORDER};border-radius:3px}}'
                      f'QSlider::sub-page:vertical {{background:#0c0d0e;border-radius:3px}}'
-                     f'QSlider::add-page:vertical {{background:{color};border-radius:3px}}'
+                     f'QSlider::add-page:vertical {{background:{COLOR_FADER_FILL};border-radius:3px}}'
                      f'QSlider::handle:vertical {{height:20px;width:84px;margin:0 -30px;background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #b9b9b9, stop:0.16 #e6e6e6, stop:0.32 #c6c6c6, stop:0.46 #ececec, stop:0.5 #141518, stop:0.54 #ececec, stop:0.68 #c6c6c6, stop:0.84 #e6e6e6, stop:1 #a8a8a8);border:2px solid #000000;border-radius:3px}}')
         self.fader_qss = fader_qss
         # Pass 9 — the deck is now a wide STRIP (the user's sketch):
@@ -827,6 +861,7 @@ class Deck(QFrame):
         # box (its left bar keeps the deck colour, a chassis-side
         # accent), and the readouts are LCD windows of their own.
         info_box = LcdWindow()
+        self.info_box = info_box
         info_box.setObjectName('lcdinfo')
         info_box.setFixedWidth(292)
         info = QVBoxLayout(info_box)
@@ -834,7 +869,7 @@ class Deck(QFrame):
         info.setSpacing(3)
         title_row = QHBoxLayout()
         chip = QLabel('DECK '+('A' if index == 0 else 'B'))
-        chip.setStyleSheet(f'color:{COLOR_LCD_INK};background:transparent;font-size:12px;font-weight:800;padding:4px 8px;border:1px solid {COLOR_LCD_INK};border-left:6px solid {color};border-radius:2px')
+        chip.setStyleSheet(f'color:{COLOR_LCD_INK};background:transparent;font-size:12px;font-weight:800;padding:4px 8px;border:1px solid {COLOR_LCD_INK};border-left:6px solid {COLOR_LCD_INK_SOFT};border-radius:2px')
         title_row.addWidget(chip)
         self.name = QLabel('No track loaded / 未読込')
         self.name.setStyleSheet(f'color:{COLOR_LCD_INK};font-size:17px;font-weight:800;letter-spacing:0.3px')
@@ -861,6 +896,30 @@ class Deck(QFrame):
         readouts.addWidget(self.clock)
         readouts.addStretch()
         info.addLayout(readouts)
+        # Pass 15 state markers (user direction, 2026-11-27): ON AIR
+        # — a FILLED ink chip, lit only while this deck is actually
+        # playing — and MONITOR — a HOLLOW ink chip that is also the
+        # headphone-monitor SELECT (clicking it is the select;
+        # Window.toggle_monitor owns the exclusivity and the state).
+        # Filled vs hollow: the two states cannot be confused, even
+        # in monochrome. Both chips live on the glass, in ink.
+        state_row = QHBoxLayout()
+        state_row.setSpacing(4)
+        self.onair = QLabel('')
+        self.onair.setFixedHeight(22)
+        self.onair.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        state_row.addWidget(self.onair)
+        self.monitor_btn = QPushButton('')
+        self.monitor_btn.setFixedHeight(22)
+        self.monitor_btn.clicked.connect(
+            lambda: window.toggle_monitor(index))
+        state_row.addWidget(self.monitor_btn)
+        state_row.addStretch()
+        info.addLayout(state_row)
+        self.onair_on = None
+        self.monitor_on = None
+        self.set_onair(False)
+        self.set_monitor(False)
         info.addStretch()
         grid.addWidget(info_box, 0, 1)
         self.wave = Waveform(COLOR_WAVE_BLUE)
@@ -900,7 +959,7 @@ class Deck(QFrame):
         for label, action, default in [('GAIN', 'gain', 50), ('EQ HIGH', 'eq_high', 50),
                                        ('EQ MID', 'eq_mid', 50), ('EQ LOW', 'eq_low', 50),
                                        ('FILTER', 'filter', 50)]:
-            knob = Knob(label, color, bipolar=(action != 'gain'))
+            knob = Knob(label, COLOR_TEXT_SUB, bipolar=(action != 'gain'))
             knob.setRange(0, 100); knob.setValue(default)
             if action == 'gain':
                 knob.valueChanged.connect(lambda v, i=index: window.engine.command('gain', i, v/50))
@@ -932,6 +991,51 @@ class Deck(QFrame):
             button.setProperty('pad', True)
             pads_row.addWidget(button)
         grid.addLayout(pads_row, 1, 2)
+    def set_onair(self, on, force=False):
+        """Pass 15: the ON AIR chip + the info window's heavy ink
+        frame follow the engine's real playing state for this deck
+        (Window.tick drives this). Filled ink when playing; a faint
+        hollow outline when not — the marker is only ever ON for
+        the deck actually on air."""
+        on = bool(on)
+        if self.onair_on == on and not force:
+            return
+        self.onair_on = on
+        self.onair.setText(i18n.tr('on_air', self.window.lang))
+        if on:
+            self.onair.setStyleSheet(
+                f'background:{COLOR_LCD_INK};color:{COLOR_LCD_PALE};'
+                f'border:1px solid {COLOR_LCD_INK};border-radius:2px;'
+                'font-size:11px;font-weight:800;padding:2px 8px')
+        else:
+            self.onair.setStyleSheet(
+                f'background:transparent;color:{COLOR_LCD_INK_DIM};'
+                'border:1px solid rgba(34,43,28,0.35);border-radius:2px;'
+                'font-size:11px;font-weight:700;padding:2px 8px')
+        self.info_box.set_heavy_frame(on)
+    def set_monitor(self, on, force=False):
+        """Pass 15: the MONITOR chip's state — HOLLOW ink (heavy
+        outline, no fill) while this deck is the monitored one, so
+        it can never be confused with the filled ON AIR chip. The
+        state itself lives in Window.monitor_deck; this only paints
+        it (and re-texts on a language switch, via force)."""
+        on = bool(on)
+        if self.monitor_on == on and not force:
+            return
+        self.monitor_on = on
+        self.monitor_btn.setText(
+            i18n.tr('monitor_on' if on else 'monitor_off',
+                    self.window.lang))
+        if on:
+            self.monitor_btn.setStyleSheet(
+                f'background:transparent;color:{COLOR_LCD_INK};'
+                f'border:2px solid {COLOR_LCD_INK};border-radius:2px;'
+                'font-size:11px;font-weight:800;padding:1px 8px')
+        else:
+            self.monitor_btn.setStyleSheet(
+                f'background:transparent;color:{COLOR_LCD_INK_DIM};'
+                'border:1px solid rgba(34,43,28,0.35);border-radius:2px;'
+                'font-size:11px;font-weight:700;padding:2px 8px')
     def paintEvent(self, event):
         # Pass 11: corner screws over the deck's styled surface,
         # same as the PanelFrame panels.
@@ -972,6 +1076,13 @@ class Window(QMainWindow):
         self.clip_tracks = []      # setlist_to_clip_tracks() result, for the Live hand-off
         self.deck_a_bpm = None     # Deck A track BPM — fallback for the centre SET BPM dial
         self.mix_timer = new_mix_timer()   # pass 8: performance elapsed timer
+        # Pass 15: the headphone-monitor select — None, or the deck
+        # index (0/1) being monitored. Exclusive by construction
+        # (one value). The engine has no separate cue bus, so this
+        # state is the surface's monitor select, and its real job in
+        # the engine is the transition audition's TARGET: preview()
+        # runs the transition INTO the monitored deck.
+        self.monitor_deck = None
         # Pass 10 (user direction, 2026-11-27): ONE language at a
         # time — the bilingual labels looked cluttered (「文字ガチャ
         # ガチャして」). self.lang is the window's language; every
@@ -1010,7 +1121,7 @@ class Window(QMainWindow):
         header_bar.setObjectName('headerbar')
         header = QHBoxLayout(header_bar)
         header.setContentsMargins(10, 3, 10, 3)
-        title = QLabel(f'MixAble  <span style="color:{COLOR_DECK_A}">DJ STUDIO</span>')
+        title = QLabel(f'MixAble  <span style="color:{COLOR_TEXT_SUB}">DJ STUDIO</span>')
         title.setStyleSheet('font-size:16px;font-weight:800;letter-spacing:0.5px')
         header.addWidget(title)
         # Pass 13 (user direction 2026-11-27: 「情報量もへらしてい
@@ -1161,6 +1272,10 @@ class Window(QMainWindow):
                                    ('key', 'KEY', 56, Qt.AlignmentFlag.AlignCenter),
                                    ('time', 'TIME', 52, Qt.AlignmentFlag.AlignRight),
                                    ('status', 'STATUS', 84, Qt.AlignmentFlag.AlignCenter)]:
+            if key == 'status':
+                # Pass 15: keep the STATUS head over the rows' badge
+                # column, past the rows' monitor-marker slot.
+                columns.addSpacing(58)
             head = QLabel(text)
             head.setStyleSheet(LCD_LABEL_QSS)
             head.setFixedWidth(width)
@@ -1279,7 +1394,7 @@ class Window(QMainWindow):
         mix.addStretch()
         cross_head = QHBoxLayout()
         deck_a_label = QLabel('A')
-        deck_a_label.setStyleSheet(f'color:{COLOR_DECK_A};font-size:15px;font-weight:800')
+        deck_a_label.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-size:15px;font-weight:800')
         cross_head.addWidget(deck_a_label)
         cross_head.addStretch()
         self.cross_label = QLabel('CROSSFADER')
@@ -1287,18 +1402,18 @@ class Window(QMainWindow):
         cross_head.addWidget(self.cross_label)
         cross_head.addStretch()
         deck_b_label = QLabel('B')
-        deck_b_label.setStyleSheet(f'color:{COLOR_DECK_B};font-size:15px;font-weight:800')
+        deck_b_label.setStyleSheet(f'color:{COLOR_TEXT_SUB};font-size:15px;font-weight:800')
         cross_head.addWidget(deck_b_label)
         mix.addLayout(cross_head)
         self.cross = QSlider(Qt.Orientation.Horizontal)
         self.cross.setRange(0,1000)
         self.cross.setValue(500)
-        # The crossfader's machined treatment: the track is tinted
-        # toward deck A blue on the left and deck B red on the right
-        # (matching the A/B labels above it), and the cap carries the
-        # same ridged gradient as the channel fader caps.
+        # The crossfader's machined treatment: a neutral dark track
+        # (pass 15: the old blue/red end tints were deck colour
+        # coding), and the cap carries the same ridged gradient as
+        # the channel fader caps.
         self.cross.setStyleSheet(
-            f'QSlider::groove:horizontal {{height:10px;background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10354f, stop:0.5 #060607, stop:1 #4f1d10);border:1px solid {COLOR_BORDER};border-radius:3px}}'
+            f'QSlider::groove:horizontal {{height:10px;background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #26282e, stop:0.5 #060607, stop:1 #26282e);border:1px solid {COLOR_BORDER};border-radius:3px}}'
             f'QSlider::sub-page:horizontal {{background:transparent}}'
             f'QSlider::add-page:horizontal {{background:transparent}}'
             'QSlider::handle:horizontal {width:16px;height:28px;margin:-10px 0;'
@@ -1362,6 +1477,13 @@ class Window(QMainWindow):
         self._reg(self.mixer_label.setText, 'mixer_caption')
         self._reg(self.master.set_label, 'master')
         self._reg(self.cross_label.setText, 'crossfader')
+        # Pass 15: the state chips' texts are language-dependent
+        # too — re-apply both decks' current states on a switch.
+        def state_texts(lang):
+            for deck in self.decks:
+                deck.set_onair(deck.onair_on, force=True)
+                deck.set_monitor(deck.monitor_on, force=True)
+        self._labels.append(state_texts)
         # The two combos rebuild / re-text their static items,
         # keeping the current selection (by item data).
         def duration_items(lang):
@@ -1499,12 +1621,31 @@ class Window(QMainWindow):
         if index == 0:
             self.deck_a_bpm = track.bpm
             self.refresh_set_bpm_dial()
+        # Pass 15: a fresh load can move the set list's monitor-row
+        # marker (it follows the monitored deck's loaded track).
+        self.render_setlist()
     def preview(self):
         if not all(d['track'] for d in self.engine.decks):
             self._status_fn = lambda lang: i18n.tr('load_both_first', lang)
             self._apply_status()
             return
-        self.engine.command('preview',value=self.duration.currentData())
+        # Pass 15: the audition runs INTO the monitored deck (the
+        # deck being cued up is the one a DJ monitors); with no
+        # monitor selection it keeps the original A -> B direction.
+        target = self.monitor_deck if self.monitor_deck is not None else 1
+        self.engine.command('preview', deck=target,
+                            value=self.duration.currentData())
+    def toggle_monitor(self, index):
+        """Pass 15: the per-deck MONITOR select — exclusive (one
+        deck at most; selecting the monitored deck again clears
+        it). Repaints both decks' monitor chips and the set-list
+        row marker."""
+        self.monitor_deck = None if self.monitor_deck == index else index
+        self._refresh_monitor_buttons()
+        self.render_setlist()
+    def _refresh_monitor_buttons(self):
+        for i, deck in enumerate(self.decks):
+            deck.set_monitor(self.monitor_deck == i, force=True)
     def export(self):
         path,_ = QFileDialog.getSaveFileName(self,'Save events','mixcraft-events.json','JSON (*.json)')
         if path:
@@ -1584,6 +1725,14 @@ class Window(QMainWindow):
             return
         # Pass 13: no summary line is composed here any more (see
         # the panel build) — render_setlist only renders the rows.
+        # Pass 15: the monitored deck's loaded track, when it is in
+        # the list, wears the hollow MONITOR marker on its row.
+        monitor_path = None
+        if self.monitor_deck is not None:
+            mtrack = self.decks[self.monitor_deck].wave.track
+            if mtrack is not None:
+                monitor_path = mtrack.path
+        entries = (self.setlist_data or {}).get('tracks') or []
         for row_index, row in enumerate(display_rows(self.setlist_data)):
             # Pass 14: the rows live on old-LCD glass now, and an old
             # LCD has no colour — the fixed status colours become
@@ -1606,23 +1755,19 @@ class Window(QMainWindow):
             else:  # queued
                 fg, fg_soft = COLOR_LCD_INK, COLOR_LCD_INK_SOFT
                 bar_color, chip_color = '#5c6651', COLOR_LCD_INK_SOFT
-            # Deck indicator (pass 6, user direction 2026-11-26): the
-            # decks are colour-coded (A blue / B red-orange) and the
-            # track list shows the same coding, so the deck a track
-            # belongs to reads at a glance. Assignment follows the
-            # established alternation (live_plan.py): odd positions
-            # (1,3,5...) -> Deck A, even (2,4,6...) -> Deck B, from
-            # the row's position in the list. Pass 14: the deck BAR
-            # keeps its deck colour (a chassis-side accent colour is
-            # allowed on the glass edge), while the letter chip joins
-            # the LCD rendering as an ink-outline box.
-            deck_color = COLOR_DECK_A if row['number'] % 2 == 1 else COLOR_DECK_B
+            # Deck indicator (pass 6, user direction 2026-11-26):
+            # the letter chip says which deck a track belongs to,
+            # following the established alternation (live_plan.py):
+            # odd positions (1,3,5...) -> Deck A, even (2,4,6...) ->
+            # Deck B. Pass 15: the bar beside it is NEUTRAL ink now —
+            # the A=blue / B=red colour coding is retired, the
+            # letter carries the identity.
             deck_letter = 'A' if row['number'] % 2 == 1 else 'B'
             line = QHBoxLayout()
             line.setContentsMargins(6, 3, 6, 3)
             deck_bar = QFrame()
             deck_bar.setFixedWidth(5)
-            deck_bar.setStyleSheet(f'background:{deck_color};border:none')
+            deck_bar.setStyleSheet(f'background:{COLOR_LCD_INK_DIM};border:none')
             line.addWidget(deck_bar)
             chip = QLabel(deck_letter)
             chip.setFixedWidth(22)
@@ -1659,6 +1804,22 @@ class Window(QMainWindow):
             duration.setFixedWidth(52)
             duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             line.addWidget(duration)
+            # Pass 15: the monitor marker — the same hollow outline
+            # style as the deck strip's MONITOR chip, on the row of
+            # the monitored deck's loaded track (matched by path,
+            # pass 13's rule). Other rows keep an empty slot of the
+            # same width so the badge column stays aligned.
+            entry = entries[row['index']] if row['index'] < len(entries) else {}
+            is_monitored = bool(monitor_path
+                                and _path_matches(entry.get('path'),
+                                                  monitor_path))
+            mon = QLabel(i18n.tr('monitor_short', self.lang)
+                         if is_monitored else '')
+            mon.setFixedWidth(58)
+            mon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_monitored:
+                mon.setStyleSheet(f'color:{fg};background:transparent;border:1px solid {fg};border-radius:2px;font-family:{MONO_STACK};font-size:10px;font-weight:700')
+            line.addWidget(mon)
             badge = QLabel(i18n.status_badge(row['status'], self.lang))
             badge.setStyleSheet(f'color:{fg};font-family:{MONO_STACK};font-size:11px;font-weight:700')
             badge.setFixedWidth(84)
@@ -1685,6 +1846,13 @@ class Window(QMainWindow):
         for widget,d in zip(self.decks,self.engine.decks):
             for button, key in [(widget.quant,'quantize'),(widget.sync,'sync')]:
                 button.blockSignals(True); button.setChecked(d[key]); button.blockSignals(False)
+            # Pass 15: the ON AIR chip + heavy LCD frames follow the
+            # engine's real per-deck playing state, live — play,
+            # pause, stop and track-end all land here within a tick.
+            widget.set_onair(d['playing'])
+            if widget.wave.playing != d['playing']:
+                widget.wave.playing = d['playing']
+                widget.wave.update()
             # Pass 7: repaint the (scrolling) waveform only when the
             # position actually moved or the loaded track changed —
             # no busy repaint while a deck sits paused.
@@ -1740,6 +1908,8 @@ STYLE = (
     # bezel, set into the chassis panels (the ghost grid + inset
     # shading are painted over this by LcdWindow / the widgets).
     f'QFrame#lcdinfo, QFrame#lcdlist {{ background:{LCD_GLASS_GRADIENT}; border:1px solid #131709; border-radius:3px; }}'
+    # Pass 15: the playing deck's info window — heavy ink frame.
+    f'QFrame#lcdinfo[heavy="true"] {{ border:3px solid {COLOR_LCD_INK}; }}'
     # Pass 14: set-list rows are flat lines ON the glass — a whisper
     # of striping and a hairline under each row; the NOW PLAYING row
     # is the inverted ink block (its labels wear the pale styles
@@ -1751,19 +1921,19 @@ STYLE = (
     f'QPushButton:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
     f'QPushButton:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
     f'QPushButton:disabled {{ background:#121317; border-color:#1d1f24; color:#565b63; }}'
-    f'QPushButton:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; font-weight:800; }}'
+    f'QPushButton:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; font-weight:800; }}'
     # Header language toggle (pass 10): same treatment as the normal
     # buttons but slimmer — the header bar keeps its pass-9 height,
     # so the bottom notice stays inside the 900px window.
     f'QPushButton#langbtn {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b20, stop:1 #121317); border:1px solid #2c2e36; border-radius:3px; padding:2px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
     f'QPushButton#langbtn:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
     f'QPushButton#langbtn:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
-    f'QPushButton#langbtn:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; font-weight:800; }}'
+    f'QPushButton#langbtn:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; font-weight:800; }}'
     # Performance pads: near-black cells, hairline borders, small caps.
     f'QPushButton[pad="true"] {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14151a, stop:1 #0a0a0c); border:1px solid #26282f; border-radius:2px; padding:9px 4px; font-size:11px; font-weight:700; color:#c9ccd1; }}'
     f'QPushButton[pad="true"]:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b21, stop:1 #0e0f12); border-color:#3f434e; }}'
     f'QPushButton[pad="true"]:pressed {{ background:#060607; }}'
-    f'QPushButton[pad="true"]:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0e4066, stop:1 #082a47); border-color:{COLOR_DECK_A}; color:{COLOR_WAVE_LIGHT}; }}'
+    f'QPushButton[pad="true"]:checked {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2e3138, stop:1 #1a1b20); border-color:{COLOR_BORDER_HI}; color:{COLOR_TEXT}; }}'
     f'QComboBox {{ background:#17181d; border:1px solid #2a2c33; border-radius:3px; padding:6px 9px; color:{COLOR_TEXT}; }}'
     f'QComboBox:hover {{ border-color:#3a3d46; }}'
     f'QComboBox::drop-down {{ border:none; width:18px; }}'

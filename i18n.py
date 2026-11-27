@@ -48,6 +48,14 @@ STRINGS = {
     # tooltip (app.py), not as a second notation in parentheses.
     "key_line": {"en": "KEY {camelot}", "jp": "キー {camelot}"},
     "drop_hint": {"en": "DROP AUDIO HERE", "jp": "音声ファイルをドロップ"},
+    # Pass 15 (deck state markers): ON AIR is the filled chip on the
+    # deck that is actually playing; MONITOR is the hollow chip —
+    # the headphone-monitor select. The set-list row marker is the
+    # short form of the monitor label.
+    "on_air": {"en": "ON AIR", "jp": "再生中"},
+    "monitor_on": {"en": "MONITOR", "jp": "モニター中"},
+    "monitor_off": {"en": "MONITOR", "jp": "モニター"},
+    "monitor_short": {"en": "MON", "jp": "モニター"},
     # --- performance pads ------------------------------------------
     "cue_set": {"en": "CUE SET", "jp": "キュー設定"},
     "cue": {"en": "CUE", "jp": "キュー"},
@@ -69,8 +77,9 @@ STRINGS = {
     "crossfader": {"en": "CROSSFADER", "jp": "クロスフェーダー"},
     # --- utility bar (transition audition + audio output) -----------
     "audition_tip": {
-        "en": "A's tail → B's head (no tempo sync)",
-        "jp": "Aの末尾 → Bの先頭（テンポ同期なし）",
+        "en": "Transition preview into the monitored deck "
+              "(default B; no tempo sync)",
+        "jp": "モニター中のデッキへの繋ぎ試聴（無指定はB・テンポ同期なし）",
     },
     "seconds_item": {"en": "{n} SECONDS", "jp": "{n} 秒"},
     "preview": {"en": "▶ PREVIEW TRANSITION", "jp": "▶ ミックス試聴"},
