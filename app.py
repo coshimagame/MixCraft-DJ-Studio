@@ -1110,6 +1110,23 @@ class Window(QMainWindow):
         load_dot_font()
         self.setWindowTitle('MixAble DJ Studio • Mw-fActory • Phase 2 Trial')
         self.resize(1280,900)
+        # Pass 23 (window fit, user report 2026-11-27: the window
+        # opened larger than his screen — at >100% Windows display
+        # scaling 1280x900 logical overflows a 1080p panel): clamp
+        # the opening size to the primary screen's available
+        # geometry and centre there. The root lives in a QScrollArea
+        # (below), so a clamped window stays fully usable — the
+        # scroll area absorbs what does not fit. The window itself
+        # is freely resizable/maximizable (resize() only; no fixed
+        # size is set on the window anywhere).
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            fit_w = min(1280, avail.width())
+            fit_h = min(900, avail.height())
+            self.resize(fit_w, fit_h)
+            self.move(avail.left() + (avail.width() - fit_w) // 2,
+                      avail.top() + (avail.height() - fit_h) // 2)
         self.engine = Engine()
         self.stream = None
         self.audio_status_count = 0
@@ -2086,6 +2103,13 @@ STYLE = (
 )
 
 if __name__ == '__main__':
+    # Pass 23 (window fit): high-DPI handling before the
+    # QApplication exists. Qt 6 scales per-monitor by default; the
+    # PassThrough rounding policy keeps fractional scale factors
+    # (125% / 150%) from rounding the window's logical size up
+    # past the physical screen.
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     # Pass 12: the bundled DotGothic16 becomes the application font;
     # the stylesheet's stacks name it first as well, so widgets the
