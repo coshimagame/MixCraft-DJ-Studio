@@ -56,7 +56,7 @@ def _build_ddj_rb():
           (0, 11): ('eq_mid', 0), (1, 11): ('eq_mid', 1),
           (0, 15): ('eq_low', 0), (1, 15): ('eq_low', 1),
           (6, 23): ('filter', 0), (6, 24): ('filter', 1),      # Filter Parameter
-          (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider
+          (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider (MSB only; LSB unwired — fine at the bridge's 0.1 BPM steps, see _live_bridge v1.7)
           (0, 34): ('jog', 0), (1, 34): ('jog', 1),            # JOG platter
           (0, 33): ('jog', 0), (1, 33): ('jog', 1),            # JOG wheel side
           # BROWSE knob turn — from AlphaTheta's official DDJ-RB

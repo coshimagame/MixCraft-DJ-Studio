@@ -22,6 +22,11 @@ including the browse turn/push MIDI numbers, which are from
 AlphaTheta's official DDJ-RB MIDI message list — turn CC 64,
 push Note 65 on the browser channel (see ``_midi_map.py``).
 
+The v1.7 tempo-fader rules (both decks' TEMPO sliders drive the
+one song tempo, ±6 BPM around the tempo captured at script init,
+0.1 BPM steps, last-moved fader wins) are mirrored identically
+too — see the root module's tempo section for the rationale.
+
 The full design rationale (conversion table, fixed-BPM rule, jog
 encoding assumption) lives in the root module's docstring — read it
 there.  When the root module's rules change, mirror them here.
@@ -50,6 +55,13 @@ QUANTIZATION_NONE = 'none'
 # the real knob runs reversed.
 BROWSE_TURN_SIGN = 1
 
+# Tempo faders (v1.7, mirror of root): ±6 BPM range around the
+# captured reference, 0.1 BPM steps; the sign assumes the top of
+# the MIDI range is the fast end — flip to -1 if reversed.
+TEMPO_RANGE_BPM = 6.0
+TEMPO_STEP_BPM = 0.1
+TEMPO_FADER_SIGN = 1
+
 _EQ_TARGETS = {'eq_high': 'eq_three.high',
                'eq_mid': 'eq_three.mid',
                'eq_low': 'eq_three.low'}
@@ -62,7 +74,7 @@ _TRANSPORT_TARGETS = {'play': 'clip.toggle_play',
                       'load': 'track.load'}
 
 # Actions that intentionally produce no LiveAction (design doc 5.4).
-_IGNORED_ACTIONS = {'tempo', 'sync'}
+_IGNORED_ACTIONS = {'sync'}
 
 
 class LiveAction(object):
@@ -74,10 +86,12 @@ class LiveAction(object):
     target: dotted name of what to touch, e.g. 'eq_three.high';
             'clip.start_marker' / 'clip.loop_start' / 'clip.loop_end' /
             'clip.looping' for clip_edit, 'clip_trigger_quantization'
-            for song_edit, 'view.highlighted_clip_slot' for highlight
+            / 'song.tempo' for song_edit, 'view.highlighted_clip_slot'
+            for highlight
     value:  normalised float for set_parameter, signed beats for nudge,
             True for transport / fire_clip / highlight, beats or bool
             for clip_edit, 'bar' / 'none' for song_edit
+            'clip_trigger_quantization', float BPM for 'song.tempo'
     clip_index / clip_name: set for fire_clip and highlight (index
             into the deck's clip plan clips list)
     """
@@ -138,6 +152,28 @@ def _browse_delta(normalised):
     raw = int(round(_clamp01(normalised) * 127))
     ticks = raw if raw < 64 else raw - 128
     return BROWSE_TURN_SIGN * ticks
+
+
+def _quantise_tempo(bpm):
+    """Round a tempo to the nearest TEMPO_STEP_BPM (mirror of root).
+
+    int(x / step + 0.5), not round(): Python 2 and 3 round halves
+    differently, and the two copies must agree exactly.  Tempos
+    are positive, where int() truncation is floor.
+    """
+    steps = int(float(bpm) / TEMPO_STEP_BPM + 0.5)
+    return round(steps * TEMPO_STEP_BPM, 1)
+
+
+def tempo_for_fader(reference, normalised):
+    """Song tempo for a TEMPO fader position (mirror of root).
+
+    Centre (0.5) = the reference exactly; the ends are reference
+    ± TEMPO_RANGE_BPM; quantised to TEMPO_STEP_BPM.
+    """
+    offset = (TEMPO_FADER_SIGN * (_clamp01(normalised) - 0.5)
+              * 2.0 * TEMPO_RANGE_BPM)
+    return _quantise_tempo(reference + offset)
 
 
 # Clip-name separators (mirror of root): main clips are
@@ -293,6 +329,8 @@ def plan_event(action, deck, value, clip_plan=None, cue_index=None,
         return []  # state machine: LiveBridge.handle owns these
     if action in ('browse_turn', 'browse_push'):
         return []  # cursor state: LiveBridge.handle owns these
+    if action == 'tempo':
+        return []  # reference + last-value state: LiveBridge owns it
     return []
 
 
@@ -312,8 +350,9 @@ class LiveBridge(object):
 
     Holds each deck's clip plan (built from library.cues_to_clip_plan,
     or by the adapter scanning the deck track's Session slots) and the
-    fixed set BPM.  The BPM is recorded for display/logging only — by
-    design no event ever turns into a tempo action.
+    set BPM.  Since v1.7 the BPM doubles as the tempo faders' centre
+    reference; a constructor `set_bpm` seeds the same reference
+    `set_tempo_reference` sets from the live song tempo.
 
     v1.5 pad state (mirror of the root module — see its docstring):
     `_group_main[deck]` is the current song's main clip ordinal,
@@ -327,6 +366,12 @@ class LiveBridge(object):
     stopped); `_browse_cursor[deck]` is the selection cursor;
     `_browse_explicit` is the LOAD-pinned target deck (clears when
     a clip fires on it); `_browse_last` is the last resolved target.
+
+    v1.7 tempo state (mirror of root): `_tempo_reference` is the
+    song tempo captured at script init (quantised to 0.1), or None
+    until the adapter reports it; `_tempo_current` is the last
+    quantised tempo commanded — a fader event emits only on a
+    change, and both decks share the pair (last-moved wins).
     """
 
     def __init__(self, clip_plans=None, set_bpm=None):
@@ -341,11 +386,49 @@ class LiveBridge(object):
         self._browse_cursor = {}  # deck -> selection cursor (ordinal)
         self._browse_explicit = None  # deck pinned by LOAD 1/2
         self._browse_last = None      # last resolved browse target
+        self._tempo_reference = None  # song tempo captured at init
+        self._tempo_current = None    # last quantised tempo commanded
+        if set_bpm is not None:
+            self.set_tempo_reference(set_bpm)
 
     @property
     def quantize_on(self):
         """Pad 6's current state (True = launch quantization is 1 bar)."""
         return self._quantize_on
+
+    # -- tempo faders (v1.7) ---------------------------------------------
+
+    @property
+    def tempo_reference(self):
+        """The TEMPO faders' centre tempo (BPM), None before capture."""
+        return self._tempo_reference
+
+    @property
+    def current_tempo(self):
+        """The last quantised tempo commanded (BPM), or None."""
+        return self._tempo_current
+
+    def set_tempo_reference(self, bpm):
+        """Capture the centre reference from the song tempo at init
+        (mirror of root).  Quantised to a 0.1 step so the centre
+        detent restores it exactly; junk input is ignored."""
+        try:
+            bpm = float(bpm)
+        except (TypeError, ValueError):
+            return
+        if bpm <= 0:
+            return
+        self._tempo_reference = _quantise_tempo(bpm)
+        self._tempo_current = self._tempo_reference
+
+    def _plan_tempo(self, value):
+        if self._tempo_reference is None:
+            return []  # the adapter has not reported the song tempo
+        target = tempo_for_fader(self._tempo_reference, value)
+        if target == self._tempo_current:
+            return []  # same 0.1 step: the adapter writes nothing
+        self._tempo_current = target
+        return [LiveAction('song_edit', None, 'song.tempo', target)]
 
     # -- clip plans / song groups --------------------------------------
 
@@ -623,6 +706,8 @@ class LiveBridge(object):
             return self._plan_browse_push()
         if action == 'load':
             return self._plan_load(deck)
+        if action == 'tempo':
+            return self._plan_tempo(value)
         actions = plan_event(action, deck, value,
                              clip_plan=self.clip_plans.get(deck),
                              cue_index=cue_index, pad_context=pad_context,

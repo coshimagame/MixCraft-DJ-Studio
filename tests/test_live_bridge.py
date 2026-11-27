@@ -96,10 +96,14 @@ def test_crossfader_and_master_are_global():
         LiveAction('set_parameter', None, 'mixer.master_volume', 1.0)]
 
 
-# --- fixed set BPM: tempo and sync are ignored ------------------------------
+# --- set BPM: SYNC ignored; tempo state lives in LiveBridge -----------------
 
-def test_tempo_sliders_produce_no_action():
-    # DDJ-RB TEMPO: Deck A = CC 0 ch 0, Deck B = CC 5 ch 1.
+def test_tempo_plan_event_stays_stateless():
+    # The tempo mapping needs the captured reference + last-value
+    # state, so plan_event plans nothing for tempo (LiveBridge owns
+    # it, like browse and the pad loops — see the v1.7 tests below).
+    # DDJ-RB TEMPO: Deck A = CC 0 ch 0, Deck B = CC 5 ch 1 (the MSB
+    # of the documented 14-bit pair; the LSB is not dispatched).
     assert plan_dispatch(_ddj_cc(0, 0, 127)) == []
     assert plan_dispatch(_ddj_cc(1, 5, 0)) == []
     assert plan_event('tempo', 0, 1.0) == []
@@ -524,3 +528,88 @@ def test_browse_without_clips_plans_nothing():
     # highlight or fire there.
     assert bridge.handle_dispatch(_ddj_note(6, 71)) == []
     assert bridge.browse_target_deck() == 1
+
+
+# --- tempo faders (v1.7): song tempo around the captured reference ----------
+
+def _tempo_bridge(reference=120.0):
+    bridge = LiveBridge()
+    bridge.set_tempo_reference(reference)
+    return bridge
+
+
+def _tempo_action(bpm):
+    return LiveAction('song_edit', None, 'song.tempo', bpm)
+
+
+def test_tempo_reference_capture():
+    bridge = LiveBridge()
+    assert bridge.tempo_reference is None
+    assert bridge.current_tempo is None
+    # No reference captured yet: fader movement plans nothing.
+    assert bridge.handle('tempo', 0, 1.0) == []
+    bridge.set_tempo_reference(122.0)
+    assert bridge.tempo_reference == 122.0
+    assert bridge.current_tempo == 122.0
+    # A constructor set_bpm seeds the same reference.
+    assert LiveBridge(set_bpm=122.0).tempo_reference == 122.0
+    # Junk captures are ignored, never fatal.
+    bridge.set_tempo_reference(None)
+    bridge.set_tempo_reference(-5)
+    assert bridge.tempo_reference == 122.0
+
+
+def test_tempo_centre_is_the_reference_exactly():
+    bridge = _tempo_bridge(120.0)
+    # Move away, then back to the exact centre: the reference.
+    assert bridge.handle('tempo', 0, 1.0) == [_tempo_action(126.0)]
+    assert bridge.handle('tempo', 0, 0.5) == [_tempo_action(120.0)]
+    # The hardware detent straddles raw 63/64; both quantise to the
+    # reference, so a fader parked at its detent emits nothing.
+    bridge = _tempo_bridge(120.0)
+    assert bridge.handle_dispatch(_ddj_cc(0, 0, 64)) == []
+    assert bridge.handle_dispatch(_ddj_cc(0, 0, 63)) == []
+
+
+def test_tempo_fader_ends_hit_the_range_limits():
+    bridge = _tempo_bridge(120.0)
+    assert bridge.handle('tempo', 0, 1.0) == [_tempo_action(126.0)]
+    assert bridge.handle('tempo', 0, 0.0) == [_tempo_action(114.0)]
+    # Deck B's documented slider (CC 5, ch 1) drives the same tempo.
+    assert bridge.handle_dispatch(_ddj_cc(1, 5, 127)) == [
+        _tempo_action(126.0)]
+    assert bridge.handle_dispatch(_ddj_cc(1, 5, 0)) == [
+        _tempo_action(114.0)]
+
+
+def test_tempo_values_clamp_beyond_the_fader_ends():
+    bridge = _tempo_bridge(120.0)
+    assert bridge.handle('tempo', 0, 1.5) == [_tempo_action(126.0)]
+    assert bridge.handle('tempo', 0, -0.5) == [_tempo_action(114.0)]
+
+
+def test_tempo_quantises_to_a_tenth_and_skips_unchanged_writes():
+    bridge = _tempo_bridge(120.0)
+    # One MSB count past the detent (raw 65) is ≈0.14 BPM -> 120.1.
+    assert bridge.handle_dispatch(_ddj_cc(0, 0, 65)) == [
+        _tempo_action(120.1)]
+    # Positions inside the same 0.1 step emit nothing further.
+    assert bridge.handle('tempo', 0, 0.505) == []
+    assert bridge.handle('tempo', 0, 0.51) == []
+    assert bridge.current_tempo == 120.1
+    # The next step up does emit.
+    assert bridge.handle('tempo', 0, 0.52) == [_tempo_action(120.2)]
+
+
+def test_tempo_last_moved_fader_wins():
+    bridge = _tempo_bridge(120.0)
+    # Deck A pushes to the top of the range...
+    assert bridge.handle('tempo', 0, 1.0) == [_tempo_action(126.0)]
+    # ...then Deck B's fader, sitting at its centre, takes over the
+    # moment it moves (the documented pickup behaviour).
+    assert bridge.handle('tempo', 1, 0.5) == [_tempo_action(120.0)]
+    # Deck B keeps control while it is the one moving.
+    assert bridge.handle('tempo', 1, 0.75) == [_tempo_action(123.0)]
+    # Deck A again: its parked position (still at the top) applies.
+    assert bridge.handle('tempo', 0, 1.0) == [_tempo_action(126.0)]
+    assert bridge.current_tempo == 126.0

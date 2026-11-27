@@ -15,8 +15,8 @@ does only what the design memo (remote_script/README.md) assigns to it:
 
 Everything is defensive: a missing device/parameter/clip is skipped
 silently (one log line at most), never an exception that would kill
-the control surface.  Tempo/SYNC input is ignored by the bridge
-(fixed set BPM, user decision 2026-11-25).
+the control surface.  SYNC input is ignored by the bridge; the
+TEMPO faders drive the song tempo since v1.7 (see below).
 
 v1.5 adds the performance pads (user request 2026-11-26 — try the
 assignment on the real DDJ-RB; he avoids mouse operation, so the
@@ -46,6 +46,23 @@ _midi_map.py.  As a general safety net, this adapter also logs
 every UNMAPPED message on the browser channel once per
 (kind, number), so any browser control the profile does not use
 still shows up in Live's Log.txt instead of vanishing silently.
+
+v1.7 adds TEMPO fader control of the song tempo (user request
+2026-11-27 — he relaxed his own fixed-BPM rule, because every
+warped clip follows the song tempo): both decks' TEMPO sliders
+drive the one song tempo over ±6 BPM around the tempo the set
+had when the script loaded, in 0.1 BPM steps; all mapping state
+stays in the bridge.  This adapter only captures the reference
+from song.tempo at load (guarded — if the read fails the faders
+simply plan nothing) and executes the bridge's song_edit
+'song.tempo' actions against the same LOM property, guarded the
+same way.  SYNC stays ignored.  The sliders are read MSB-only:
+the documented map wires no LSB (see _midi_map.py), and one MSB
+count over the ±6 range is ≈0.094 BPM — finer than the 0.1
+step.  Pickup caveat: the two faders share one tempo, so if
+they are parked at different positions, the first movement of
+the other fader takes the tempo to ITS position; parked both
+at the centre detent (the normal case) there is no jump.
 
 Template assumptions (see SETUP.md): Track 1 = Deck A, Track 2 =
 Deck B; each deck track carries a Utility (TRIM), an EQ Three and an
@@ -130,11 +147,15 @@ class MixCraft(ControlSurface):
         # logged — the safety net (see the module docstring)
         self._unmapped_seen = set()
         self._view_warned = False
+        # song.tempo write already reported as failed (log once)
+        self._tempo_warned = False
         self._tick = 0
         self._refresh_clip_plans()
+        self._capture_tempo_reference()
         try:
-            self.log_message('MixCraft Remote Script v1.6 loaded '
-                             '(DDJ-RB companion, pads + browse knob)')
+            self.log_message('MixCraft Remote Script v1.7 loaded '
+                             '(DDJ-RB companion, pads + browse knob '
+                             '+ tempo faders)')
         except Exception:
             pass
 
@@ -332,12 +353,29 @@ class MixCraft(ControlSurface):
             pass
 
     def _execute_song_edit(self, action):
-        """Apply a song-level edit (pad 6: launch quantization).
+        """Apply a song-level edit (pad 6 / TEMPO faders).
 
-        The bridge speaks 'bar' / 'none'; the LOM wants the
-        Live.Song.Quantization enum (q_1_bar / q_no_q).  If the enum
-        cannot be found the press degrades to a log line.
+        Two targets: 'song.tempo' (v1.7 — the value is a float BPM,
+        written to the LOM's plain Song.tempo property) and
+        'clip_trigger_quantization' (pad 6 — the bridge speaks
+        'bar' / 'none'; the LOM wants the Live.Song.Quantization
+        enum, q_1_bar / q_no_q).  Every write is guarded: a failure
+        degrades to at most one log line, never an exception.
         """
+        if action.target == 'song.tempo':
+            try:
+                self.song().tempo = float(action.value)
+            except Exception:
+                if not self._tempo_warned:
+                    self._tempo_warned = True
+                    try:
+                        self.log_message(
+                            'MixCraft: writing song.tempo failed; '
+                            'the TEMPO faders are a no-op in this '
+                            'build')
+                    except Exception:
+                        pass
+            return
         if action.target != 'clip_trigger_quantization':
             return
         enum = None
@@ -673,8 +711,32 @@ class MixCraft(ControlSurface):
             freq_param.value = low + sweep * (high - low)
 
     # ------------------------------------------------------------------
-    # Clip plans (hot-cue pads)
+    # Clip plans (hot-cue pads) / tempo reference (v1.7)
     # ------------------------------------------------------------------
+    def _capture_tempo_reference(self):
+        """Report the song tempo at load as the faders' centre.
+
+        His sets are built at the SET BPM, so the tempo the set
+        opens with IS the planned tempo — the bridge quantises it
+        to a 0.1 step and the centre detent restores it.  Guarded:
+        if the read fails, the bridge never gets a reference and
+        the TEMPO faders plan nothing (the v1.6 behaviour).
+        """
+        try:
+            tempo = float(self.song().tempo)
+        except Exception:
+            return
+        try:
+            self._bridge.set_tempo_reference(tempo)
+        except Exception:
+            pass
+        try:
+            self.log_message(
+                'MixCraft: TEMPO faders centred on %.1f BPM '
+                '(the set tempo at load)' % (tempo,))
+        except Exception:
+            pass
+
     def _refresh_clip_plans(self):
         """Build each deck's clip plan from its Session slots.
 

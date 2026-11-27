@@ -112,6 +112,21 @@ class FakeSong:
         # values from FakeQuantization below.
         self.clip_trigger_quantization = 'Q_1_BAR'
         self.view = FakeView()
+        # Live.Song.tempo: the adapter captures it at load as the
+        # TEMPO faders' centre reference (v1.7) and writes it on
+        # fader moves.  Writes are recorded so tests can count them
+        # (the bridge must write only on a 0.1 BPM change).
+        self._tempo = 120.0
+        self.tempo_writes = []
+
+    @property
+    def tempo(self):
+        return self._tempo
+
+    @tempo.setter
+    def tempo(self, value):
+        self._tempo = value
+        self.tempo_writes.append(value)
 
 
 class FakeCInstance:
@@ -406,13 +421,46 @@ def test_eq_knobs_drive_lom_named_eq_three_params():
     assert track_b.devices[1].parameters[2].value == 15.0
 
 
-def test_tempo_and_sync_are_ignored():
+def test_sync_is_ignored():
     surface, song = _make_surface()
-    before = song.master_track.mixer_device.crossfader.value
-    surface.receive_midi(_cc(0, 0, 127))    # TEMPO deck A
     surface.receive_midi(_note(0, 88))      # SYNC deck A
-    assert song.master_track.mixer_device.crossfader.value == before
     assert song.tracks[0].clip_slots[0].fire_count == 0
+    assert song.tempo_writes == []
+
+
+# ---------------------------------------------------------------------------
+# Tempo faders (v1.7): both decks drive the song tempo
+# ---------------------------------------------------------------------------
+
+
+def test_tempo_faders_drive_the_song_tempo():
+    surface, song = _make_surface()
+    # The reference is the song tempo at load (120.0 in the fake);
+    # a fader parked at its centre detent (raw 63/64) writes nothing.
+    surface.receive_midi(_cc(0, 0, 64))     # TEMPO deck A, detent
+    surface.receive_midi(_cc(0, 0, 63))
+    assert song.tempo == 120.0 and song.tempo_writes == []
+    # Deck A to the top of the ±6 BPM range, then back to centre.
+    surface.receive_midi(_cc(0, 0, 127))
+    assert song.tempo == 126.0
+    surface.receive_midi(_cc(0, 0, 64))
+    assert song.tempo == 120.0
+    # Deck B's slider (CC 5 on ch 1) drives the same tempo:
+    # last-moved wins, here to the bottom of the range.
+    surface.receive_midi(_cc(1, 5, 0))
+    assert song.tempo == 114.0
+    assert song.tempo_writes == [126.0, 120.0, 114.0]
+
+
+def test_tempo_fader_writes_only_on_a_tenth_change():
+    surface, song = _make_surface()
+    surface.receive_midi(_cc(0, 0, 65))     # one count up: 120.1
+    assert song.tempo_writes == [120.1]
+    # The same position again quantises to the same value, so the
+    # adapter writes nothing (within-step positions are covered at
+    # bridge level in test_live_bridge.py).
+    surface.receive_midi(_cc(0, 0, 65))
+    assert song.tempo_writes == [120.1]
 
 
 def test_jog_nudges_the_playing_clip():

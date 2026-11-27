@@ -56,7 +56,7 @@ DDJ_RB = {  # Pioneer DDJ-RB — numbers from AlphaTheta's official MIDI
            (0, 11): ('eq_mid', 0), (1, 11): ('eq_mid', 1),
            (0, 15): ('eq_low', 0), (1, 15): ('eq_low', 1),
            (6, 23): ('filter', 0), (6, 24): ('filter', 1),      # Filter Parameter (E11)
-           (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider
+           (0, 0): ('tempo', 0), (1, 5): ('tempo', 1),          # TEMPO slider (MSB; the LSB at MSB+32 is documented above but not wired — one MSB count over the bridge's ±6 BPM range is ≈0.094 BPM, finer than its 0.1 step; see live_bridge v1.7)
            (0, 34): ('jog', 0), (1, 34): ('jog', 1),            # JOG platter (relative)
            (0, 33): ('jog', 0), (1, 33): ('jog', 1),            # JOG wheel side (relative)
            # BROWSE knob turn — from AlphaTheta's official DDJ-RB
