@@ -365,13 +365,20 @@ class _Reconstructor:
             d["cue"] = d["position"]
         elif action == "cue_jump" and d is not None:
             if d["track"] is not None:
+                # Pass 41 mirror: CUE returns AND stops.
                 d["position"] = d["cue"]
+                d["playing"] = False
         elif action == "hotcue_set" and d is not None:
             if d["track"] is not None:
                 d["hotcues"][int(value)] = d["position"]
         elif action == "hotcue_jump" and d is not None:
             if int(value) in d["hotcues"]:
+                # Pass 41 mirror: a hot cue fires playback.
+                # (Any AUTO SYNC alignment arrives as its own
+                # journalled sync / sync_align events, as with a
+                # plain play start.)
                 d["position"] = d["hotcues"][int(value)]
+                d["playing"] = True
         elif action == "loop_in" and d is not None:
             d["loop_active"] = False
             d["loop_start"] = d["position"]

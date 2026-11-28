@@ -735,6 +735,21 @@ class Engine:
             beats = fwd
         return beats * beat, True
 
+    def _on_deck_start(self, index, extra_events):
+        """A deck has just started (PLAY, or a hot-cue fire —
+        pass 41): if the other deck is playing, pass 35's AUTO
+        SYNC engages (tempo, beat phase, bar line); otherwise a
+        synced deck aligns its phase at this exact moment (pass
+        26's start-quantize — an alignment computed earlier,
+        while the deck sat stopped, would have gone stale)."""
+        if not self.decks[1 - index]['playing']:
+            return
+        if self.auto_sync:
+            self._engage_sync(index, extra_events,
+                              bar_align=True, journal_sync=True)
+        elif self.decks[index]['sync']:
+            self._align_phase(index, extra_events)
+
     def _align_phase(self, index, extra_events, bar_align=False):
         """Shift the deck onto the other deck's beat phase and
         record the result as an explicit 'sync_align' journal
@@ -860,23 +875,8 @@ class Engine:
                 if d['track'] is not None:
                     if d['position'] >= len(d['track'].audio): d['position'] = 0
                     d['playing'] = bool(value)
-                    if value and self.decks[1 - index]['playing']:
-                        if self.auto_sync:
-                            # Pass 35 (AUTO SYNC): a deck starting
-                            # against a playing deck engages sync
-                            # by itself — tempo, beat phase and
-                            # the bar line — at this exact moment.
-                            self._engage_sync(index, extra_events,
-                                              bar_align=True,
-                                              journal_sync=True)
-                        elif d['sync']:
-                            # Pass 26: a synced deck STARTING against a
-                            # playing master is aligned at this exact
-                            # moment — its beats land on the master's
-                            # current phase (the start-quantize). An
-                            # alignment computed earlier, while the
-                            # deck sat stopped, would have gone stale.
-                            self._align_phase(index, extra_events)
+                    if value:
+                        self._on_deck_start(index, extra_events)
             elif action == 'seek':
                 if d['track'] is not None:
                     d['position'] = self._snap(d, int(np.clip(value, 0, len(d['track'].audio))))
@@ -909,11 +909,30 @@ class Engine:
             elif action == 'master': self.master = float(np.clip(value, 0, 1))
             elif action == 'cue_set': d['cue'] = self._snap(d, d['position'])
             elif action == 'cue_jump':
-                if d['track'] is not None: d['position'] = d['cue']
+                if d['track'] is not None:
+                    d['position'] = d['cue']
+                    # Pass 41 (rekordbox feel — the user's
+                    # headline principle, 2026-11-28): the CUE
+                    # button RETURNS AND STOPS. Pressing it
+                    # mid-play lands on the cue point paused,
+                    # ready to fire again — it does not keep
+                    # playing through the point.
+                    d['playing'] = False
             elif action == 'hotcue_set':
                 if d['track'] is not None: d['hotcues'][int(value)] = self._snap(d, d['position'])
             elif action == 'hotcue_jump':
-                if int(value) in d['hotcues']: d['position'] = d['hotcues'][int(value)]
+                if int(value) in d['hotcues']:
+                    was_playing = d['playing']
+                    d['position'] = d['hotcues'][int(value)]
+                    # Pass 41: a hot cue FIRES — rekordbox starts
+                    # playback from the hot cue on the press,
+                    # whether the deck was playing or paused.
+                    d['playing'] = True
+                    if not was_playing:
+                        # A hot-cue start is a play start: AUTO
+                        # SYNC / start-quantize apply exactly as
+                        # for the PLAY button.
+                        self._on_deck_start(index, extra_events)
             elif action == 'loop_in':
                 d['loop_active'] = False
                 d['loop_start'] = self._snap(d, d['position'])

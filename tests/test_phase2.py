@@ -81,7 +81,11 @@ def test_cue_and_hotcue():
     e.command('seek', 0, 2000); e.command('hotcue_set', 0, 3); e.render(10)
     e.command('seek', 0, 0); e.render(10)
     e.command('hotcue_jump', 0, 3); e.render(10)
-    assert e.decks[0]['position'] == 2000
+    # Pass 41: a hot cue FIRES (rekordbox) — the paused deck
+    # starts playing from the hot cue, so the position has
+    # advanced past it by the rendered frames.
+    assert e.decks[0]['playing'] is True
+    assert 2000 <= e.decks[0]['position'] <= 2010
 
 def test_loop_wraps():
     e = prepared(frames=100000)

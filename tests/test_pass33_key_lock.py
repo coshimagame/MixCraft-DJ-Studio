@@ -221,6 +221,9 @@ def test_cue_and_hotcue_jumps_during_stretch():
     eng.command('seek', 0, 2 * RATE)
     render(eng, 0.5)
     eng.command('cue_jump', 0)
+    # Pass 41: CUE returns AND stops (rekordbox) — the DJ then
+    # presses PLAY again; the stretch must follow the pair.
+    eng.command('play', 0, True)
     out = render(eng, 1.0)
     assert np.isfinite(out).all()
     assert abs(dom_freq(out[24000:]) - 660.0) < 2.0
