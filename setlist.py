@@ -146,6 +146,25 @@ def _normalize_status(value):
 # 正規化
 # ---------------------------------------------------------------------------
 
+def _canonical_cue(cue) -> dict:
+    """rekordbox 形式のキュー1件を、保存と往復に耐える形へそろえる。
+
+    library.import_rekordbox_xml の出力 (name / type / start / end /
+    num) が正本。type は rekordbox の文字列 ('0'=キュー, '4'=ループ)
+    に統一し、num は int (-1=メモリーキュー, 0..=ホットキュー)、
+    start / end は秒 (end は無ければ None)。
+    """
+    ctype = cue.get("type")
+    return {
+        "name": cue.get("name") or "",
+        "type": str(ctype) if ctype is not None else None,
+        "start": _as_float(cue.get("start")) or 0.0,
+        "end": _as_float(cue.get("end")),
+        "num": _as_int(cue.get("num"))
+               if cue.get("num") is not None else -1,
+    }
+
+
 def normalize_track(raw) -> dict:
     """1 曲分を正本の形にそろえる。欠けたフィールドは None で補う。"""
     if not isinstance(raw, dict):
@@ -187,15 +206,20 @@ def normalize_track(raw) -> dict:
         "position": _as_int(raw.get("position")),
         # PC 側に実ファイルがある場合の任意フィールド (正本では未使用でも保持)
         "path": raw.get("path"),
-        "cues": raw.get("cues") or [],
+        "cues": [_canonical_cue(c) for c in (raw.get("cues") or [])
+                 if isinstance(c, dict)],
     }
 
 
 def canonical_track(track) -> dict:
-    """保存用の正本フィールドだけに絞った 1 曲分 (path/cues は落とす)。
+    """保存用の正本フィールドだけに絞った 1 曲分 (path は落とす)。
 
     スマホ側の付帯情報 (note / status / position) は、値がある場合だけ
     一緒に残す (load → save → load で情報が落ちないように)。
+    Pass 38: cues は「ある場合だけ」残す — rekordbox から読み込んだ
+    キューが保存で消えると、開き直した時にグリッドのアンカーも
+    Live 書き出しのクリップ計画も根拠を失う。キューが無い曲の
+    保存形は従来と完全に同じ (キーの無い行に cues は生やさない)。
     """
     t = normalize_track(track)
     out = {k: t[k] for k in ("title", "artist", "bpm", "key", "duration_seconds",
@@ -204,7 +228,22 @@ def canonical_track(track) -> dict:
     for k in ("note", "status", "position"):
         if t.get(k) is not None:
             out[k] = t[k]
+    if t.get("cues"):
+        out["cues"] = t["cues"]
     return out
+
+
+def setlist_from_rekordbox_tracks(tracks) -> dict:
+    """library.import_rekordbox_xml の出力 (path / title / bpm /
+    key / cues の dict 列) をアプリの正本セットリスト形へ
+    (pass 38)。実ファイルのパスとキューがそのまま行に乗り、
+    デッキ読み込み時のグリッドアンカー (pass 26) と Live
+    書き出しのクリップ計画が従来通り効く。"""
+    raw = {"format": FORMAT, "version": VERSION, "tracks": [
+        {"title": t.get("title") or "", "bpm": t.get("bpm"),
+         "key": t.get("key"), "path": t.get("path"),
+         "cues": t.get("cues") or []} for t in tracks]}
+    return normalize_setlist(raw)
 
 
 def normalize_setlist(data) -> dict:

@@ -69,8 +69,10 @@ from midi_input import MidiController
 import als_import
 import i18n
 import perf_als
+from library import import_rekordbox_xml
 from setlist import (SetlistFormatError, display_rows, display_summary,
                      live_statuses, load_setlist, normalize_track,
+                     setlist_from_rekordbox_tracks,
                      setlist_to_clip_tracks)
 from setlist import _guess_artist_title
 
@@ -3141,7 +3143,7 @@ class Window(QMainWindow):
                 return files[0]
         return None
     def open_setlist(self):
-        path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist (*.json *.als)')
+        path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist (*.json *.als *.xml)')
         if not path: return
         # Pass 31: a Live set (.als) comes back as a set list —
         # the return half of the MixAble ⇄ Live exchange. The
@@ -3150,12 +3152,27 @@ class Window(QMainWindow):
         # double-click deck loads work); the only difference is
         # the status line, which says plainly how many songs
         # were read and how many carry no file.
+        # Pass 38: a rekordbox export (.xml) opens the same way
+        # — its entries carry the real file paths, BPM, key and
+        # the rekordbox cues, so deck loads anchor their beat
+        # grids from the first hot cue (pass 26) and the Live
+        # export's clip plan sees the cues.
         no_file = None
         try:
             if path.lower().endswith('.als'):
                 imported = als_import.read_als_set(path)
                 data = imported['setlist']
                 no_file = imported['no_file']
+            elif path.lower().endswith('.xml'):
+                try:
+                    rb_tracks = import_rekordbox_xml(path)
+                except Exception as error:
+                    raise SetlistFormatError(
+                        f'rekordbox XML として読めません: {error}')
+                if not rb_tracks:
+                    raise SetlistFormatError(
+                        'rekordbox XML に曲が見つかりませんでした')
+                data = setlist_from_rekordbox_tracks(rb_tracks)
             else:
                 data = load_setlist(path)
         except (SetlistFormatError, als_import.AlsError) as error:
