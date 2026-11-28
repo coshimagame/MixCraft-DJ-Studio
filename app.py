@@ -64,7 +64,8 @@ from midi_input import MidiController
 import i18n
 import perf_als
 from setlist import (SetlistFormatError, display_rows, display_summary,
-                     load_setlist, normalize_track, setlist_to_clip_tracks)
+                     live_statuses, load_setlist, normalize_track,
+                     setlist_to_clip_tracks)
 from setlist import _guess_artist_title
 
 # ---------------------------------------------------------------------------
@@ -1527,6 +1528,18 @@ class Window(QMainWindow):
         # the engine is the transition audition's TARGET: preview()
         # runs the transition INTO the monitored deck.
         self.monitor_deck = None
+        # Pass 27 (user report, 2026-11-28: 「ミックスリストと演奏
+        # 中の曲の相互連携が取れてなくて矛盾してる」): the set
+        # list's played / now-playing / next markers are derived
+        # LIVE from the engine's decks (see _update_setlist_claims)
+        # — never from the loaded file's started / current_index
+        # snapshot, which froze the rows wherever the phone page
+        # had left them while the decks played something else.
+        # _setlist_played is the ledger of rows that have sounded;
+        # _deck_claims[i] is the row deck i currently speaks for.
+        self._setlist_played = set()
+        self._deck_claims = [None, None]
+        self._setlist_sig = None   # last rendered (statuses, monitor path)
         # Pass 10 (user direction, 2026-11-27): ONE language at a
         # time — the bilingual labels looked cluttered (「文字ガチャ
         # ガチャして」). self.lang is the window's language; every
@@ -2532,6 +2545,10 @@ class Window(QMainWindow):
             return
         self.setlist_data = data
         self.clip_tracks = setlist_to_clip_tracks(data)
+        # Pass 27: a newly opened list starts with a clean live
+        # state — the file's own played/playing snapshot is not
+        # adopted (the decks are the truth, from here on).
+        self._reset_setlist_live()
         self.render_setlist()
         # Pass 13: a set list opened after the decks were loaded
         # brings their 'Title — Artist' metadata with it — refresh
@@ -2697,6 +2714,10 @@ class Window(QMainWindow):
                     'exported_at': None, 'set_bpm': None,
                     'target_minutes': None, 'started': False,
                     'current_index': -1, 'tracks': []}
+                # Pass 27: a list born from drops starts with a
+                # clean live state too (appends to an EXISTING
+                # list keep theirs — row indexes do not move).
+                self._reset_setlist_live()
             self.setlist_data['tracks'].extend(added)
             self.clip_tracks = setlist_to_clip_tracks(self.setlist_data)
             self.render_setlist()
@@ -2712,6 +2733,97 @@ class Window(QMainWindow):
                 return ' • '.join(parts)
             self._status_fn = status_fn
             self._apply_status()
+    # -- Pass 27: set list <-> performance linkage ------------------
+    # One source of truth: the engine's decks. Every load route
+    # (set-list double-click, deck 読込 / file dialog, deck drag &
+    # drop, DDJ-RB) ends at the same engine state, so the rows are
+    # derived from that state alone — which entry each deck speaks
+    # for (its claim) plus the ledger of rows that have sounded.
+    # The loaded file's started / current_index / per-track status
+    # snapshot is never consulted for the panel any more: it froze
+    # the rows at the phone page's last export while the decks
+    # played something else, and the ON AIR chips (driven live
+    # from the same engine state in tick) contradicted them.
+    def _reset_setlist_live(self):
+        self._setlist_played = set()
+        self._deck_claims = [None, None]
+        self._setlist_sig = None
+
+    def _claim_for(self, deck, path, tracks):
+        """The row a deck speaks for when it starts playing
+        `path`: the first matching row that has not sounded yet
+        and is not claimed by the other deck (rows are played in
+        list order when the same file appears twice); if every
+        match has sounded, the first unclaimed match (a reprise);
+        no match at all -> None (off-list file: no row may light
+        up for it). Matching is _path_matches — the same identity
+        the loader and the monitor marker use."""
+        claimed = {c for j, c in enumerate(self._deck_claims)
+                   if j != deck and c is not None}
+        first = None
+        for idx, entry in enumerate(tracks):
+            if idx in claimed \
+                    or not _path_matches(entry.get('path'), path):
+                continue
+            if idx not in self._setlist_played:
+                return idx
+            if first is None:
+                first = idx
+        return first
+
+    def _update_setlist_claims(self):
+        """Keep the claims in step with the engine (called from
+        tick). A claim is chosen when a deck is playing a file
+        that matches a row; it sticks while that file stays
+        loaded (pause keeps it, resume re-lights the same row)
+        and clears when another file replaces it or the deck
+        empties. A sounding claim joins the played ledger at
+        once, so stopping — button, pause or track end — leaves
+        the row 'played'."""
+        tracks = (self.setlist_data or {}).get('tracks') or []
+        for i, d in enumerate(self.engine.decks):
+            track = d['track']
+            path = getattr(track, 'path', None)
+            claim = self._deck_claims[i]
+            if claim is not None and (
+                    path is None or claim >= len(tracks)
+                    or not _path_matches(tracks[claim].get('path'),
+                                         path)):
+                claim = None
+            if path is not None and d['playing']:
+                if claim is None:
+                    claim = self._claim_for(i, path, tracks)
+                if claim is not None:
+                    self._setlist_played.add(claim)
+            self._deck_claims[i] = claim
+
+    def _setlist_live_statuses(self):
+        tracks = (self.setlist_data or {}).get('tracks') or []
+        playing = {self._deck_claims[i]
+                   for i, d in enumerate(self.engine.decks)
+                   if d['playing']
+                   and self._deck_claims[i] is not None}
+        return live_statuses(tracks, playing, self._setlist_played)
+
+    def _setlist_signature(self):
+        """What the rendered rows depend on: the live statuses
+        plus the monitor row marker's target path."""
+        monitor_path = None
+        if self.monitor_deck is not None:
+            mtrack = self.decks[self.monitor_deck].wave.track
+            if mtrack is not None:
+                monitor_path = getattr(mtrack, 'path', None)
+        return (tuple(self._setlist_live_statuses()), monitor_path)
+
+    def _refresh_setlist_live(self):
+        """Re-render the rows only when the live signature moved
+        (tick calls this every cycle; the rows are rebuilt only
+        on a real change, so nothing flickers)."""
+        if self.setlist_data is None:
+            return
+        if self._setlist_signature() != self._setlist_sig:
+            self.render_setlist()
+
     def render_setlist(self):
         while self.setlist_rows.count():
             item = self.setlist_rows.takeAt(0)
@@ -2720,6 +2832,9 @@ class Window(QMainWindow):
         if self.setlist_data is None:
             self._arm_setlist_drops()
             return
+        # Pass 27: rendering records the signature it painted, so
+        # tick's change detection compares like with like.
+        self._setlist_sig = self._setlist_signature()
         # Pass 13: no summary line is composed here any more (see
         # the panel build) — render_setlist only renders the rows.
         # Pass 15: the monitored deck's loaded track, when it is in
@@ -2730,7 +2845,12 @@ class Window(QMainWindow):
             if mtrack is not None:
                 monitor_path = mtrack.path
         entries = (self.setlist_data or {}).get('tracks') or []
-        for row_index, row in enumerate(display_rows(self.setlist_data)):
+        # Pass 27: the rows' statuses are the LIVE ones (decks'
+        # real state via the claims/ledger), not the file's
+        # snapshot — display_rows uses them verbatim.
+        for row_index, row in enumerate(display_rows(
+                self.setlist_data,
+                statuses=self._setlist_live_statuses())):
             # Pass 14: the rows live on old-LCD glass now, and an old
             # LCD has no colour — the fixed status colours become
             # INK DENSITIES plus the text badges: played = dim ink,
@@ -2898,6 +3018,16 @@ class Window(QMainWindow):
                         i18n.tr('sync_tempo_only', lang)
                     self._apply_status()
                 self._sync_mode_seen[i] = mode
+        # Pass 27: the set list follows the decks — claims update
+        # from the engine's real state and the rows re-render on
+        # change, in the same tick that drives the ON AIR chips
+        # from that state, so the two can never disagree. Frozen
+        # during the transition audition: the audition drives both
+        # decks' playing flags with rehearsal material, and an
+        # 8-second rehearsal must not mark rows played.
+        if self.engine.preview is None:
+            self._update_setlist_claims()
+            self._refresh_setlist_live()
         # Pass 8: drive the mix timer off this same tick — auto-start
         # on the first deck play (audition playback counts), then
         # accumulate from monotonic deltas and refresh the readouts.

@@ -418,7 +418,38 @@ STATUS_LABELS = {
 }
 
 
-def display_rows(setlist) -> list:
+def live_statuses(tracks, playing=(), played=()) -> list:
+    """ライブ状態 (デッキの実再生) から各行の status を決める純関数。
+
+    playing: 今かかっている行の index 集合。played: 既に鳴った行の
+    index 集合。next は「今かかっている行 (無ければ最後に鳴った行)
+    より後ろで最初の未再生の行」。ファイル側の started /
+    current_index / 曲ごとの status スナップショットは一切見ない —
+    PC アプリのパネルではデッキの実状態が正 (pass 27: 読み込んだ
+    JSON の再生位置スナップショットと実際の演奏が食い違って、行の
+    表示とデッキの ON AIR が矛盾した)。
+    """
+    playing = set(playing)
+    played = set(played)
+    statuses = []
+    for i in range(len(tracks)):
+        if i in playing:
+            statuses.append("playing")
+        elif i in played:
+            statuses.append("played")
+        else:
+            statuses.append("queued")
+    sounded = playing | played
+    if sounded:
+        anchor = max(sounded)
+        for i in range(anchor + 1, len(statuses)):
+            if statuses[i] == "queued":
+                statuses[i] = "next"
+                break
+    return statuses
+
+
+def display_rows(setlist, statuses=None) -> list:
     """セットリストを表示用の行 dict のリストに整形する。
 
     各行: number (1 始まり), title, artist, bpm, key, duration_seconds,
@@ -430,31 +461,38 @@ def display_rows(setlist) -> list:
     あればそれを正とし、無ければ started / current_index から導出する。
     next (再生中の次に控える曲) は明示の status には無いので常に導出する:
     再生中より後ろで最初の queued が next になる。
+
+    statuses を渡すと、その status 列をそのまま使う (導出しない)。
+    PC アプリがライブ状態 (live_statuses) を渡すための口で、行の
+    並び・長さが tracks と一致しない場合は無視して従来導出に落とす。
     """
     data = normalize_setlist(setlist)
     tracks = data["tracks"]
-    current = data["current_index"]
-    started = data["started"]
-    statuses = []
-    for i, t in enumerate(tracks):
-        s = t.get("status")
-        if s not in ("played", "playing", "queued"):
-            s = None
-        if s is None:
-            if not started:
-                s = "queued"
-            elif i < current:
-                s = "played"
-            elif i == current:
-                s = "playing"
-            else:
-                s = "queued"
-        statuses.append(s)
-    if started and current >= 0:
-        for i in range(current + 1, len(tracks)):
-            if statuses[i] == "queued":
-                statuses[i] = "next"
-                break
+    if statuses is not None and len(statuses) != len(tracks):
+        statuses = None
+    if statuses is None:
+        current = data["current_index"]
+        started = data["started"]
+        statuses = []
+        for i, t in enumerate(tracks):
+            s = t.get("status")
+            if s not in ("played", "playing", "queued"):
+                s = None
+            if s is None:
+                if not started:
+                    s = "queued"
+                elif i < current:
+                    s = "played"
+                elif i == current:
+                    s = "playing"
+                else:
+                    s = "queued"
+            statuses.append(s)
+        if started and current >= 0:
+            for i in range(current + 1, len(tracks)):
+                if statuses[i] == "queued":
+                    statuses[i] = "next"
+                    break
     rows = []
     for i, t in enumerate(tracks):
         rows.append({

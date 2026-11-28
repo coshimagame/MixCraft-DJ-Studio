@@ -151,6 +151,44 @@ def _arranger(track):
 # クリップ / エンベロープの生成
 # ---------------------------------------------------------------------------
 
+def _scrub_donor_ref(file_ref, audio_file, stat):
+    """FileRef を演奏したファイルの参照として一貫させる (pass 27)。
+
+    実ファイルの解剖で確認した問題: 複製元の FileRef には、差し替え
+    先とは別ファイル (ドナー) の <Name> が残り、実 Live 10 形式では
+    相対パス要素 (RelativePathElement) と <Data> (絶対パスの blob)
+    もドナーのファイルのまま残っていた。Path だけ差し替えた参照は
+    「名前と中身が食い違う」ので、Live のファイル解決がドナー側に
+    引っ張られかねない。ここで:
+
+      - <Name> を演奏ファイル名に合わせる
+      - 相対参照 (RelativePath の子要素) を空にし、HasRelativePath
+        を false にする — ファイルの同一性は絶対 <Path> だけにする
+      - <Data> はドナーの blob を消すのでなく、演奏ファイルの
+        絶対パスで書き直す — 実 Live 10 形式は「絶対パスの
+        UTF-16LE (+ 終端 NUL) の hex」(実テンプレのドナーで確認)
+      - <SearchHint> の子要素 (ドナーのパスの残り) を消す
+    """
+    abs_path = (str(audio_file.resolve()) if stat is not None
+                else str(audio_file))
+    _set_value(file_ref, "Path", abs_path)
+    _set_value(file_ref, "Name", audio_file.name)
+    _set_value(file_ref, "RelativePath", "")
+    rel = file_ref.find("RelativePath")
+    if rel is not None:
+        for child in list(rel):
+            rel.remove(child)
+    _set_value(file_ref, "HasRelativePath", False)
+    data = file_ref.find("Data")
+    if data is not None:
+        data.text = (abs_path + "\0").encode("utf-16-le").hex().upper()
+    hint = file_ref.find("SearchHint")
+    if hint is not None:
+        for child in list(hint):
+            hint.remove(child)
+        hint.text = None
+
+
 def _prepare_perf_clip(template, entry, allocator, report):
     """複製したクリップに演奏セグメント 1 つ分を反映する。"""
     clip = copy.deepcopy(template)
@@ -167,10 +205,7 @@ def _prepare_perf_clip(template, entry, allocator, report):
             f"{entry.get('name')}: ファイルがこの PC に無いため "
             "サイズ/日付は元のままです")
     if file_ref is not None:
-        _set_value(file_ref, "Path",
-                   str(audio_file.resolve()) if stat is not None
-                   else str(audio_file))
-        _set_value(file_ref, "RelativePath", "")
+        _scrub_donor_ref(file_ref, audio_file, stat)
         if stat is not None:
             _set_value(file_ref, "OriginalFileSize", stat.st_size)
         _set_value(file_ref, "OriginalCrc", 0)
@@ -249,6 +284,34 @@ def _make_envelope(pointee_id, points, allocator):
 # 本体
 # ---------------------------------------------------------------------------
 
+def _clear_arrangement(track):
+    """トラックの ArrangerAutomation の中身 (クリップとエンベロープ)
+    を空にする。取り除いたクリップ数を返す。入れ物が無ければ何も
+    しない (作りもしない)。"""
+    if track is None:
+        return 0
+    chain = track.find("./DeviceChain")
+    sequencer = chain.find("MainSequencer") if chain is not None else None
+    timeable = sequencer.find("ClipTimeable") \
+        if sequencer is not None else None
+    arranger = timeable.find("ArrangerAutomation") \
+        if timeable is not None else None
+    if arranger is None:
+        return 0
+    removed = 0
+    events = arranger.find("Events")
+    if events is not None:
+        removed = len([el for el in events
+                       if el.tag in ("AudioClip", "MidiClip")])
+        for child in list(events):
+            events.remove(child)
+    envelopes = arranger.find("Envelopes")
+    if envelopes is not None:
+        for child in list(envelopes):
+            envelopes.remove(child)
+    return removed
+
+
 def inject_perf(root, plan) -> dict:
     """パース済み .als の root に演奏プランを注入する。報告 dict。"""
     tracks = als_writer._audio_tracks(root)
@@ -258,12 +321,15 @@ def inject_perf(root, plan) -> dict:
     deck_tracks = {"A": tracks[0], "B": tracks[1]}
     report = {"clips_written": 0, "decks": {"A": 0, "B": 0},
               "envelopes_written": {}, "donor": None, "tempo_set": False,
+              "arrangement_cleared": 0,
               "warnings": list(plan.get("warnings") or [])}
 
     donor = als_writer._find_donor_clip(deck_tracks.values(), root)
     if donor is not None:
         report["donor"] = "clone"
-        template = donor
+        # Pass 27: 複製元は先に確保してから土台を掃除する (掃除で
+        # ツリーから外れても複製元として使えるように)。
+        template = copy.deepcopy(donor)
     else:
         report["donor"] = "skeleton"
         report["warnings"].append(
@@ -271,6 +337,21 @@ def inject_perf(root, plan) -> dict:
             "作りました。この経路は実機未検証です (テンプレートに試しクリップを"
             "1 つ入れて保存し直すと、複製経路になります)")
         template = als_writer._skeleton_clip()
+
+    # Pass 27: 土台 .als 自身の Arrangement に残っているクリップ /
+    # エンベロープは演奏ではないので、書き込む前に取り除く (実機の
+    # 土台は実セットから保存された物で、前の内容が残り得る)。出力の
+    # Arrangement は「この演奏だけ」になる。セッション側のスロット
+    # (複製元の置き場) には触らない。
+    cleared = 0
+    for track in deck_tracks.values():
+        cleared += _clear_arrangement(track)
+    cleared += _clear_arrangement(_master_track(root))
+    report["arrangement_cleared"] = cleared
+    if cleared:
+        report["warnings"].append(
+            f"土台 .als の Arrangement に残っていたクリップ {cleared} 個を"
+            "取り除いてから書き出しました")
 
     allocator = als_writer._IdAllocator(root)
     arrangers = {}
@@ -398,6 +479,15 @@ def generate(base_path, events_source, out_path, set_bpm=None,
                    if m["duration_seconds"]},
         bpms={p: m["bpm"] for p, m in meta.items() if m["bpm"]},
         set_bpm=set_bpm)
+    # Pass 27: 再生区間が 1 つも無い記録 (読み込んだだけ / 再起動後
+    # のつまみだけ / 試聴だけ / 音声が止まっていて時刻が進まなかっ
+    # た) からは、空のセットを黙って書き出さず、理由を言って断る。
+    # 実機で「書き出せたのに何も入っていない」が起きた経路。
+    if not any(recon["segments"][i] for i in (0, 1)):
+        raise AlsError(
+            "記録の中に再生した区間が無いため、書き出せる演奏があり"
+            "ません。曲を再生してから「Live用に書き出し」を押して"
+            "ください (読み込みだけ・試聴だけでは演奏になりません)")
     plan = performance.build_perf_plan(recon, set_bpm, meta)
     tree = als_writer.load_als(base_path)
     report = inject_perf(tree.getroot(), plan)

@@ -52,6 +52,14 @@ def window():
     except Exception as exc:  # no audio stack / display in this env
         pytest.skip(f'Window cannot be built here: {exc}')
     win.setlist_data = _setlist()
+    # Pass 27: row badges are driven by the LIVE deck state, not
+    # by the file's started/current_index snapshot (the snapshot
+    # in _setlist() above is now ignored by the panel). Inject
+    # the equivalent live state: row 0 played, row 1 sounding on
+    # deck A — the badges must read 済 / 再生中 / 次.
+    win._setlist_played = {0}
+    win._deck_claims[0] = 1
+    win.engine.decks[0]['playing'] = True
     win.render_setlist()
     yield win
     win.close()

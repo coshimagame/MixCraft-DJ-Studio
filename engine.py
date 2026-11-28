@@ -538,6 +538,17 @@ class Engine:
             other = self.decks[1 - index]
             if not other['playing'] or not self._grids_trusted(d, other):
                 continue
+            if other['sync']:
+                # Pass 27: BOTH decks SYNC'd — each lock pass would
+                # nudge each deck against the other's just-moved
+                # position, and the pair chases its own tail (the
+                # real-machine journal showed bursts of sync_align
+                # events ~50 ms apart on BOTH decks at once, which
+                # the export then sliced into sliver clips). With
+                # mutual sync the engage-time alignment is the
+                # reference; the lock only ever corrects a deck
+                # whose partner is NOT itself sync-locked.
+                continue
             shift = self._phase_shift(d, other)
             beat = d['track'].grid().beat_frames
             if abs(shift) > PHASE_LOCK_THRESHOLD_BEATS * beat:

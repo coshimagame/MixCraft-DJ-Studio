@@ -44,6 +44,25 @@ gain / eq_low / eq_mid / eq_high / filter)。Live のパラメータ
   - イベントのフレームはエンジンがコマンドを適用したオーディオ
     ブロックの先頭。ブロック内 (512 フレーム ≒ 11 ms) の時刻は
     丸められる。
+
+pass 27 (実機の書き出しファイルの解剖から):
+  - 位相ロックの微調整 (sync_align、ドリフト 0.03 拍超で発火) が
+    1 回ごとにセグメントを切っていたため、2 曲の演奏が約 100 個の
+    薄片クリップになっていた (実ファイルで確認)。対策は 2 層:
+    (1) ABSORB_BEATS (0.1 拍) 未満の sync_align は「位相補正級」と
+    みなしてセグメントを切らず、開いているセグメントの基準位置を
+    ずらして吸収する。根拠: ロック補正は閾値 0.03 拍の少し先で
+    発火するので本物の補正はほぼ 0.1 拍未満に収まる一方、音楽的に
+    意味のあるジャンプ (16 分音符 = 0.25 拍) には届かない。意図的な
+    seek / cue ジャンプは sync_align ではないので一切吸収しない。
+    (2) build_perf_plan で、同一トラック・同一ファイルで時間的に
+    隙間なく隣接し、位置が連続する断片を 1 クリップに結合する
+    (レート変化で切れた断片など、吸収をすり抜けた微小な分割の
+    受け皿)。位置が閾値以上飛ぶ断片は結合しないので、ジョグの
+    意図的な seek はクリップ境界のまま残る。
+  - セグメントは閉じる時点のデッキ位置 (end_offset_frames) を
+    保持し、クリップの終端はそれで決める。吸収した微小ジャンプの
+    累積があっても、クリップの終端は演奏した実位置と一致する。
 """
 from __future__ import annotations
 
@@ -60,6 +79,18 @@ PARAM_DEFAULTS = {
 }
 GLOBAL_DEFAULTS = {"cross": 0.5, "master": 0.8}
 DECK_PARAMS = tuple(PARAM_DEFAULTS)
+
+# Pass 27: sync_align のうち、この拍数未満のジャンプは位相ロックの
+# 微調整とみなしてセグメント境界にしない (根拠はモジュール冒頭)。
+# クリップ結合時の位置連続性の閾値にも同じ値を使う。
+ABSORB_BEATS = 0.1
+
+
+def _absorb_frames(bpm):
+    """ABSORB_BEATS をフレーム数にする。BPM 不明なら 0 (吸収しない)。"""
+    if not bpm:
+        return 0.0
+    return ABSORB_BEATS * RATE * 60.0 / float(bpm)
 
 
 def load_events(source):
@@ -88,6 +119,7 @@ class _Reconstructor:
     def __init__(self, durations, bpms, set_bpm=None):
         self.durations = durations or {}   # path -> seconds
         self.bpms = bpms or {}             # path -> bpm
+        self.set_bpm = float(set_bpm) if set_bpm else None
         # Pass 26: the master SET BPM series, [(frame, bpm)] —
         # seeded with the set's base tempo and extended by every
         # 'set_bpm' journal event. Feeds the plan's Master Tempo
@@ -107,10 +139,20 @@ class _Reconstructor:
         self.preview = None                # (snapshot, end_frame)
 
     # -- セグメント管理 ------------------------------------------------
-    def _close_seg(self, i, frame):
+    def _close_seg(self, i, frame, end_pos=None):
         seg = self.open_seg[i]
         if seg is not None:
             seg["end_frame"] = float(frame)
+            # Pass 27: 閉じる瞬間の実位置も残す。吸収した位相補正の
+            # 累積があると (経過フレーム × rate) からは終端がずれ
+            # るので、クリップの終端はこちらで決める。ただし位置の
+            # 飛び (seek / 大きな align) で切る場合は、飛ぶ前の到達
+            # 位置 (end_pos = 予測位置) が終端 — 飛んだ先を終端に
+            # すると前後のセグメントが「位置連続」に見えて結合
+            # されてしまう。
+            seg["end_offset_frames"] = float(
+                self.decks[i]["position"] if end_pos is None
+                else end_pos)
             if seg["end_frame"] - seg["start_frame"] > 1:
                 self.segments[i].append(seg)
             self.open_seg[i] = None
@@ -123,16 +165,22 @@ class _Reconstructor:
         want = d["playing"] and d["track"] is not None \
             and self.preview is None
         if seg is not None:
-            implied = seg["offset_frames"] \
-                + (frame - seg["start_frame"]) * seg["rate"]
+            # Pass 27: 位置の予測はセグメントの「基準」から。基準は
+            # 開いた時点の位置で、吸収した sync_align のたびに現在
+            # 位置へ付け替わる (offset_frames はクリップ開始位置と
+            # して不変に保つ)。
+            implied = seg["anchor_frames"] \
+                + (frame - seg["anchor_frame"]) * seg["rate"]
             if not want or seg["rate"] != d["rate"] \
                     or abs(implied - d["position"]) > 1.5:
-                self._close_seg(i, frame)
+                self._close_seg(i, frame, end_pos=implied)
                 seg = None
         if want and seg is None:
             self.open_seg[i] = dict(
                 track=d["track"], start_frame=float(frame),
-                offset_frames=float(d["position"]), rate=d["rate"])
+                offset_frames=float(d["position"]), rate=d["rate"],
+                anchor_frames=float(d["position"]),
+                anchor_frame=float(frame))
 
     # -- 時間を進める --------------------------------------------------
     def _advance_deck(self, i, to_frame):
@@ -258,13 +306,23 @@ class _Reconstructor:
             d["rate"] = min(2.0, max(0.5, float(value)))
         elif action == "sync_align" and d is not None:
             # Pass 26: the engine's phase alignment, recorded as
-            # an absolute position — apply it verbatim (the
-            # segment re-cut below follows from the jump).
+            # an absolute position — apply it verbatim.
+            # Pass 27: a sub-ABSORB_BEATS jump is a phase-lock
+            # micro-correction, not a musical edit — re-anchor the
+            # open segment onto the new position instead of cutting
+            # it (the real-machine export had ~100 sliver clips
+            # from exactly this). A bigger align still cuts below.
             if d["track"] is not None:
                 pos = float(value or 0)
                 if d["duration"] is not None:
                     pos = min(max(pos, 0.0), d["duration"])
+                shift = pos - d["position"]
                 d["position"] = pos
+                seg = self.open_seg[index]
+                if seg is not None and abs(shift) <= _absorb_frames(
+                        self.bpms.get(d["track"]) or self.set_bpm):
+                    seg["anchor_frames"] = float(pos)
+                    seg["anchor_frame"] = float(frame)
         elif action == "set_bpm":
             # Pass 26: a master tempo move. The deck rates arrive
             # as their own 'tempo' events right after this one,
@@ -318,6 +376,37 @@ class _Reconstructor:
         for i in range(2):
             self._sync_seg(i, frame)
 
+    def _rebase(self):
+        """タイムラインを「最初の再生セグメント開始 = 0」にずらす
+        (pass 27)。ジャーナルの frame 0 はエンジン起動時点なので、
+        そのまま書き出すと準備時間 (読み込みや、最初の再生までの
+        静寂) がセット先頭の無音になり、開いた先頭が空に見える。
+        オートメーションとテンポ列も同じだけずらし、新しい 0 の
+        位置の値を種点として残す (最初の音の時点のノブ位置)。"""
+        starts = [s["start_frame"]
+                  for segs in self.segments.values() for s in segs]
+        if not starts:
+            return
+        shift = min(starts)
+        if shift <= 0:
+            return
+        for segs in self.segments.values():
+            for seg in segs:
+                seg["start_frame"] -= shift
+                seg["end_frame"] -= shift
+
+        def shifted(series):
+            if not series:
+                return series
+            out = [(0, _step_value(series, shift))]
+            out.extend((f - shift, v) for f, v in series if f > shift)
+            return out
+
+        for key in self.series:
+            self.series[key] = shifted(self.series[key])
+        self.set_bpm_series = shifted(self.set_bpm_series)
+        self.now -= shift
+
     def run(self, events):
         events = sorted((e for e in events if e.get("action")),
                         key=lambda e: e.get("frame") or 0)
@@ -329,6 +418,7 @@ class _Reconstructor:
         self._advance(max(last, self.now))
         for i in range(2):
             self._close_seg(i, self.now)
+        self._rebase()
         automation = {"cross": self.series["cross"],
                       "master": self.series["master"]}
         for i in range(2):
@@ -388,6 +478,38 @@ def _to_beats(series, set_bpm, end_frame):
     if points and points[-1][0] < total:
         points.append((total, points[-1][1]))
     return points
+
+
+def _coalesce_segments(segments, bpms, set_bpm):
+    """Pass 27: 断片の結合。同一トラックで、時間的に隙間なく隣接し
+    (前の終端フレームと次の開始フレームがほぼ一致)、位置が連続する
+    (次の開始位置が前の終端位置から ABSORB_BEATS 以内) セグメント
+    を 1 つにまとめる。位相補正の吸収をすり抜けた微小な分割や、
+    レート変化 (SET BPM 移動) で切れた断片の受け皿。位置が閾値
+    以上飛ぶもの — ジョグの意図的な seek やキュージャンプ — は
+    結合しないのでクリップ境界のまま残る。"""
+    merged = []
+    for seg in segments:
+        if merged:
+            prev = merged[-1]
+            bpm = bpms.get(seg["track"]) or set_bpm
+            prev_end_pos = prev.get("end_offset_frames")
+            if prev_end_pos is None:
+                prev_end_pos = prev["offset_frames"] \
+                    + (prev["end_frame"] - prev["start_frame"]) \
+                    * prev["rate"]
+            if seg["track"] == prev["track"] \
+                    and seg["start_frame"] - prev["end_frame"] <= 1.5 \
+                    and abs(seg["offset_frames"] - prev_end_pos) \
+                    <= _absorb_frames(bpm):
+                prev["end_frame"] = seg["end_frame"]
+                if seg.get("end_offset_frames") is not None:
+                    prev["end_offset_frames"] = seg["end_offset_frames"]
+                else:
+                    prev.pop("end_offset_frames", None)
+                continue
+        merged.append(dict(seg))
+    return merged
 
 
 def build_perf_plan(recon, set_bpm, track_meta=None):
@@ -453,9 +575,12 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
                               (total_beats, float(set_bpm))] \
             if total_beats > 0 else [(0.0, float(set_bpm))]
 
+    seg_bpms = {path: (meta or {}).get("bpm")
+                for path, meta in track_meta.items()}
     clips = {"A": [], "B": []}
     for i in range(2):
-        for seg in recon["segments"][i]:
+        for seg in _coalesce_segments(recon["segments"][i],
+                                      seg_bpms, set_bpm):
             meta = track_meta.get(seg["track"]) or {}
             bpm = meta.get("bpm") or set_bpm
             if not meta.get("bpm"):
@@ -464,12 +589,19 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
             start_s = seg["start_frame"] / RATE
             span_s = (seg["end_frame"] - seg["start_frame"]) / RATE
             offset_s = seg["offset_frames"] / RATE
+            # Pass 27: 終端は「閉じる瞬間の実位置」があればそちら
+            # (吸収した位相補正の累積を含む実位置)。無い場合のみ
+            # 従来通り (開始位置 + 経過 × rate) で見積もる。
+            if seg.get("end_offset_frames") is not None:
+                end_s = seg["end_offset_frames"] / RATE
+            else:
+                end_s = offset_s + span_s * seg["rate"]
             clips["AB"[i]].append({
                 "file": seg["track"],
                 "name": meta.get("name") or Path(seg["track"]).stem,
                 "time_beats": start_s * set_bpm / 60.0,
                 "offset_beats": offset_s * bpm / 60.0,
-                "end_beats": (offset_s + span_s * seg["rate"]) * bpm / 60.0,
+                "end_beats": end_s * bpm / 60.0,
                 "duration_seconds": meta.get("duration_seconds"),
                 "bpm": bpm,
                 "rate": seg["rate"],
