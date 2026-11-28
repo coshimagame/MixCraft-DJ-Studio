@@ -624,6 +624,13 @@ class Engine:
         # 'auto_sync' command toggles it and is journalled, so a
         # replay knows the mode the performance ran under.
         self.auto_sync = True
+        # Pass 37: the headphone cue bus's monitor set — deck
+        # indices whose post-EQ / post-gain, pre-crossfader
+        # signal render() also writes into a cue buffer when the
+        # caller provides one. The window mirrors its per-deck
+        # monitor state (pass 28) into this set; with no cue
+        # buffer requested, rendering costs nothing extra.
+        self.cue_decks = set()
 
     def command(self, action, deck=None, value=None):
         self.commands.put((action, deck, value))
@@ -1085,10 +1092,20 @@ class Engine:
         if not loop and end >= len(audio): d['playing'] = False
         return block
 
-    def render(self, frames):
+    def render(self, frames, cue=None):
+        """Render one block of the master mix. Pass 37: when
+        `cue` is a (frames, 2) buffer, it is filled with the
+        headphone cue mix — every deck in self.cue_decks, post
+        EQ/filter and post volume*gain, PRE crossfader and pre
+        master gain (what a DJ hears in the headphones while
+        the room hears the master). The cue mix is soft-limited
+        like the master; decks that are not playing contribute
+        silence, as they do to the master."""
         self._apply()
         self._phase_lock()
         out = np.zeros((frames, 2), dtype='float32')
+        if cue is not None:
+            cue[:] = 0
         if self.preview:
             x = np.clip((self.preview[0]+np.arange(frames))/max(1,self.preview[1]-1), 0, 1)
             # Pass 15: the sweep runs toward the audition's target
@@ -1113,7 +1130,12 @@ class Engine:
             if n:
                 block = self._process_deck(d, cur, block, n)
                 level = (cur['volume_arr'][:n]*cur['gain_arr'][:n])[:,None]
-                out[:n] += block*level*gain[:n]
+                deck_mix = block*level
+                if cue is not None and di in self.cue_decks:
+                    cue[:n] += deck_mix
+                out[:n] += deck_mix*gain[:n]
+        if cue is not None:
+            cue[:] = _soft_limit(cue.astype('float32'))
         out = (out * master_arr[:, None]).astype('float32')
         if np.max(np.abs(out), initial=0) > 0.98: self.overloads += 1
         out = _soft_limit(out)

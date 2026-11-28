@@ -22,6 +22,15 @@ or Pioneer counts, as do 'DDJ RB' / 'DDJ_RB' spellings on other
 hosts), and the ladder is DIAGNOSABLE: diagnose_ladder() reports
 every rung's state and every RB device seen, so a failure says
 WHY (not present vs present-but-unopened) instead of vanishing.
+
+Pass 37 (user, 2026-11-28: 「ASIOをRBのにできてないのなおっ
+た？ヘッドホンもそこからでないし」): the ladder grows downward
+from the 4-channel paths — plan_auto() orders every topology
+the hardware might offer (one 4ch stream, two WASAPI endpoints
+as a master+cue pair, a lone RB endpoint at 2ch) ahead of the
+PC's own outputs, and the engine grew a real cue bus to feed
+the second pair. The diagnostics name the new rungs too, so the
+pass-36 export shows which topology was available and tried.
 """
 
 
@@ -112,6 +121,65 @@ def pick_auto(audio):
     return None, ''
 
 
+def plan_auto(audio):
+    """The 'auto' output plan, richest first (pass 37): an
+    ordered list of topologies to try, so the sound lands on
+    the DDJ-RB whenever the hardware offers any path — and,
+    when the hardware offers four channels, the headphone cue
+    bus comes with it. Each plan is a dict:
+
+      kind     'single4' | 'paired' | 'master_only' | 'default'
+      device   master output device index (None = system default)
+      cue_device  paired plans only: the second endpoint
+      hostapi  host name of the master device ('' for default)
+      channels channels to open on the master device
+
+    Order: a 4-channel RB (ASIO first, then WASAPI) as ONE
+    stream — master on 1/2, cue on 3/4; then two WASAPI RB
+    endpoints as a pair (master on the first, cue on the
+    second, started together); then any RB endpoint at 2
+    channels (the controller makes the sound; no cue pair
+    exists in that mode); then the WASAPI default device; then
+    the system default. pick_auto() above stays the single-
+    device summary of this same ladder for older callers."""
+    devices = list_outputs(audio)
+    plans = []
+    asio_rb = _find_rb(devices, 'ASIO')
+    wasapi_rbs = [d for d in devices
+                  if 'WASAPI' in d['hostapi']
+                  and rb_name_match(d['name'], d['hostapi'])]
+    wasapi_rb = wasapi_rbs[0] if wasapi_rbs else None
+    for hit in (asio_rb, wasapi_rb):
+        if hit is not None and hit['max_output_channels'] >= 4:
+            plans.append(dict(kind='single4', device=hit['index'],
+                              cue_device=None, hostapi=hit['hostapi'],
+                              channels=4))
+    if len(wasapi_rbs) >= 2:
+        plans.append(dict(kind='paired', device=wasapi_rbs[0]['index'],
+                          cue_device=wasapi_rbs[1]['index'],
+                          hostapi=wasapi_rbs[0]['hostapi'],
+                          channels=2))
+    for hit in (asio_rb, wasapi_rb):
+        if hit is not None:
+            plans.append(dict(kind='master_only',
+                              device=hit['index'], cue_device=None,
+                              hostapi=hit['hostapi'], channels=2))
+    try:
+        hosts = audio.query_hostapis()
+    except Exception:
+        hosts = []
+    for h in hosts:
+        if 'WASAPI' in h['name'] and h['default_output_device'] >= 0:
+            plans.append(dict(kind='default',
+                              device=h['default_output_device'],
+                              cue_device=None, hostapi=h['name'],
+                              channels=2))
+            break
+    plans.append(dict(kind='default', device=None, cue_device=None,
+                      hostapi='', channels=2))
+    return plans
+
+
 def diagnose_ladder(audio):
     """The auto ladder, rung by rung (pass 25): which RB devices
     are visible on which hosts, which rung the pick lands on, and
@@ -143,6 +211,19 @@ def diagnose_ladder(audio):
                     ('present' if wasapi_rb is not None else 'not_present'),
              device=wasapi_rb['index'] if wasapi_rb else None,
              name=wasapi_rb['name'] if wasapi_rb else None),
+        dict(rung='rb_4ch',
+             status='present' if any(
+                 d['max_output_channels'] >= 4 for d in rb)
+                    else 'not_present',
+             device=next((d['index'] for d in rb
+                          if d['max_output_channels'] >= 4), None),
+             name=next((d['name'] for d in rb
+                        if d['max_output_channels'] >= 4), None)),
+        dict(rung='paired_rb',
+             status='present' if len([
+                 d for d in rb if 'WASAPI' in d['hostapi']]) >= 2
+                    else 'not_present',
+             device=None, name=None),
         dict(rung='wasapi_default',
              status='selected' if device is not None
                     and hostapi_name and 'WASAPI' in hostapi_name

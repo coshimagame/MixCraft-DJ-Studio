@@ -311,6 +311,19 @@ STRINGS = {
     },
     "audio_state_absent": {"en": "not found", "jp": "見つかりません"},
     "audio_state_untried": {"en": "not tried yet", "jp": "未試行"},
+    # Pass 37: the status line's cue-bus honesty — live on the
+    # 4-channel paths, explicitly unavailable on a master-only
+    # RB (the controller makes the sound; no second pair).
+    "audio_cue_on": {
+        "en": "headphone cue live (monitored decks)",
+        "jp": "ヘッドホンキュー有効（モニター中のデッキ）",
+    },
+    "audio_no_cue": {
+        "en": "sound via the DDJ-RB — no headphone cue pair "
+              "on this output",
+        "jp": "DDJ-RBから音は出ますが、この出力にはヘッドホン"
+              "キュー用の出口がありません",
+    },
     # Pass 36: the diagnostics export — one button beside the
     # device picker refreshes the ladder record and copies it to
     # the Desktop under a findable name; the dialog reports where

@@ -3,7 +3,9 @@ import math
 import os
 import shutil
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,6 +44,7 @@ def _enable_bundled_asio(roots=None):
     return False
 
 _enable_bundled_asio()
+import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from PySide6.QtCore import (Qt, QTimer, Signal, QObject, QEvent,
@@ -60,7 +63,7 @@ from engine import (Engine, Journal, RATE, GRID_CONFIDENT,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
                     peak_span, scroll_window, seek_fraction,
                     window_columns)
-from audio_config import (diagnose_ladder, rb_name_match,
+from audio_config import (diagnose_ladder, plan_auto, rb_name_match,
                           resolve_output)
 from midi_input import MidiController
 import als_import
@@ -1726,6 +1729,15 @@ class Window(QMainWindow):
         # status transition of its own.
         self._sync_mode_seen = [(None, None), (None, None)]
         self.stream = None
+        # Pass 37: the cue side of the audio state — a second
+        # stream (paired endpoints) or the second channel pair
+        # of the master stream (single 4ch) carries the
+        # headphone cue bus when the hardware offers one.
+        self.cue_stream = None
+        self.audio_mode = None      # plan kind that opened
+        self._cue_live = False
+        self._cue_blocks = deque(maxlen=8)
+        self._cue_lock = threading.Lock()
         self.audio_status_count = 0
         self.callback_count = 0
         self.callback_seconds = 0.0
@@ -2367,29 +2379,104 @@ class Window(QMainWindow):
                 deck.name.setText(deck_title_text(track.path,
                                                   self.setlist_data))
                 self._render_deck_key(deck, track)
-    def _open_stream(self, device, extra):
+    def _open_stream(self, device, extra, channels=2, callback=None):
         # Pass 23: the block size stays 512 frames — the top of
         # the stable 256-512 range for the DDJ-RB's ASIO driver at
         # 44.1/48 kHz — and latency='low' asks PortAudio for the
         # device's own suggested low latency rather than a fixed
         # guess. (Underruns are what the user hears as ぶつぶつ.)
-        kwargs = dict(samplerate=RATE, channels=2, blocksize=512, latency='low',
-            dtype='float32', device=device, callback=self.callback)
+        # Pass 37: channels/callback are parameters now — a 4ch
+        # stream carries master + cue in one callback, and the
+        # paired topology runs a second stream for the cue pair.
+        kwargs = dict(samplerate=RATE, channels=channels, blocksize=512,
+            latency='low', dtype='float32', device=device,
+            callback=callback or self.callback)
         if extra is not None: kwargs['extra_settings'] = extra
         stream = sd.OutputStream(**kwargs)
         stream.start()
         return stream
 
+    def _close_streams(self):
+        """Stop and close every open stream (master + cue)."""
+        for attr in ('cue_stream', 'stream'):
+            stream = getattr(self, attr, None)
+            if stream is not None:
+                try:
+                    stream.stop(); stream.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._cue_live = False
+        with self._cue_lock:
+            self._cue_blocks.clear()
+
+    def _audio_plans(self, selection):
+        """Pass 37: the ordered output topologies start_audio
+        tries. Each plan is a dict(kind, jobs, modes, hostapi,
+        device): jobs are (role, device, channels, callback)
+        tuples that must ALL open for the plan to live; modes
+        are (extra_settings, exclusive) pairs tried in order.
+        'auto' climbs audio_config.plan_auto() — 4ch single
+        stream, paired WASAPI endpoints, RB master-only, then
+        the defaults. An explicit pick keeps the pre-pass-37
+        behaviour exactly: one 2ch plan on that device (WASAPI
+        exclusive, then shared), then the system default."""
+        def wasapi_modes():
+            return [(sd.WasapiSettings(exclusive=True), True),
+                    (sd.WasapiSettings(exclusive=False), False)]
+        if selection == 'auto':
+            plans = []
+            for plan in plan_auto(sd):
+                callback = self.callback
+                if plan['kind'] == 'single4':
+                    callback = self.callback_cue4
+                elif plan['kind'] == 'paired':
+                    callback = self.callback_paired_master
+                jobs = [('master', plan['device'], plan['channels'],
+                         callback)]
+                if plan['kind'] == 'paired':
+                    jobs.append(('cue', plan['cue_device'], 2,
+                                 self.callback_cue_paired))
+                modes = wasapi_modes() \
+                    if 'WASAPI' in plan['hostapi'] else [(None, False)]
+                plans.append(dict(kind=plan['kind'], jobs=jobs,
+                                  modes=modes,
+                                  hostapi=plan['hostapi'],
+                                  device=plan['device']))
+            # Pass 25's honesty contract: when RB topologies
+            # were tried and failed, the landing is the SYSTEM
+            # default and the record says 'fallback' — the
+            # WASAPI-default-device plan is the primary choice
+            # only when no RB plan exists at all (the old rung
+            # 3), never a quiet landing pad after an RB failure.
+            if any(p['kind'] in ('single4', 'paired', 'master_only')
+                   for p in plans):
+                plans = [p for p in plans
+                         if p['kind'] != 'default'
+                         or p['device'] is None]
+            return plans
+        device, hostapi_name = resolve_output(selection, sd)
+        if device is None:
+            extra = sd.WasapiSettings(exclusive=False) \
+                if 'WASAPI' in hostapi_name else None
+            modes = [(extra, False)]
+        elif 'WASAPI' in hostapi_name:
+            modes = wasapi_modes()
+        else:
+            modes = [(None, False)]
+        return [dict(kind='explicit',
+                     jobs=[('master', device, 2, self.callback)],
+                     modes=modes, hostapi=hostapi_name,
+                     device=device),
+                dict(kind='default',
+                     jobs=[('master', None, 2, self.callback)],
+                     modes=[(None, False)], hostapi='', device=None)]
+
     def start_audio(self):
         self._audio_attempted = True
         self._audio_last_attempt = time.monotonic()
-        if self.stream:
-            self.stream.stop(); self.stream.close(); self.stream = None
+        self._close_streams()
         selection = self.devices.currentData()
-        device = selection
-        extra = None
-        hostapi_name = ''
-        device_name = ''
         # Pass 25: the ladder is diagnosable. The device landscape
         # is captured BEFORE opening; every open attempt below
         # records its outcome; the record lands in
@@ -2401,69 +2488,84 @@ class Window(QMainWindow):
         except Exception:
             landscape = None
         rb_indices = set()
+        device_names = {}
         if landscape:
             rb_indices = {d['index'] for d in landscape['rb_devices']}
+            device_names = {d['index']: d['name']
+                            for d in landscape['devices']}
             self._audio_signature = tuple(sorted(
                 (d['index'], d['name'], d['hostapi'])
                 for d in landscape['rb_devices']))
-        try:  # Pass 23: 'auto' climbs the ASIO -> WASAPI ladder
-            device, hostapi_name = resolve_output(selection, sd)
-            if 'WASAPI' in hostapi_name:
-                extra = sd.WasapiSettings(exclusive=False)
-            if device is not None:
-                device_name = sd.query_devices(device)['name']
+        # Pass 23/24: for a WASAPI device the low-latency path is
+        # EXCLUSIVE mode first, then shared; an ASIO device is
+        # tried directly. Pass 37: 'auto' no longer resolves to
+        # ONE device — it walks plan_auto()'s topologies (4ch
+        # single stream, paired endpoints, RB master-only) ahead
+        # of the defaults, so the DDJ-RB makes the sound whenever
+        # it offers any path, and the headphone cue bus rides the
+        # 4-channel paths. A device that will not open must never
+        # leave the app silent — the last plan is always the
+        # system default, and the status bar says when we landed
+        # there.
+        try:
+            plans = self._audio_plans(selection)
         except Exception:
-            extra = None
-            device = None if selection == 'auto' else selection
-        # Pass 23: the attempt chain; pass 24 completes its top
-        # rung. The sounddevice WHEEL's PortAudio exposes no ASIO
-        # host, so CI places a vcpkg-built ASIO PortAudio in
-        # sounddevice's official -asio slot (see
-        # _enable_bundled_asio at the top of this file) — with it,
-        # the ladder's first choice really is the DDJ-RB's ASIO
-        # driver. For a WASAPI device the low-latency path is
-        # EXCLUSIVE mode: try it first, then shared mode on the
-        # same device, then the system default. An ASIO device is
-        # tried directly, then the default. A device that will
-        # not open must never leave the app silent — the last
-        # attempt is always the system default, and the status
-        # bar says when we landed there.
-        attempts = []
-        if 'WASAPI' in hostapi_name:
-            attempts = [(device, sd.WasapiSettings(exclusive=True), True),
-                        (device, sd.WasapiSettings(exclusive=False), False)]
-        elif device is not None or extra is not None:
-            attempts = [(device, extra, False)]
-        if not attempts or attempts[-1][0] is not None:
-            attempts.append((None, None, False))
+            plans = [dict(kind='default',
+                          jobs=[('master', None, 2, self.callback)],
+                          modes=[(None, False)], hostapi='',
+                          device=None)]
         first_error = None
         opened = None
         attempt_records = []
-        for attempt_device, attempt_extra, exclusive in attempts:
-            record = dict(
-                device=attempt_device,
-                name=device_name if attempt_device == device else None,
-                hostapi=hostapi_name if attempt_device == device else '',
-                exclusive=bool(exclusive), ok=False, error=None)
-            try:
-                stream = self._open_stream(attempt_device, attempt_extra)
-            except Exception as error:
-                record['error'] = str(error)
-                attempt_records.append(record)
-                if first_error is None:
-                    first_error = error
-                continue
-            record['ok'] = True
-            attempt_records.append(record)
-            opened = (stream, attempt_device, exclusive)
-            break
+        targeted_name = None
+        for plan in plans:
+            for extra, exclusive in plan['modes']:
+                streams = {}
+                plan_ok = True
+                for role, device, channels, callback in plan['jobs']:
+                    if targeted_name is None and device is not None:
+                        targeted_name = device_names.get(device) \
+                            or plan['hostapi'] or str(device)
+                    record = dict(
+                        device=device,
+                        name=device_names.get(device)
+                             if device is not None else None,
+                        hostapi=plan['hostapi']
+                                if device is not None else '',
+                        exclusive=bool(exclusive), ok=False,
+                        error=None, channels=channels, role=role,
+                        kind=plan['kind'])
+                    try:
+                        streams[role] = self._open_stream(
+                            device, extra, channels=channels,
+                            callback=callback)
+                    except Exception as error:
+                        record['error'] = str(error)
+                        attempt_records.append(record)
+                        if first_error is None:
+                            first_error = error
+                        plan_ok = False
+                        break
+                    record['ok'] = True
+                    attempt_records.append(record)
+                if plan_ok:
+                    opened = (plan, streams, exclusive)
+                    break
+                for stream in streams.values():
+                    try:
+                        stream.stop(); stream.close()
+                    except Exception:
+                        pass
+            if opened is not None:
+                break
         diag = dict(at=time.strftime('%Y-%m-%d %H:%M:%S'),
                     selection=str(selection),
                     hosts=landscape['hosts'] if landscape else [],
                     rb_devices=landscape['rb_devices'] if landscape
                                else [],
                     rungs=landscape['rungs'] if landscape else [],
-                    attempts=attempt_records, outcome='')
+                    attempts=attempt_records, outcome='',
+                    mode=None, cue=False)
         rb_open_error = None
         for record in attempt_records:
             if record['device'] in rb_indices and record['error']:
@@ -2476,14 +2578,24 @@ class Window(QMainWindow):
                 i18n.tr('audio_error', lang).format(error=e)
             self._apply_status()
             return
-        self.stream, opened_device, opened_exclusive = opened
-        if opened_device is None and device is not None:
+        plan, streams, opened_exclusive = opened
+        opened_device = plan['device']
+        hostapi_name = plan['hostapi']
+        device_name = device_names.get(opened_device) \
+            if opened_device is not None else None
+        self.stream = streams.get('master')
+        self.cue_stream = streams.get('cue')
+        self.audio_mode = plan['kind']
+        self._cue_live = plan['kind'] in ('single4', 'paired')
+        diag['mode'] = plan['kind']
+        diag['cue'] = self._cue_live
+        if opened_device is None and targeted_name is not None:
             diag['outcome'] = 'system_default_fallback'
             self._finish_audio_diag(
                 diag, on_rb=False, on_fallback=True)
             self.hostapi_name = ''
             self.audio_device_name = ''
-            failed = device_name or hostapi_name or str(device)
+            failed = targeted_name
             if rb_open_error:
                 # Pass 25: an RB device was THERE but would not
                 # open — name the likeliest cause as a possibility.
@@ -2499,14 +2611,28 @@ class Window(QMainWindow):
         self._finish_audio_diag(
             diag, on_rb=opened_device in rb_indices, on_fallback=False)
         self.hostapi_name = hostapi_name
-        self.audio_device_name = device_name
+        self.audio_device_name = device_name or ''
         host_display = hostapi_name or 'default host'
         if opened_exclusive:
             host_display += ' EXCLUSIVE'
         latency_ms = (self.stream.latency or 0) * 1000
+        # Pass 37: the status line is honest about the cue bus —
+        # live on the 4-channel paths, explicitly unavailable on
+        # a master-only RB (the controller makes the sound, but
+        # there is no second pair for the headphones).
+        note = ''
+        if self._cue_live:
+            note = 'cue'
+        elif plan['kind'] == 'master_only':
+            note = 'no_cue'
         self._status_fn = lambda lang, h=host_display, \
-                d=device_name or 'system default', ms=f'{latency_ms:.0f}': \
-            i18n.tr('audio_active', lang).format(host=h, device=d, ms=ms)
+                d=device_name or 'system default', \
+                ms=f'{latency_ms:.0f}', n=note: \
+            i18n.tr('audio_active', lang).format(host=h, device=d,
+                                                 ms=ms) \
+            + (' • ' + i18n.tr('audio_cue_on', lang) if n == 'cue'
+               else ' • ' + i18n.tr('audio_no_cue', lang)
+               if n == 'no_cue' else '')
         self._apply_status()
     def _finish_audio_diag(self, diag, on_rb, on_fallback):
         """Pass 25: store the ladder record, write it beside the
@@ -2624,6 +2750,48 @@ class Window(QMainWindow):
             if signature != self._audio_signature \
                     or (signature and stale):
                 self.start_audio()
+    def callback_cue4(self, outdata, frames, time_info, status):
+        """Pass 37: one 4-channel stream — the master mix on
+        channels 1/2, the headphone cue bus on 3/4."""
+        if status: self.audio_status_count += 1
+        self.engine.cue_decks = self.monitor_decks
+        cue = np.zeros((frames, 2), dtype='float32')
+        outdata[:, 0:2] = self.engine.render(frames, cue)
+        outdata[:, 2:4] = cue
+
+    def callback_paired_master(self, outdata, frames, time_info,
+                               status):
+        """Pass 37: the master endpoint of a WASAPI pair renders
+        both mixes; the cue block is handed to the cue
+        endpoint's callback through a small queue. The two
+        endpoints share the controller's clock; a missed block
+        costs a few ms of silence in the headphones, never a
+        glitch in the master."""
+        if status: self.audio_status_count += 1
+        self.engine.cue_decks = self.monitor_decks
+        cue = np.zeros((frames, 2), dtype='float32')
+        outdata[:] = self.engine.render(frames, cue)
+        with self._cue_lock:
+            self._cue_blocks.append(cue)
+
+    def callback_cue_paired(self, outdata, frames, time_info,
+                            status):
+        """Pass 37: the cue endpoint of a WASAPI pair plays the
+        blocks the master callback rendered; an empty queue is
+        silence, not an error."""
+        if status: self.audio_status_count += 1
+        block = None
+        with self._cue_lock:
+            if self._cue_blocks:
+                block = self._cue_blocks.popleft()
+        if block is None:
+            outdata[:] = 0
+            return
+        n = min(frames, len(block))
+        outdata[:n] = block[:n]
+        if n < frames:
+            outdata[n:] = 0
+
     def callback(self,outdata,frames,time_info,status):
         started = time.perf_counter()
         if status: self.audio_status_count += 1
@@ -3905,7 +4073,7 @@ class Window(QMainWindow):
         self.timer.stop()
         self.midi.close()
         self.pool.shutdown(wait=True)
-        if self.stream: self.stream.stop(); self.stream.close()
+        self._close_streams()
         self.journal.drain(self.engine)
         self.journal.file.close()
         event.accept()
