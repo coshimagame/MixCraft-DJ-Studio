@@ -143,6 +143,10 @@ def raw_error_seconds(e, s=1, m=0):
 
 def loaded_engine(conf_b=0.9, offset_b=9000):
     e = Engine()
+    # Pass 35: this file is the MANUAL sync suite (pass 26) —
+    # AUTO SYNC off is exactly that world. The auto path has
+    # its own file (test_pass35_auto_sync.py).
+    e.command('auto_sync', None, False)
     e.command('load', 0, make_track(120.0, 0, 0.9, name='a.wav'))
     e.command('load', 1, make_track(124.0, offset_b, conf_b,
                                     name='b.wav'))
@@ -222,6 +226,7 @@ def test_cue_on_a_beat_anchors_a_slightly_off_grid():
     true_offset = 9000
     beat_b = RATE * 60 / 124.0
     e = Engine()
+    e.command('auto_sync', None, False)   # pass 35: manual path
     e.command('load', 0, make_track(120.0, 0, 0.9, name='a.wav'))
     # B's grid is 0.1 beats late; its cue sits on a TRUE beat.
     e.command('load', 1, make_track(
@@ -243,6 +248,7 @@ def test_cue_far_from_beats_does_not_anchor():
     true_offset = 9000
     beat_b = RATE * 60 / 124.0
     e = Engine()
+    e.command('auto_sync', None, False)   # pass 35: manual path
     e.command('load', 0, make_track(120.0, 0, 0.9, name='a.wav'))
     e.command('load', 1, make_track(
         124.0, int(true_offset + 0.1 * beat_b), 0.9, name='b.wav'))
@@ -292,6 +298,7 @@ def test_rekordbox_anchor_trumps_analysis_and_low_confidence():
     true_offset = 9000
     beat_b = RATE * 60 / 124.0
     e = Engine()
+    e.command('auto_sync', None, False)   # pass 35: manual path
     e.command('load', 0, make_track(120.0, 0, 0.9, name='a.wav'))
     # B: analysis phase is 0.3 beats WRONG and unconfident — on
     # analysis alone SYNC would be tempo-only. The user's Hot

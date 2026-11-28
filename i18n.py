@@ -102,6 +102,28 @@ STRINGS = {
         "en": "SYNC: tempo only — a beat grid here is not confident",
         "jp": "シンク：テンポのみ（拍グリッドの確信が低い）",
     },
+    # Pass 35 (user request 2026-11-28: 「オートシンク」): the
+    # set-level AUTO SYNC toggle by the SET BPM dial. On (the
+    # default), a deck starting against a playing deck syncs
+    # itself — tempo, beat phase and the bar line.
+    "auto_sync": {"en": "AUTO SYNC", "jp": "オートシンク"},
+    "auto_sync_tip": {
+        "en": "AUTO SYNC — a deck that starts playing syncs "
+              "itself to the playing deck: tempo, beat phase "
+              "and, when both tracks have bar info, the bar "
+              "line. Off = the SYNC pads work manually.",
+        "jp": "オートシンク ― 再生を始めたデッキが、鳴っている"
+              "デッキに自動で合わせます（テンポ・拍・小節情報が"
+              "あれば小節も）。OFF ではシンクパッドが手動用に"
+              "なります。",
+    },
+    # Pass 35: an AUTO SYNC engagement aligned the beat phase
+    # but a track had no bar information, so the bars were NOT
+    # aligned — the status bar says so instead of faking it.
+    "sync_no_bar_info": {
+        "en": "SYNC: beat phase only — no bar info (bars not aligned)",
+        "jp": "シンク：拍のみ合わせました（小節情報なし）",
+    },
     "set_bpm_tip": {
         "en": "SET BPM — drag or scroll to move the set tempo "
               "(±6 BPM); every deck rate follows.",

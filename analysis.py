@@ -217,20 +217,29 @@ class AnalysisCache:
         # written before pass 28 have NULL; readers treat it as 0.
         if 'bar_offset' not in columns:
             self.db.execute("ALTER TABLE analysis ADD COLUMN bar_offset INTEGER")
+        # Pass 35: whether the stored bar offset is INFORMATION
+        # (the user stepped it) or merely the analysis default of
+        # 0. Analysis cannot hear bars, so a default 0 must never
+        # drive AUTO SYNC's bar alignment — only a value the user
+        # actually set may. set_bar_offset marks the row known;
+        # fresh analysis rows stay unknown.
+        if 'bar_offset_known' not in columns:
+            self.db.execute("ALTER TABLE analysis ADD COLUMN bar_offset_known INTEGER")
         self.db.commit()
     def get(self, path):
         fp = fingerprint(path)
         with self._lock:
-            row = self.db.execute("SELECT bpm,confidence,beat_offset,key_name,camelot,key_confidence,beat_confidence,bar_offset FROM analysis WHERE path=? AND fingerprint=?",
+            row = self.db.execute("SELECT bpm,confidence,beat_offset,key_name,camelot,key_confidence,beat_confidence,bar_offset,bar_offset_known FROM analysis WHERE path=? AND fingerprint=?",
                                   (str(Path(path).resolve()), fp)).fetchone()
         if not row: return None
-        return dict(bpm=row[0], confidence=row[1], beat_offset=row[2], key=row[3], camelot=row[4], key_confidence=row[5], beat_confidence=row[6], bar_offset=row[7])
+        return dict(bpm=row[0], confidence=row[1], beat_offset=row[2], key=row[3], camelot=row[4], key_confidence=row[5], beat_confidence=row[6], bar_offset=row[7], bar_offset_known=row[8])
     def put(self, path, result):
         with self._lock:
-            self.db.execute("INSERT OR REPLACE INTO analysis VALUES (?,?,?,?,?,?,?,?,?,?)",
+            self.db.execute("INSERT OR REPLACE INTO analysis VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                             (str(Path(path).resolve()), fingerprint(path), result.get('bpm'), result.get('confidence'),
                              result.get('beat_offset'), result.get('key'), result.get('camelot'), result.get('key_confidence'),
-                             result.get('beat_confidence'), result.get('bar_offset')))
+                             result.get('beat_confidence'), result.get('bar_offset'),
+                             1 if result.get('bar_offset_known') else None))
             self.db.commit()
     def set_bar_offset(self, path, bar_offset):
         """Pass 28: update ONLY the bar offset of an existing row
@@ -238,9 +247,11 @@ class AnalysisCache:
         no-op — load_track writes the full row on the next load,
         carrying the Track's in-memory value's next default of 0;
         the stepper only ever runs on a loaded (hence cached)
-        track."""
+        track. Pass 35: the write also marks the offset KNOWN —
+        the user has now stated where the bar starts, which is
+        what AUTO SYNC's bar alignment is allowed to trust."""
         with self._lock:
-            self.db.execute("UPDATE analysis SET bar_offset=? WHERE path=?",
+            self.db.execute("UPDATE analysis SET bar_offset=?, bar_offset_known=1 WHERE path=?",
                             (int(bar_offset), str(Path(path).resolve())))
             self.db.commit()
     def close(self): self.db.close()

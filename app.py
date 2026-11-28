@@ -1484,7 +1484,12 @@ class Deck(QFrame):
         sync = QPushButton('SYNC'); sync.setCheckable(True)
         self.sync = sync
         sync.setToolTip('Tempo + beat-phase sync / テンポ＋拍位相同期（グリッドが確かな時）。音程も変わります。')
-        sync.toggled.connect(lambda on, i=index: window.engine.command('sync', i, on))
+        # Pass 35: the pad is modal now — Window.on_sync_pad
+        # owns what a press means (AUTO SYNC on: switch the
+        # mode off; off: the pass-26 manual engage). The DDJ-RB
+        # pad clicks this same button (midi_input), so the
+        # hardware follows for free.
+        sync.toggled.connect(lambda on, i=index: window.on_sync_pad(i, on))
         pads_row = QHBoxLayout()
         pads_row.setSpacing(5)
         for button in [cue_set, cue_jump, hot1, hot1s, quant, sync]:
@@ -1640,7 +1645,10 @@ class Window(QMainWindow):
         # set_bpm_now; refresh_set_bpm_dial owns the base.
         self._set_bpm_base = None
         self.set_bpm_now = None
-        self._sync_mode_seen = [None, None]
+        # Pass 35: the watcher tracks (sync_mode, sync_bar)
+        # pairs — the bar outcome of an AUTO SYNC engage is a
+        # status transition of its own.
+        self._sync_mode_seen = [(None, None), (None, None)]
         self.stream = None
         self.audio_status_count = 0
         self.callback_count = 0
@@ -1809,6 +1817,12 @@ class Window(QMainWindow):
         bpm_frame.setObjectName('bpmframe')
         bpm_frame.setMinimumWidth(200)
         bpm_lay = QVBoxLayout(bpm_frame)
+        # Pass 35: tight spacing — the AUTO SYNC chip joins this
+        # column, and the window's layout minimum (the pass-24
+        # any-size criterion, pinned by test_window_fit) must
+        # not grow for it. The stretch below absorbs the design
+        # height, so the cluster simply sits a little denser.
+        bpm_lay.setSpacing(2)
         # One SET BPM dial for the whole set (pass 5, user direction
         # 2026-11-26): both decks run at the fixed set BPM. Display
         # only — refresh_set_bpm_dial() feeds it from the loaded set
@@ -1834,6 +1848,23 @@ class Window(QMainWindow):
         self.meter = MeterLamp()
         self.meter.setRange(0,100)
         bpm_lay.addWidget(self.meter, 0, Qt.AlignmentFlag.AlignCenter)
+        # Pass 35 (AUTO SYNC): the set-level mode chip under the
+        # meter — filled ink while ON (the default), like the
+        # decks' KEY LOCK chips. A deck starting against a
+        # playing deck then syncs itself (tempo + beat phase +
+        # bar line). The SYNC pads switch the mode off; this
+        # chip is the way back on (and the manual pads return
+        # while it is off — see on_sync_pad).
+        self.auto_sync_chip = QPushButton('')
+        self.auto_sync_chip.setCheckable(True)
+        self.auto_sync_chip.setChecked(True)
+        self.auto_sync_chip.setFixedHeight(19)
+        self.auto_sync_chip.setToolTip(i18n.tr('auto_sync_tip', self.lang))
+        self.auto_sync_chip.toggled.connect(self._on_auto_sync_chip)
+        self.auto_sync_on = None
+        bpm_lay.addWidget(self.auto_sync_chip, 0,
+                          Qt.AlignmentFlag.AlignCenter)
+        self.set_auto_sync_chip(True, force=True)
         bpm_lay.addStretch()
         top_band.addWidget(bpm_frame)
         # Pass 13: the top band shares the window's flexible height
@@ -2151,6 +2182,9 @@ class Window(QMainWindow):
         self._reg(self.set_bpm_label.setText, 'set_bpm')
         self._reg(self.set_dial.set_caption, 'set_bpm')
         self._reg(self.set_dial.setToolTip, 'set_bpm_tip')
+        # Pass 35: the AUTO SYNC chip's label + tip.
+        self._reg(self.auto_sync_chip.setText, 'auto_sync')
+        self._reg(self.auto_sync_chip.setToolTip, 'auto_sync_tip')
         self._reg(self.level_label.setText, 'level')
         self._reg(self.utility_bar.setToolTip, 'audition_tip')
         self._reg(self.audition_label.setText, 'audition_length')
@@ -2609,6 +2643,10 @@ class Window(QMainWindow):
         if track is None:
             return
         track.bar_offset = (track.bar_offset + step) % 4
+        # Pass 35: a stepped offset is bar INFORMATION — AUTO
+        # SYNC may now align this track's bars (the cache write
+        # below marks the row known for the next load too).
+        track.bar_offset_known = True
         if self.cache is not None:
             try:
                 self.cache.set_bar_offset(track.path,
@@ -2931,6 +2969,45 @@ class Window(QMainWindow):
         self.set_bpm_now = bpm
         self.engine.command('set_bpm', None, bpm)
         self.set_dial.set_bpm(bpm)
+    def _on_auto_sync_chip(self, on):
+        """Pass 35: the AUTO SYNC chip by the SET BPM dial —
+        the mode's own switch (the SYNC pads only ever switch
+        it off; see on_sync_pad)."""
+        self.engine.command('auto_sync', None, bool(on))
+        self.set_auto_sync_chip(bool(on))
+    def set_auto_sync_chip(self, on, force=False):
+        """Pass 35: paint the AUTO SYNC chip — filled ink while
+        ON, hollow while OFF, the KEY LOCK chips' language.
+        Window.tick calls this with the engine's state so the
+        chip follows the mode even when a SYNC pad (not the
+        chip) switched it off."""
+        on = bool(on)
+        if self.auto_sync_on == on and not force:
+            return
+        self.auto_sync_on = on
+        if on:
+            self.auto_sync_chip.setStyleSheet(
+                f'background:{COLOR_LCD_INK};color:{COLOR_LCD_PALE};'
+                f'border:1px solid {COLOR_LCD_INK};border-radius:2px;'
+                'font-size:11px;font-weight:800;padding:2px 8px')
+        else:
+            self.auto_sync_chip.setStyleSheet(
+                f'background:transparent;color:{COLOR_LCD_INK_DIM};'
+                'border:1px solid rgba(34,43,28,0.35);border-radius:2px;'
+                'font-size:11px;font-weight:700;padding:2px 8px')
+    def on_sync_pad(self, index, on):
+        """Pass 35: the SYNC pad is modal. While AUTO SYNC is
+        on, a pad press switches AUTO SYNC off (the chip by the
+        SET BPM dial is the way back on) — the pad is the
+        mode's off-switch the user's hand is already on. With
+        AUTO SYNC off, the pad is exactly the pass-26 manual
+        per-deck engage it always was. The pad's lit state is
+        not decided here: tick() paints it from the engine's
+        per-deck sync flag, as before."""
+        if self.engine.auto_sync:
+            self.engine.command('auto_sync', None, False)
+        else:
+            self.engine.command('sync', index, bool(on))
     def standby_deck(self):
         """The deck a set-list double-click loads onto (pass 24):
         the one not playing; when both are stopped (or both are
@@ -3627,17 +3704,33 @@ class Window(QMainWindow):
                 widget.clock.setText(f'-{clock(remaining)}  {clock(elapsed)}')
             else:
                 widget.clock.setText(clock(elapsed))
+        # Pass 35: the AUTO SYNC chip follows the engine's mode
+        # — a SYNC pad press may have switched it off.
+        if self.auto_sync_chip.isChecked() != self.engine.auto_sync:
+            self.auto_sync_chip.blockSignals(True)
+            self.auto_sync_chip.setChecked(self.engine.auto_sync)
+            self.auto_sync_chip.blockSignals(False)
+        self.set_auto_sync_chip(self.engine.auto_sync)
         # Pass 26: when a SYNC engagement lands as tempo-only (a
         # beat grid was not confident), the status bar says so —
         # once per engagement, on the transition, not every tick.
+        # Pass 35: the same watcher carries the bar outcome of
+        # an AUTO SYNC engage — beat phase aligned but a track
+        # had no bar information, so the bars were NOT aligned
+        # and the status bar says that too.
         for i, d in enumerate(self.engine.decks):
-            mode = d.get('sync_mode')
-            if mode != self._sync_mode_seen[i]:
-                if d['sync'] and mode == 'tempo':
+            state = (d.get('sync_mode'), d.get('sync_bar'))
+            if state != self._sync_mode_seen[i]:
+                if d['sync'] and state[0] == 'tempo':
                     self._status_fn = lambda lang: \
                         i18n.tr('sync_tempo_only', lang)
                     self._apply_status()
-                self._sync_mode_seen[i] = mode
+                elif d['sync'] and state[0] == 'phase' \
+                        and state[1] is False:
+                    self._status_fn = lambda lang: \
+                        i18n.tr('sync_no_bar_info', lang)
+                    self._apply_status()
+                self._sync_mode_seen[i] = state
         # Pass 27: the set list follows the decks — claims update
         # from the engine's real state and the rows re-render on
         # change, in the same tick that drives the ON AIR chips

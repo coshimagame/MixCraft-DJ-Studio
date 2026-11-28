@@ -22,6 +22,19 @@ Phase 2 additions:
   held by a render-loop phase lock; untrusted grids fall back to
   tempo-only and the deck's sync_mode says which happened. Master
   SET BPM moves ('set_bpm') scale all deck rates together.
+- Pass 35 (user request 2026-11-28: 「オートシンク」「拍子を
+  あわせるのとかできないの？」): AUTO SYNC — while the mode is
+  on (Engine.auto_sync, default on), a deck that STARTS playing
+  against a playing deck engages sync by itself: tempo match,
+  beat-phase align, and — when BOTH tracks carry bar
+  information (a user-stepped bar offset, or a rekordbox anchor
+  cue) — a whole-beat shift on top so the bar lines coincide
+  too. Bar correction happens only at that engage moment; the
+  ongoing hold is still the pass-26 beat-level phase lock. A
+  trusted grid without bar information aligns the beat phase
+  only and the deck's sync_bar says so (False) — the app posts
+  the 「小節情報なし」 note; an untrusted grid stays tempo-only.
+  With the mode off, SYNC is exactly the pass-26 manual pad.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +76,13 @@ class Track:
     # (sync, quantize) never depends on it. (Declared last so
     # the existing positional constructions keep their meaning.)
     bar_offset: int = 0
+    # Pass 35: whether bar_offset is INFORMATION — the user
+    # stepped it (the cache row is marked known) — as opposed to
+    # the analysis default of 0, which says nothing about bars.
+    # AUTO SYNC's bar alignment trusts only this flag (or a
+    # rekordbox anchor cue, whose beat is a downbeat by the
+    # user's own marking). Declared last, like bar_offset.
+    bar_offset_known: bool = False
     def grid(self):
         return BeatGrid(self.bpm, self.beat_offset) if self.bpm else None
 
@@ -105,6 +125,10 @@ def load_track(path, cache=None):
         beat_conf = cached.get('beat_confidence')
         bpm, offset = cached['bpm'], cached['beat_offset'] or 0
         bar_offset = cached.get('bar_offset') or 0
+        # Pass 35: a bar offset the user stepped (cache-marked)
+        # is information AUTO SYNC may align bars with; the
+        # analysis default of 0 is not.
+        bar_known = bool(cached.get('bar_offset_known'))
         if beat_conf is None:
             # Pass 26: a pre-pass-26 cache row has no grid
             # confidence. Measure the grid once (adopting the
@@ -119,11 +143,12 @@ def load_track(path, cache=None):
                                  camelot=cached['camelot'],
                                  key_confidence=cached['key_confidence'],
                                  beat_confidence=beat_conf,
-                                 bar_offset=bar_offset))
+                                 bar_offset=bar_offset,
+                                 bar_offset_known=bar_known))
         return Track(str(Path(path).resolve()), audio, peaks, bpm, cached['confidence'],
                      offset, beat_conf or 0.0, cached['key'], cached['camelot'],
                      cached['key_confidence'] or 0.0,
-                     bar_offset=bar_offset)
+                     bar_offset=bar_offset, bar_offset_known=bar_known)
     bpm, confidence = estimate_bpm(audio)
     offset, beat_conf, refined = estimate_beat_grid(audio, bpm)
     if beat_conf >= GRID_CONFIDENT and refined:
@@ -526,6 +551,7 @@ def _new_deck():
                 gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5,
                 cue=0, hotcues={}, loop_start=None, loop_end=None, loop_active=False,
                 quantize=False, rate=1.0, sync=False, sync_mode=None,
+                sync_bar=None,
                 key_lock=True, _stretch=None,
                 _lp_low=None, _lp_high=None, _lp_filter=None, _hp_filter=None)
 
@@ -591,6 +617,13 @@ class Engine:
         # until the window anchors it (set list / Deck A BPM);
         # 'set_bpm' moves scale every deck rate proportionally.
         self.set_bpm = None
+        # Pass 35 (AUTO SYNC): while on (the default), a deck
+        # starting against a playing deck engages sync by itself
+        # — tempo, beat phase and, with bar information on both
+        # tracks, the bar line too (see _engage_sync). The
+        # 'auto_sync' command toggles it and is journalled, so a
+        # replay knows the mode the performance ran under.
+        self.auto_sync = True
 
     def command(self, action, deck=None, value=None):
         self.commands.put((action, deck, value))
@@ -647,28 +680,119 @@ class Engine:
             err -= 1.0
         return err * gs.beat_frames
 
-    def _align_phase(self, index, extra_events):
+    # -- pass 35: bar (downbeat) alignment ---------------------------
+    @staticmethod
+    def _bar_phase(deck, pos):
+        """(phase, known): the deck's position inside its bar
+        cycle, in beats [0, 4), and whether the track carries
+        bar information at all. Two sources, in priority order:
+        a bar offset the user stepped (bar_offset_known) counts
+        beats from the anchored grid offset, exactly as the
+        waveform's bar ticks do; a rekordbox anchor cue counts
+        beats from the cue itself — Hot Cue A is the user's own
+        downbeat marking. Anything else (the analysis default)
+        is NOT information: known=False, and AUTO SYNC must not
+        pretend to align bars with it."""
+        track = deck['track']
+        grid = track.grid() if track is not None else None
+        if grid is None:
+            return 0.0, False
+        beat = grid.beat_frames
+        if track.bar_offset_known:
+            return ((pos - _anchored_offset(deck, grid)) / beat
+                    - track.bar_offset) % 4.0, True
+        if track.anchor_cue is not None:
+            return ((pos - track.anchor_cue) / beat) % 4.0, True
+        return 0.0, False
+
+    def _bar_shift_frames(self, d, other, slave_pos, floor_pos):
+        """Whole-beat frames to ADD to the slave's (already
+        beat-phase-aligned) position so its bar lines coincide
+        with the master's, plus whether the shift could be
+        computed at all. The forward shift is 0–3 beats; the
+        equivalent backward shift (forward − 4) wins only when
+        it is strictly smaller AND would not cross floor_pos —
+        the position the slave started from. A start must never
+        be dragged back before its own cue: there the next bar
+        forward is taken instead."""
+        ph_s, known_s = self._bar_phase(d, slave_pos)
+        ph_m, known_m = self._bar_phase(other, other['position'])
+        if not (known_s and known_m):
+            return 0.0, False
+        beat = d['track'].grid().beat_frames
+        fwd = int(round((ph_m - ph_s) % 4.0)) % 4
+        if fwd == 0:
+            return 0.0, True
+        beats = fwd if fwd <= 2 else fwd - 4
+        if beats < 0 and slave_pos + beats * beat < floor_pos:
+            beats = fwd
+        return beats * beat, True
+
+    def _align_phase(self, index, extra_events, bar_align=False):
         """Shift the deck onto the other deck's beat phase and
         record the result as an explicit 'sync_align' journal
         event (absolute position), so performance.py's replay
         reproduces the aligned performance exactly instead of
         having to re-derive it. Sets sync_mode: 'phase' when the
         grids carried it, 'tempo' when SYNC could only match
-        tempo (the UI says so in the status bar)."""
+        tempo (the UI says so in the status bar).
+
+        Pass 35: with bar_align (an AUTO SYNC engage), a whole-
+        beat shift rides on top of the phase shift so the bar
+        lines coincide too, and sync_bar records the outcome:
+        True (bars aligned), False (beat phase only — a track
+        has no bar information; the UI posts the note), None
+        (not an auto engage / nothing to say)."""
         d = self.decks[index]
         other = self.decks[1 - index]
         if not self._grids_trusted(d, other):
             d['sync_mode'] = 'tempo' if (
                 d['track'] and other['track']
                 and d['track'].bpm and other['track'].bpm) else None
+            d['sync_bar'] = None
             return
+        start_pos = d['position']
         shift = self._phase_shift(d, other)
-        new_pos = float(np.clip(d['position'] + shift, 0,
-                                len(d['track'].audio)))
+        new_pos = start_pos + shift
+        d['sync_bar'] = None
+        if bar_align:
+            bar_shift, known = self._bar_shift_frames(
+                d, other, new_pos, start_pos)
+            new_pos += bar_shift
+            d['sync_bar'] = known
+        new_pos = float(np.clip(new_pos, 0, len(d['track'].audio)))
         if new_pos != d['position']:
             d['position'] = new_pos
             extra_events.append(('sync_align', index, int(round(new_pos))))
         d['sync_mode'] = 'phase'
+
+    def _engage_sync(self, index, extra_events, bar_align=False,
+                     journal_sync=False):
+        """The SYNC engagement itself: flag the deck synced,
+        match its tempo to the other deck's effective tempo
+        (which is the SET BPM whenever the master follows it),
+        then align. Shared by the manual 'sync' command (pass
+        26: beat phase only, the command's own journal event
+        already records the engagement) and by AUTO SYNC's
+        play-start engage (pass 35: bar alignment on top, and a
+        'sync' journal event is minted as an extra — the replay
+        recomputes the tempo match from it, exactly as it does
+        for a manual engagement)."""
+        d = self.decks[index]
+        other = self.decks[1 - index]
+        d['sync'] = True
+        if journal_sync:
+            extra_events.append(('sync', index, True))
+        if d['track'] and other['track'] \
+                and d['track'].bpm and other['track'].bpm:
+            d['rate'] = float(np.clip(
+                other['track'].bpm * other['rate'] / d['track'].bpm,
+                0.5, 2.0))
+            self._align_phase(index, extra_events,
+                              bar_align=bar_align)
+        else:
+            d['sync_mode'] = None
+            d['sync_bar'] = None
 
     def _phase_lock(self):
         """Ongoing drift correction, run once per render block:
@@ -729,14 +853,23 @@ class Engine:
                 if d['track'] is not None:
                     if d['position'] >= len(d['track'].audio): d['position'] = 0
                     d['playing'] = bool(value)
-                    if value and d['sync'] and self.decks[1 - index]['playing']:
-                        # Pass 26: a synced deck STARTING against a
-                        # playing master is aligned at this exact
-                        # moment — its beats land on the master's
-                        # current phase (the start-quantize). An
-                        # alignment computed earlier, while the
-                        # deck sat stopped, would have gone stale.
-                        self._align_phase(index, extra_events)
+                    if value and self.decks[1 - index]['playing']:
+                        if self.auto_sync:
+                            # Pass 35 (AUTO SYNC): a deck starting
+                            # against a playing deck engages sync
+                            # by itself — tempo, beat phase and
+                            # the bar line — at this exact moment.
+                            self._engage_sync(index, extra_events,
+                                              bar_align=True,
+                                              journal_sync=True)
+                        elif d['sync']:
+                            # Pass 26: a synced deck STARTING against a
+                            # playing master is aligned at this exact
+                            # moment — its beats land on the master's
+                            # current phase (the start-quantize). An
+                            # alignment computed earlier, while the
+                            # deck sat stopped, would have gone stale.
+                            self._align_phase(index, extra_events)
             elif action == 'seek':
                 if d['track'] is not None:
                     d['position'] = self._snap(d, int(np.clip(value, 0, len(d['track'].audio))))
@@ -791,21 +924,26 @@ class Engine:
                 d['_stretch'] = None
             elif action == 'tempo': d['rate'] = float(np.clip(value, 0.5, 2.0))
             elif action == 'sync':
-                d['sync'] = bool(value)
-                other = self.decks[1 - index]
-                if value and d['track'] and other['track'] and d['track'].bpm and other['track'].bpm:
-                    d['rate'] = float(np.clip(other['track'].bpm * other['rate'] / d['track'].bpm, 0.5, 2.0))
+                if value:
                     # Pass 26: tempo match PLUS beat-phase align
                     # (one-shot shift of at most half a beat; the
                     # render loop's phase lock holds it from
                     # here). Untrusted grids degrade this to the
-                    # tempo match alone — see _align_phase.
-                    self._align_phase(index, extra_events)
-                elif value:
-                    d['sync_mode'] = None
+                    # tempo match alone — see _align_phase. The
+                    # manual pad never bar-aligns (pass 35: bars
+                    # are AUTO SYNC's job).
+                    self._engage_sync(index, extra_events)
                 else:
+                    d['sync'] = False
                     d['rate'] = 1.0
                     d['sync_mode'] = None
+                    d['sync_bar'] = None
+            elif action == 'auto_sync':
+                # Pass 35: the AUTO SYNC mode toggle (set-level,
+                # deck is None). Bookkeeping only — engagements
+                # happen on later 'play' commands; decks already
+                # synced keep their state either way.
+                self.auto_sync = bool(value)
             elif action == 'set_bpm_anchor':
                 # Pass 26: the window names the set's base tempo
                 # (set list / Deck A). Bookkeeping only — no deck

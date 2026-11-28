@@ -4,6 +4,11 @@ from engine import Engine, Track, RATE, _smooth
 
 def playing(audio):
     e=Engine()
+    # Pass 35: these are pass-2 regression tests — AUTO SYNC
+    # (default on since pass 35) would tempo-match a second
+    # deck the moment it starts, which is not what any test
+    # here is about. Off restores the world they were written in.
+    e.command('auto_sync',None,False)
     e.command('load',0,Track('test.wav',np.column_stack([audio,audio]).astype('float32'),np.ones(4),120,1))
     e.command('cross',value=0);e.command('master',value=1);e.command('volume',0,1)
     e.command('play',0,True);e.render(512)

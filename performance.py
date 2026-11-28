@@ -168,6 +168,9 @@ class _Reconstructor:
         # 'set_bpm' journal event. Feeds the plan's Master Tempo
         # envelope; empty when the base is unknown.
         self.set_bpm_series = [(0.0, float(set_bpm))] if set_bpm else []
+        # Pass 35: the AUTO SYNC mode the journal ran under
+        # (engine default on; 'auto_sync' events carry toggles).
+        self.auto_sync = True
         self.decks = [_new_state(), _new_state()]
         self.globals = dict(GLOBAL_DEFAULTS)
         self.series = {"cross": [(0, GLOBAL_DEFAULTS["cross"])],
@@ -388,6 +391,14 @@ class _Reconstructor:
             # and the Live export ignores it (Live warps on its
             # own), exactly as the live export does.
             d["key_lock"] = bool(value)
+        elif action == "auto_sync":
+            # Pass 35: bookkeeping only. The mode itself moves
+            # nothing in a replay — every engagement it caused
+            # is already in the journal as 'sync' + 'sync_align'
+            # events, which the branches above/below apply. The
+            # flag is carried so the reconstructed state knows
+            # the mode the performance ran under.
+            self.auto_sync = bool(value)
         elif action == "sync_align" and d is not None:
             # Pass 26: the engine's phase alignment, recorded as
             # an absolute position — apply it verbatim.
