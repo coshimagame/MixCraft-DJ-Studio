@@ -396,7 +396,8 @@ def generate(base_path, events_source, out_path, set_bpm=None,
         events,
         durations={p: m["duration_seconds"] for p, m in meta.items()
                    if m["duration_seconds"]},
-        bpms={p: m["bpm"] for p, m in meta.items() if m["bpm"]})
+        bpms={p: m["bpm"] for p, m in meta.items() if m["bpm"]},
+        set_bpm=set_bpm)
     plan = performance.build_perf_plan(recon, set_bpm, meta)
     tree = als_writer.load_als(base_path)
     report = inject_perf(tree.getroot(), plan)

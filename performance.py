@@ -19,6 +19,14 @@
     キューポイント等を全部自前で追跡する (エンジンと同じ規則)。
   - sync の rate はイベントに残らないので、両デッキの BPM が
     分かればエンジンと同じ式で再計算する。分からなければ警告。
+  - pass 26: SYNC の拍位相合わせ (位置のシフト) は、エンジンが
+    'sync_align' イベントとして絶対位置で記録する。再構成は
+    それをそのまま適用するので、位相まで含めて正確に再現する
+    (再導出はしない)。
+  - pass 26: マスター SET BPM の移動は 'set_bpm' イベント
+    (絶対 BPM) として残り、追随する各デッキの rate は通常の
+    'tempo' イベントとして記録される。再構成は set_bpm 系列を
+    保持し、プランの Master Tempo エンベロープに反映する。
   - preview (ミックス試聴) の間は演奏ではないので区間を除外し、
     終了時に試聴前の状態へ復元する (エンジンの復元と同じ)。
     試聴の終了イベントは無いので、開始フレーム + 秒数×RATE で
@@ -77,9 +85,14 @@ def _new_state():
 
 
 class _Reconstructor:
-    def __init__(self, durations, bpms):
+    def __init__(self, durations, bpms, set_bpm=None):
         self.durations = durations or {}   # path -> seconds
         self.bpms = bpms or {}             # path -> bpm
+        # Pass 26: the master SET BPM series, [(frame, bpm)] —
+        # seeded with the set's base tempo and extended by every
+        # 'set_bpm' journal event. Feeds the plan's Master Tempo
+        # envelope; empty when the base is unknown.
+        self.set_bpm_series = [(0.0, float(set_bpm))] if set_bpm else []
         self.decks = [_new_state(), _new_state()]
         self.globals = dict(GLOBAL_DEFAULTS)
         self.series = {"cross": [(0, GLOBAL_DEFAULTS["cross"])],
@@ -243,6 +256,24 @@ class _Reconstructor:
             d["loop_active"] = False
         elif action == "tempo" and d is not None:
             d["rate"] = min(2.0, max(0.5, float(value)))
+        elif action == "sync_align" and d is not None:
+            # Pass 26: the engine's phase alignment, recorded as
+            # an absolute position — apply it verbatim (the
+            # segment re-cut below follows from the jump).
+            if d["track"] is not None:
+                pos = float(value or 0)
+                if d["duration"] is not None:
+                    pos = min(max(pos, 0.0), d["duration"])
+                d["position"] = pos
+        elif action == "set_bpm":
+            # Pass 26: a master tempo move. The deck rates arrive
+            # as their own 'tempo' events right after this one,
+            # so here only the series is extended.
+            if value:
+                bpm = float(value)
+                if not self.set_bpm_series \
+                        or self.set_bpm_series[-1][1] != bpm:
+                    self.set_bpm_series.append((frame, bpm))
         elif action == "sync" and d is not None:
             other = self.decks[1 - index]
             if value and d["track"] and other["track"]:
@@ -305,18 +336,21 @@ class _Reconstructor:
                              for key in DECK_PARAMS}
         return dict(segments=self.segments, automation=automation,
                     warnings=self.warnings,
-                    end_frame=float(self.now))
+                    end_frame=float(self.now),
+                    set_bpm_series=self.set_bpm_series)
 
 
-def reconstruct(events, durations=None, bpms=None):
-    """イベント列 → dict(segments, automation, warnings, end_frame)。
+def reconstruct(events, durations=None, bpms=None, set_bpm=None):
+    """イベント列 → dict(segments, automation, warnings, end_frame,
+    set_bpm_series)。
 
     durations / bpms は {ファイルパス: 秒 / BPM}。segments は
     デッキ番号 (0/1) → [{track, start_frame, end_frame,
     offset_frames, rate}]、automation はコマンド値域の
     [(frame, value), ...] 系列 (系列は (0, 初期値) から始まる)。
+    set_bpm はセットの基準テンポで、set_bpm_series の種になる。
     """
-    recon = _Reconstructor(durations, bpms)
+    recon = _Reconstructor(durations, bpms, set_bpm)
     return recon.run(load_events(events))
 
 
@@ -370,7 +404,9 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
       - GAIN は Utility の Gain (dB)、EQ は EQ Three の各帯域
         (dB, ±15 でクリップ)、FILTER は Auto Filter の
         Frequency (0..1 正規化位置) に写す。
-      - テンポは SET BPM 一定の線 (このアプリの演奏規則)。
+      - テンポは SET BPM が基準。演奏中にマスター SET BPM を
+        動かした場合は、その移動が階段状にエンベロープへ入る
+        (拍位置は基準 SET BPM のグリッドで換算する)。
       - クリップは演奏した時刻 (SET BPM 換算の拍) に置く。
         デッキの rate × 曲 BPM が SET BPM と違う区間は、Live
         上のクリップ長が演奏時間とずれる (警告を出す)。
@@ -404,9 +440,18 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
         envelopes[f"filter_{letter}"] = _to_beats(
             auto[i]["filter"], set_bpm, end_frame)
     total_beats = end_frame / RATE * set_bpm / 60.0
-    envelopes["tempo"] = [(0.0, float(set_bpm)),
-                          (total_beats, float(set_bpm))] \
-        if total_beats > 0 else [(0.0, float(set_bpm))]
+    # Pass 26: the Master Tempo envelope follows the recorded
+    # SET BPM series — the base tempo, stepped at each master
+    # move the performance made (frames convert to beats on the
+    # base grid, like every other envelope here). No recorded
+    # series (older logs / unknown base) keeps the constant line.
+    series = recon.get("set_bpm_series") or []
+    if series:
+        envelopes["tempo"] = _to_beats(series, set_bpm, end_frame)
+    else:
+        envelopes["tempo"] = [(0.0, float(set_bpm)),
+                              (total_beats, float(set_bpm))] \
+            if total_beats > 0 else [(0.0, float(set_bpm))]
 
     clips = {"A": [], "B": []}
     for i in range(2):

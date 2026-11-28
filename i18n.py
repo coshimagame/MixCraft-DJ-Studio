@@ -66,8 +66,22 @@ STRINGS = {
     "quantize": {"en": "QUANTIZE", "jp": "クオンタイズ"},
     "sync": {"en": "SYNC", "jp": "シンク"},
     "sync_tip": {
-        "en": "Tempo match only. Pitch shifts too. No beat-phase sync.",
-        "jp": "テンポのみ一致。音程も変わります。ビート位相同期なし。",
+        "en": "Tempo + beat-phase sync when both beat grids are "
+              "confident (tempo only otherwise). Pitch shifts too.",
+        "jp": "テンポ＋拍位相同期（両方の拍グリッドが確かな時。"
+              "そうでなければテンポのみ）。音程も変わります。",
+    },
+    # Pass 26: SYNC fell back to tempo-only for this track — the
+    # status bar says so plainly instead of faking an alignment.
+    "sync_tempo_only": {
+        "en": "SYNC: tempo only — a beat grid here is not confident",
+        "jp": "シンク：テンポのみ（拍グリッドの確信が低い）",
+    },
+    "set_bpm_tip": {
+        "en": "SET BPM — drag or scroll to move the set tempo "
+              "(±6 BPM); every deck rate follows.",
+        "jp": "セットBPM ― ドラッグ／スクロールでセットのテンポを"
+              "動かせます（±6 BPM）。デッキの速度も追随します。",
     },
     # --- SET BPM cluster -------------------------------------------
     "set_bpm": {"en": "SET BPM", "jp": "セットBPM"},

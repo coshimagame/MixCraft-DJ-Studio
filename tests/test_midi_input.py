@@ -239,22 +239,32 @@ def test_leds_follow_state(rig):
     window.monitor_deck = None
 
 
-def test_tempo_fader_offsets_around_baseline(rig):
+def test_tempo_fader_moves_the_master_set_bpm(rig):
+    # Pass 26 replaced the pass-23 per-deck rate offset (the old
+    # test's ±8% semantics): the TEMPO faders now move the master
+    # SET BPM — ±6 BPM around the captured base, detent restores
+    # it exactly. Full matrix in test_set_bpm_follow.py.
     window, backend, ctl = rig
     ctl.poll(now=100.0)
+    previous = window.deck_a_bpm
+    window.deck_a_bpm = 120.0
+    window.refresh_set_bpm_dial()
+    window.engine.apply_pending()
     window.journal.history.clear()
-    backend.inject(('cc', 0, 0, 127))     # full up: +8%
+    backend.inject(('cc', 0, 0, 127))     # full up: SET BPM +6
     ctl.poll(now=100.1)
     _journal_actions(window)
-    tempos = [e['value'] for e in window.journal.history
-              if e['action'] == 'tempo' and e['deck'] == 0]
-    assert tempos[-1] == pytest.approx(1.08)
+    moves = [e['value'] for e in window.journal.history
+             if e['action'] == 'set_bpm']
+    assert moves[-1] == 126.0
     backend.inject(('cc', 0, 0, 64))      # back to the detent
     ctl.poll(now=100.2)
     _journal_actions(window)
-    tempos = [e['value'] for e in window.journal.history
-              if e['action'] == 'tempo' and e['deck'] == 0]
-    assert tempos[-1] == pytest.approx(1.0)
+    moves = [e['value'] for e in window.journal.history
+             if e['action'] == 'set_bpm']
+    assert moves[-1] == 120.0
+    window.deck_a_bpm = previous
+    window.refresh_set_bpm_dial()
 
 
 def test_jog_seeks_the_loaded_deck(rig):

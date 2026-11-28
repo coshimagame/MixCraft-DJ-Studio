@@ -12,6 +12,12 @@ Phase 2 additions:
   (rate playback — this pitches the audio; pitch-preserving time-stretch
   is NOT implemented and is not claimed).
 - beat grid, key and analysis cache via analysis.py.
+- Pass 26: SYNC is tempo match + BEAT-PHASE alignment when both
+  tracks' beat grids are confident (analysis.GRID_CONFIDENT) — a
+  one-shot position shift on engage and on a synced deck's start,
+  held by a render-loop phase lock; untrusted grids fall back to
+  tempo-only and the deck's sync_mode says which happened. Master
+  SET BPM moves ('set_bpm') scale all deck rates together.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +27,7 @@ import math
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly, correlate, find_peaks, lfilter
-from analysis import BeatGrid, estimate_beat_offset, estimate_key
+from analysis import BeatGrid, GRID_CONFIDENT, estimate_beat_grid, estimate_key
 
 RATE = 48000
 SMOOTH_FRAMES = 240  # 5 ms at 48 kHz
@@ -38,8 +44,34 @@ class Track:
     key: str | None = None
     camelot: str | None = None
     key_confidence: float = 0.0
+    # Pass 26 (rekordbox anchor): frame of the track's first
+    # rekordbox hot cue, when cue data was attached to the track
+    # (see apply_cue_anchor). The user's own cue outranks the
+    # analysed grid phase — see _anchored_offset.
+    anchor_cue: int | None = None
     def grid(self):
         return BeatGrid(self.bpm, self.beat_offset) if self.bpm else None
+
+def apply_cue_anchor(track, cues):
+    """Anchor a track's beat grid to its first rekordbox hot cue.
+
+    `cues` is the rekordbox-style cue list (library.py's
+    import_rekordbox_xml output, carried on set-list entries):
+    dicts with 'start' in seconds and 'num' (-1 = memory cue,
+    0.. = hot cue A, B, C...). The lowest-numbered hot cue wins —
+    Hot Cue A is where DJs mark the first beat. Memory cues and
+    cue-less tracks leave the track unanchored. Returns the
+    anchor frame, or None."""
+    hot = [c for c in (cues or [])
+           if isinstance(c, dict)
+           and isinstance(c.get('num'), int) and c['num'] >= 0
+           and isinstance(c.get('start'), (int, float))
+           and c['start'] >= 0]
+    if not hot:
+        return None
+    first = min(hot, key=lambda c: c['num'])
+    track.anchor_cue = int(round(first['start'] * RATE))
+    return track.anchor_cue
 
 def load_track(path, cache=None):
     cached = cache.get(path) if cache else None
@@ -56,14 +88,38 @@ def load_track(path, cache=None):
     audio = np.nan_to_num(audio)
     peaks = compute_peaks(audio)
     if cached:
-        return Track(str(Path(path).resolve()), audio, peaks, cached['bpm'], cached['confidence'],
-                     cached['beat_offset'] or 0, 0.0, cached['key'], cached['camelot'], cached['key_confidence'] or 0.0)
+        beat_conf = cached.get('beat_confidence')
+        bpm, offset = cached['bpm'], cached['beat_offset'] or 0
+        if beat_conf is None:
+            # Pass 26: a pre-pass-26 cache row has no grid
+            # confidence. Measure the grid once (adopting the
+            # refined BPM when the grid is confident, exactly as
+            # a fresh analysis would) and enrich the row, so
+            # later loads stay instant.
+            offset, beat_conf, refined = estimate_beat_grid(audio, bpm)
+            if beat_conf >= GRID_CONFIDENT and refined:
+                bpm = refined
+            cache.put(path, dict(bpm=bpm, confidence=cached['confidence'],
+                                 beat_offset=offset, key=cached['key'],
+                                 camelot=cached['camelot'],
+                                 key_confidence=cached['key_confidence'],
+                                 beat_confidence=beat_conf))
+        return Track(str(Path(path).resolve()), audio, peaks, bpm, cached['confidence'],
+                     offset, beat_conf or 0.0, cached['key'], cached['camelot'], cached['key_confidence'] or 0.0)
     bpm, confidence = estimate_bpm(audio)
-    offset, beat_conf = estimate_beat_offset(audio, bpm)
+    offset, beat_conf, refined = estimate_beat_grid(audio, bpm)
+    if beat_conf >= GRID_CONFIDENT and refined:
+        # The fold's refined BPM is the better tempo estimate
+        # (the autocorrelation lag alone is up to ~0.3% off);
+        # adopt it as THE track BPM so tempo sync, the dial and
+        # the export all share one number. Only when confident —
+        # a shaky grid must not corrupt a sound coarse BPM.
+        bpm = refined
     key, camelot, key_conf = estimate_key(audio)
     if cache:
         cache.put(path, dict(bpm=bpm, confidence=confidence, beat_offset=offset,
-                             key=key, camelot=camelot, key_confidence=key_conf))
+                             key=key, camelot=camelot, key_confidence=key_conf,
+                             beat_confidence=beat_conf))
     return Track(str(Path(path).resolve()), audio, peaks, bpm, confidence,
                  offset, beat_conf, key, camelot, key_conf)
 
@@ -321,8 +377,52 @@ def _new_deck():
     return dict(track=None, position=0, playing=False, volume=0.8,
                 gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5,
                 cue=0, hotcues={}, loop_start=None, loop_end=None, loop_active=False,
-                quantize=False, rate=1.0, sync=False,
+                quantize=False, rate=1.0, sync=False, sync_mode=None,
                 _lp_low=None, _lp_high=None, _lp_filter=None, _hp_filter=None)
+
+# Pass 26 (REAL SYNC): phase alignment constants. The lock corrects
+# only when the phase error exceeds 0.03 beats (~15 ms at 120 BPM)
+# and always corrects fully, so corrections are rare, small seeks —
+# never a continuous rate wobble. A cue point anchors the grid only
+# when it already sits within 0.15 beats of a grid line: a cue the
+# user placed ON a beat then repairs a slightly-off grid phase,
+# while a cue placed on a vocal or a pickup (far from any beat)
+# is left alone.
+PHASE_LOCK_THRESHOLD_BEATS = 0.03
+CUE_ANCHOR_MAX_SHIFT_BEATS = 0.15
+
+def grid_offset_through(grid, point, max_shift_beats=None):
+    """The grid offset shifted (by at most half a beat) so a beat
+    line passes exactly through `point` (a frame). With
+    max_shift_beats, a point farther than that from every beat
+    line leaves the offset untouched — the gate that keeps an
+    off-beat cue from dragging a good grid away."""
+    beat = grid.beat_frames
+    shift = (point - grid.offset) % beat
+    if shift > beat / 2:
+        shift -= beat
+    if max_shift_beats is not None \
+            and abs(shift) > max_shift_beats * beat:
+        return grid.offset
+    return grid.offset + shift
+
+def _anchored_offset(deck, grid):
+    """The grid offset a deck's phase is judged against, in
+    priority order:
+    1. the track's rekordbox hot-cue anchor (apply_cue_anchor) —
+       the user's own cue, trusted FULLY: the grid is re-phased
+       through it however far the analysis was off;
+    2. the deck's live cue point, but only as a hint — it
+       corrects the phase when it already sits near a grid beat
+       (CUE_ANCHOR_MAX_SHIFT_BEATS);
+    3. the analysed offset itself."""
+    track = deck['track']
+    if track is not None and track.anchor_cue is not None:
+        return grid_offset_through(grid, track.anchor_cue)
+    if deck['cue']:
+        return grid_offset_through(
+            grid, deck['cue'], CUE_ANCHOR_MAX_SHIFT_BEATS)
+    return grid.offset
 
 class Engine:
     def __init__(self):
@@ -338,6 +438,10 @@ class Engine:
         self.overloads = 0
         self.preview = None
         self.master_deck = 0
+        # Pass 26 (SET BPM follow): the set's master tempo. None
+        # until the window anchors it (set list / Deck A BPM);
+        # 'set_bpm' moves scale every deck rate proportionally.
+        self.set_bpm = None
 
     def command(self, action, deck=None, value=None):
         self.commands.put((action, deck, value))
@@ -357,10 +461,104 @@ class Engine:
             frame = d['track'].grid().nearest_beat(frame)
         return int(np.clip(frame, 0, len(d['track'].audio))) if d['track'] else 0
 
+    # -- pass 26: beat-phase sync ------------------------------------
+    @staticmethod
+    def _track_trusted(track):
+        """A track's grid may drive phase alignment when the
+        analysis is confident — OR when the user anchored it
+        with a rekordbox hot cue: the anchor fixes the phase by
+        hand, so the anchored grid is treated as confident even
+        when the estimator was not (the tempo spacing still
+        comes from the analysis BPM)."""
+        return (track is not None and track.grid() is not None
+                and (track.beat_confidence >= GRID_CONFIDENT
+                     or track.anchor_cue is not None))
+
+    def _grids_trusted(self, d, other):
+        """Phase alignment is offered only when BOTH tracks'
+        grids are trusted (see _track_trusted). Anything less —
+        a beatless intro, a drifting live recording — and SYNC
+        stays tempo-only rather than faking an alignment."""
+        return (self._track_trusted(d['track'])
+                and self._track_trusted(other['track']))
+
+    def _phase_shift(self, d, other):
+        """Frames to ADD to d's position so d's beats coincide
+        with the other deck's, in (-beat/2, beat/2] of d's grid.
+        The phases are compared in track-frame space; once the
+        tempo match has equalised the two decks' beat rates the
+        shift stays correct as both play. Caller checks trust."""
+        gs, gm = d['track'].grid(), other['track'].grid()
+        ph_s = ((d['position'] - _anchored_offset(d, gs))
+                / gs.beat_frames) % 1.0
+        ph_m = ((other['position'] - _anchored_offset(other, gm))
+                / gm.beat_frames) % 1.0
+        err = (ph_m - ph_s) % 1.0
+        if err > 0.5:
+            err -= 1.0
+        return err * gs.beat_frames
+
+    def _align_phase(self, index, extra_events):
+        """Shift the deck onto the other deck's beat phase and
+        record the result as an explicit 'sync_align' journal
+        event (absolute position), so performance.py's replay
+        reproduces the aligned performance exactly instead of
+        having to re-derive it. Sets sync_mode: 'phase' when the
+        grids carried it, 'tempo' when SYNC could only match
+        tempo (the UI says so in the status bar)."""
+        d = self.decks[index]
+        other = self.decks[1 - index]
+        if not self._grids_trusted(d, other):
+            d['sync_mode'] = 'tempo' if (
+                d['track'] and other['track']
+                and d['track'].bpm and other['track'].bpm) else None
+            return
+        shift = self._phase_shift(d, other)
+        new_pos = float(np.clip(d['position'] + shift, 0,
+                                len(d['track'].audio)))
+        if new_pos != d['position']:
+            d['position'] = new_pos
+            extra_events.append(('sync_align', index, int(round(new_pos))))
+        d['sync_mode'] = 'phase'
+
+    def _phase_lock(self):
+        """Ongoing drift correction, run once per render block:
+        a synced, playing deck whose phase has drifted past the
+        threshold against the playing other deck is nudged back
+        onto the beat with one small seek (journalled like any
+        other sync_align). Rate ratios never change here, so the
+        lock cannot wobble or fight the tempo match — and a
+        master SET BPM move scales both decks together, leaving
+        the phase error untouched."""
+        if self.preview is not None:
+            return
+        for index, d in enumerate(self.decks):
+            if not (d['sync'] and d['playing']) or d['loop_active']:
+                continue
+            other = self.decks[1 - index]
+            if not other['playing'] or not self._grids_trusted(d, other):
+                continue
+            shift = self._phase_shift(d, other)
+            beat = d['track'].grid().beat_frames
+            if abs(shift) > PHASE_LOCK_THRESHOLD_BEATS * beat:
+                new_pos = float(np.clip(d['position'] + shift, 0,
+                                        len(d['track'].audio)))
+                if new_pos != d['position']:
+                    d['position'] = new_pos
+                    self.events.put(dict(
+                        frame=self.frame, sample_rate=RATE,
+                        action='sync_align', deck=index,
+                        value=int(round(new_pos))))
+
     def _apply(self):
         while not self.commands.empty():
             action, index, value = self.commands.get()
             d = self.decks[index] if index is not None else None
+            # Pass 26: side-effect journal events a handler mints
+            # (sync_align positions, per-deck tempo events of a
+            # master SET BPM move). They are emitted right after
+            # the command's own event, at the same frame, in order.
+            extra_events = []
             if action == 'load':
                 keep = {k: d[k] for k in ('volume','gain','eq_low','eq_mid','eq_high','filter','quantize')}
                 d.update(_new_deck()); d.update(keep)
@@ -371,6 +569,14 @@ class Engine:
                 if d['track'] is not None:
                     if d['position'] >= len(d['track'].audio): d['position'] = 0
                     d['playing'] = bool(value)
+                    if value and d['sync'] and self.decks[1 - index]['playing']:
+                        # Pass 26: a synced deck STARTING against a
+                        # playing master is aligned at this exact
+                        # moment — its beats land on the master's
+                        # current phase (the start-quantize). An
+                        # alignment computed earlier, while the
+                        # deck sat stopped, would have gone stale.
+                        self._align_phase(index, extra_events)
             elif action == 'seek':
                 if d['track'] is not None:
                     d['position'] = self._snap(d, int(np.clip(value, 0, len(d['track'].audio))))
@@ -402,7 +608,39 @@ class Engine:
                 other = self.decks[1 - index]
                 if value and d['track'] and other['track'] and d['track'].bpm and other['track'].bpm:
                     d['rate'] = float(np.clip(other['track'].bpm * other['rate'] / d['track'].bpm, 0.5, 2.0))
-                elif not value: d['rate'] = 1.0
+                    # Pass 26: tempo match PLUS beat-phase align
+                    # (one-shot shift of at most half a beat; the
+                    # render loop's phase lock holds it from
+                    # here). Untrusted grids degrade this to the
+                    # tempo match alone — see _align_phase.
+                    self._align_phase(index, extra_events)
+                elif value:
+                    d['sync_mode'] = None
+                else:
+                    d['rate'] = 1.0
+                    d['sync_mode'] = None
+            elif action == 'set_bpm_anchor':
+                # Pass 26: the window names the set's base tempo
+                # (set list / Deck A). Bookkeeping only — no deck
+                # moves, nothing scales.
+                if value: self.set_bpm = float(value)
+            elif action == 'set_bpm':
+                # Pass 26: a master tempo move (DDJ-RB TEMPO
+                # fader / SET BPM dial). Every deck rate scales
+                # by the same ratio — sync ratios and phase
+                # alignment are preserved — and each deck's new
+                # rate is journalled as an ordinary 'tempo' event
+                # so the replay follows exactly.
+                new = float(value) if value else None
+                old = self.set_bpm
+                if new and old:
+                    ratio = new / old
+                    for j, dd in enumerate(self.decks):
+                        rate = float(np.clip(dd['rate'] * ratio, 0.5, 2.0))
+                        if rate != dd['rate']:
+                            dd['rate'] = rate
+                            extra_events.append(('tempo', j, rate))
+                if new: self.set_bpm = new
             elif action == 'beat_offset':
                 if d['track'] is not None: d['track'].beat_offset = int(value)
             elif action == 'preview':
@@ -421,6 +659,10 @@ class Engine:
                     for x in self.decks: x.update(playing=True, rate=1.0, sync=False, loop_active=False)
             elif action == 'stop_preview': self._restore_preview()
             self.events.put(dict(frame=self.frame, sample_rate=RATE, action=action, deck=index, value=value))
+            for e_action, e_deck, e_value in extra_events:
+                self.events.put(dict(frame=self.frame, sample_rate=RATE,
+                                     action=e_action, deck=e_deck,
+                                     value=e_value))
 
     def _restore_preview(self):
         if self.preview:
@@ -483,6 +725,7 @@ class Engine:
 
     def render(self, frames):
         self._apply()
+        self._phase_lock()
         out = np.zeros((frames, 2), dtype='float32')
         if self.preview:
             x = np.clip((self.preview[0]+np.arange(frames))/max(1,self.preview[1]-1), 0, 1)

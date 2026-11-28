@@ -36,7 +36,14 @@ from engine import RATE
 
 SCAN_INTERVAL = 3.0          # seconds between connection retries
 JOG_FRAMES_PER_TICK = RATE // 200   # 5 ms of track per jog delta unit
-TEMPO_RANGE = 0.08           # TEMPO fader: ±8% around the baseline
+# Pass 26 (user direction 2026-11-28: 「setbpmはスライダーで変えたら
+# 追随してほしい」): the TEMPO faders no longer offset their own
+# deck's rate — they move the master SET BPM, the way the Live
+# Remote Script's v1.7 mapping did: ±6 BPM around the SET BPM
+# captured when the fader leaves its detent, in 0.1 BPM steps,
+# last-moved fader wins, and the detent restores the captured
+# SET BPM exactly.
+TEMPO_BPM_RANGE = 6.0
 DETENT = range(60, 69)       # centre band of the 0..127 fader travel
 
 # The six app pad functions, in the on-screen row's order.
@@ -190,8 +197,12 @@ class MidiController:
         self._last_scan = None
         self._announced = False
         self._led_cache = {}
-        self._tempo_base = [None, None]
-        self._tempo_track = [None, None]
+        # Pass 26: per-fader SET BPM state — the baseline captured
+        # on leaving the detent, and the last value this fader
+        # commanded (an outside move — dial, the other fader —
+        # invalidates the baseline; see _tempo_fader).
+        self._fader_base = [None, None]
+        self._fader_last = [None, None]
 
     # -- connection -------------------------------------------------
     def poll(self, now=None):
@@ -315,28 +326,45 @@ class MidiController:
                 target = min(max(0, target), len(state['track'].audio))
                 engine.command('seek', deck, int(target))
         elif kind == 'tempo':
-            rate = self._tempo_rate(intent[1], intent[2])
-            if rate is not None:
-                engine.command('tempo', intent[1], rate)
+            self._tempo_fader(intent[1], intent[2])
         elif kind == 'monitor':
             window.toggle_monitor(intent[1])
 
-    def _tempo_rate(self, deck, value):
-        """TEMPO fader -> absolute deck rate, or None for no-op.
+    def _tempo_fader(self, deck, value):
+        """TEMPO fader -> master SET BPM, via the window's own
+        set_set_bpm (the same door the SET BPM dial's drag uses,
+        so hardware and mouse moves journal identically).
 
-        The fader is an OFFSET control: the first move away from
-        the detent captures the deck's current rate as the
-        baseline, and travel from centre maps to ±8% around it;
-        returning to the detent band restores the baseline
-        exactly. A track change re-arms the capture."""
-        state = self.window.engine.decks[deck]
-        if state['track'] is not self._tempo_track[deck]:
-            self._tempo_track[deck] = state['track']
-            self._tempo_base[deck] = None
+        The fader is a pickup control around a captured baseline:
+        the first move out of the detent band captures the current
+        SET BPM, travel maps to ±TEMPO_BPM_RANGE around it in
+        0.1 BPM steps, and returning to the detent restores the
+        baseline exactly. Either fader may drive — the last one
+        moved wins. If the SET BPM changed behind this fader's
+        back (the dial, the other fader), its baseline is stale
+        and is re-captured on the next move instead of stomping
+        the newer value on detent return. With no SET BPM source
+        yet (no set list, no Deck A track) the fader is inert."""
+        window = self.window
+        current = window.set_bpm_now
+        if current is None:
+            return
+        last = self._fader_last[deck]
+        if last is not None and abs(current - last) > 0.051:
+            self._fader_base[deck] = None
+            self._fader_last[deck] = None
+            last = None
         if value in DETENT:
-            return self._tempo_base[deck]
-        if self._tempo_base[deck] is None:
-            self._tempo_base[deck] = state['rate']
-        base = self._tempo_base[deck]
+            base = self._fader_base[deck]
+            if base is not None and abs(current - base) > 0.051:
+                window.set_set_bpm(base)
+                self._fader_last[deck] = base
+            return
+        if self._fader_base[deck] is None:
+            self._fader_base[deck] = current
+        base = self._fader_base[deck]
         offset = (value - 64) / 63.0 if value > 64 else (value - 64) / 64.0
-        return base * (1.0 + TEMPO_RANGE * offset)
+        bpm = round((base + TEMPO_BPM_RANGE * offset) * 10) / 10
+        if last is None or abs(bpm - last) > 0.051:
+            window.set_set_bpm(bpm)
+            self._fader_last[deck] = bpm

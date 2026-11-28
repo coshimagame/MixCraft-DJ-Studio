@@ -50,8 +50,9 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea,
     QSizePolicy)
-from engine import (Engine, Journal, RATE,
-                    WAVE_WINDOW_SECONDS, format_mix_clock,
+from engine import (Engine, Journal, RATE, GRID_CONFIDENT,
+                    WAVE_WINDOW_SECONDS, apply_cue_anchor,
+                    format_mix_clock, grid_offset_through,
                     frame_to_x, load_track,
                     mix_timer_auto_start, mix_timer_reset, mix_timer_start,
                     mix_timer_stop, mix_timer_update, new_mix_timer,
@@ -364,6 +365,32 @@ class Waveform(QWidget):
             p.drawLine(x, 0, x, main_h)
         p.setPen(QColor(34, 43, 28, 48))
         p.drawLine(0, int(mid), w, int(mid))
+        # Pass 26: beat grid ticks — thin ink lines at the track's
+        # beat positions (bar starts slightly stronger), drawn
+        # UNDER the peaks so they read as rulings, not data. Only
+        # when the grid is confident: a guessed grid drawn as fact
+        # would be worse than none. The peaks' resolution and
+        # drawing are untouched (the pass-23/24 rule stands).
+        grid = self.track.grid()
+        # A rekordbox-anchored grid draws too, at its anchored
+        # phase — the same offset the engine aligns to.
+        show_grid = grid is not None \
+            and (self.track.beat_confidence >= GRID_CONFIDENT
+                 or self.track.anchor_cue is not None)
+        tick_offset = grid.offset if grid is None else (
+            grid_offset_through(grid, self.track.anchor_cue)
+            if self.track.anchor_cue is not None else grid.offset)
+        if show_grid:
+            beat = grid.beat_frames
+            k_first = math.ceil((start - tick_offset) / beat)
+            k_last = int((end - tick_offset) / beat)
+            for k in range(k_first, k_last + 1):
+                x = int(frame_to_x(tick_offset + k * beat,
+                                   start, end, w))
+                p.setPen(QColor(34, 43, 28,
+                                85 if k % grid.beats_per_bar == 0
+                                else 36))
+                p.drawLine(x, 0, x, main_h)
         # Pass 24 (user report 2026-11-27: 「波形がまだガタガタ」):
         # one 1px line per PIXEL COLUMN, each column carrying the
         # true max of the peak buckets inside it (engine.window_
@@ -407,6 +434,16 @@ class Waveform(QWidget):
         for x in range(min(pos_x, w), w):
             y = max(1, int(ocols[x]*(WAVE_OVERVIEW_HEIGHT/2-2)))
             p.drawLine(x, omid_i-y, x, omid_i+y)
+        if show_grid:
+            # Overview: BAR ticks only — beat ticks would merge
+            # into a solid band at whole-track scale.
+            bar = grid.bar_frames
+            k_first = math.ceil((0 - tick_offset) / bar)
+            k_last = int((total - tick_offset) / bar)
+            p.setPen(QColor(34, 43, 28, 70))
+            for k in range(k_first, k_last + 1):
+                x = int((tick_offset + k * bar) / max(1, total) * w)
+                p.drawLine(x, oy, x, oy + WAVE_OVERVIEW_HEIGHT)
         p.setPen(QPen(QColor(COLOR_LCD_INK), 2))
         p.drawLine(pos_x, oy, pos_x, oy + WAVE_OVERVIEW_HEIGHT)
     def mousePressEvent(self, event):
@@ -417,10 +454,9 @@ class Waveform(QWidget):
                                          self.position, len(self.track.audio)))
 
 class JogDial(QWidget):
-    """Display-only circular BPM dial echoing the rekordbox jog ring:
-    grey ring, thin blue inner line, red position marker, huge BPM in
-    the centre with the pitch % and range under it. It shows state
-    only — MixCraft has no jog control, so it takes no input.
+    """Circular BPM dial echoing the rekordbox jog ring: grey ring,
+    thin blue inner line, red position marker, huge BPM in the
+    centre with the pitch % and range under it.
 
     Pass 5 (user direction, 2026-11-26): both decks run at the set
     BPM, so there is ONE dial, in the centre mixer column, showing
@@ -430,16 +466,44 @@ class JogDial(QWidget):
 
     Pass 18 audit: the dial does NOT share the Knob's clipping —
     its painting is inset 5px from the widget edge while its
-    widest pen overhang is ~1px, so the ring clears every edge."""
+    widest pen overhang is ~1px, so the ring clears every edge.
+
+    Pass 26: the SET BPM dial takes input — drag vertically or
+    scroll to move the set tempo, reported through on_change (the
+    window clamps and quantizes). With on_change unset the dial
+    stays display-only, as before."""
+    DRAG_BPM_PER_PX = 0.05     # 20 px of drag per BPM
     def __init__(self, caption=None, size=118):
         super().__init__()
         self.bpm = None
         self.fraction = 0.0
         self.caption = caption
+        self.on_change = None
+        self._drag = None      # (start_y, start_bpm) while dragging
         self.setFixedSize(size, size)
     def set_bpm(self, bpm):
         self.bpm = bpm
         self.update()
+    def mousePressEvent(self, event):
+        if self.on_change is not None and self.bpm:
+            self._drag = (event.position().y(), self.bpm)
+            event.accept()
+    def mouseMoveEvent(self, event):
+        if self._drag is not None:
+            start_y, start_bpm = self._drag
+            self.on_change(start_bpm
+                           + (start_y - event.position().y())
+                           * self.DRAG_BPM_PER_PX)
+            event.accept()
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+    def wheelEvent(self, event):
+        if self.on_change is not None and self.bpm:
+            steps = event.angleDelta().y() / 120.0
+            if steps:
+                steps = int(steps) or (1 if steps > 0 else -1)
+                self.on_change(self.bpm + 0.1 * steps)
+                event.accept()
     def set_caption(self, caption):
         """Language registry hook (pass 10): the painted caption
         ('SET BPM' / 'セットBPM') is redrawn in the new language."""
@@ -1305,7 +1369,7 @@ class Deck(QFrame):
         quant.toggled.connect(lambda on, i=index: window.engine.command('quantize', i, on))
         sync = QPushButton('SYNC'); sync.setCheckable(True)
         self.sync = sync
-        sync.setToolTip('Tempo match only / テンポのみ一致。音程も変わります。ビート位相同期なし。')
+        sync.setToolTip('Tempo + beat-phase sync / テンポ＋拍位相同期（グリッドが確かな時）。音程も変わります。')
         sync.toggled.connect(lambda on, i=index: window.engine.command('sync', i, on))
         pads_row = QHBoxLayout()
         pads_row.setSpacing(5)
@@ -1421,6 +1485,14 @@ class Window(QMainWindow):
             self.move(avail.left() + (avail.width() - fit_w) // 2,
                       avail.top() + (avail.height() - fit_h) // 2)
         self.engine = Engine()
+        # Pass 26: SET BPM follow state — the base the set runs at
+        # (set list's SET BPM, else Deck A's track BPM) and the
+        # current value, which a TEMPO fader / dial move may have
+        # shifted within ±6 BPM of the base. The dial displays
+        # set_bpm_now; refresh_set_bpm_dial owns the base.
+        self._set_bpm_base = None
+        self.set_bpm_now = None
+        self._sync_mode_seen = [None, None]
         self.stream = None
         self.audio_status_count = 0
         self.callback_count = 0
@@ -1551,6 +1623,10 @@ class Window(QMainWindow):
         self.set_bpm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bpm_lay.addWidget(self.set_bpm_label)
         self.set_dial = JogDial(caption='SET BPM', size=148)
+        # Pass 26: the dial is a control now — dragging/scrolling
+        # it moves the SET BPM through the same set_set_bpm door
+        # the DDJ-RB TEMPO faders use.
+        self.set_dial.on_change = self.set_set_bpm
         bpm_lay.addWidget(self.set_dial, 0, Qt.AlignmentFlag.AlignCenter)
         # The level meter (MeterLamp keeps the QProgressBar contract
         # tick() already used — setRange / setValue / setToolTip).
@@ -1868,6 +1944,7 @@ class Window(QMainWindow):
             self._reg(deck.sync.setToolTip, 'sync_tip')
         self._reg(self.set_bpm_label.setText, 'set_bpm')
         self._reg(self.set_dial.set_caption, 'set_bpm')
+        self._reg(self.set_dial.setToolTip, 'set_bpm_tip')
         self._reg(self.level_label.setText, 'level')
         self._reg(self.utility_bar.setToolTip, 'audition_tip')
         self._reg(self.audition_label.setText, 'audition_length')
@@ -2220,6 +2297,18 @@ class Window(QMainWindow):
             deck.name.setText(i18n.tr('load_failed', self.lang))
             QMessageBox.warning(self,'Audio load',error)
             return
+        # Pass 26 (rekordbox anchor): if the current set list
+        # carries rekordbox cues for this file, the first hot cue
+        # anchors the track's beat grid (the user's cue outranks
+        # the analysed phase — see engine.apply_cue_anchor).
+        for entry in self.clip_tracks:
+            cues = entry.get('cues')
+            path = entry.get('path')
+            if cues and path and os.path.normcase(
+                    str(Path(path).resolve())) == os.path.normcase(
+                        track.path):
+                apply_cue_anchor(track, cues)
+                break
         self.engine.command('stop_preview')
         self.engine.command('load',index,track)
         deck.wave.track = track
@@ -2475,12 +2564,44 @@ class Window(QMainWindow):
         """Feed the centre SET BPM dial: the loaded set list's set
         BPM wins (the set runs at that fixed tempo); without a set
         list, fall back to Deck A's track BPM; with neither, the
-        dial shows its neutral placeholder."""
+        dial shows its neutral placeholder.
+
+        Pass 26: that value is the set's BASE tempo. When the
+        base changes (a new set list, a new Deck A), any tempo
+        move is reset, the engine is re-anchored, and the dial
+        shows the base; while the base stands, the dial shows
+        set_bpm_now — the base as moved by the TEMPO faders /
+        dial drag (see set_set_bpm)."""
         bpm = None
         if self.setlist_data is not None:
             bpm = display_summary(self.setlist_data)['set_bpm']
         if bpm is None:
             bpm = self.deck_a_bpm
+        if bpm != self._set_bpm_base:
+            self._set_bpm_base = bpm
+            self.set_bpm_now = bpm
+            if bpm:
+                self.engine.command('set_bpm_anchor', None, bpm)
+        self.set_dial.set_bpm(self.set_bpm_now)
+
+    def set_set_bpm(self, bpm):
+        """A master tempo move — the one door used by the SET
+        BPM dial's drag/scroll and by the DDJ-RB TEMPO faders
+        (via the MIDI controller), so both journal identically.
+        Quantized to 0.1 BPM and clamped to the base ±6 BPM
+        (the Live Remote Script v1.7 rule); the engine scales
+        every deck rate to follow. With no base tempo there is
+        nothing to move."""
+        if bpm is None or self._set_bpm_base is None:
+            return
+        bpm = round(float(bpm) * 10) / 10
+        bpm = min(max(bpm, self._set_bpm_base - 6.0),
+                  self._set_bpm_base + 6.0)
+        if self.set_bpm_now is not None \
+                and abs(bpm - self.set_bpm_now) < 0.051:
+            return
+        self.set_bpm_now = bpm
+        self.engine.command('set_bpm', None, bpm)
         self.set_dial.set_bpm(bpm)
     def standby_deck(self):
         """The deck a set-list double-click loads onto (pass 24):
@@ -2766,6 +2887,17 @@ class Window(QMainWindow):
                 widget.clock.setText(f'-{clock(remaining)}  {clock(elapsed)}')
             else:
                 widget.clock.setText(clock(elapsed))
+        # Pass 26: when a SYNC engagement lands as tempo-only (a
+        # beat grid was not confident), the status bar says so —
+        # once per engagement, on the transition, not every tick.
+        for i, d in enumerate(self.engine.decks):
+            mode = d.get('sync_mode')
+            if mode != self._sync_mode_seen[i]:
+                if d['sync'] and mode == 'tempo':
+                    self._status_fn = lambda lang: \
+                        i18n.tr('sync_tempo_only', lang)
+                    self._apply_status()
+                self._sync_mode_seen[i] = mode
         # Pass 8: drive the mix timer off this same tick — auto-start
         # on the first deck play (audition playback counts), then
         # accumulate from monotonic deltas and refresh the readouts.

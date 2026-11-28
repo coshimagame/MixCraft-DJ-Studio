@@ -38,31 +38,116 @@ class BeatGrid:
     def nudge(self, frames): self.offset = int(self.offset + frames); return self.offset
     def to_dict(self): return asdict(self)
 
-def estimate_beat_offset(audio, bpm):
-    """First strong onset at/after 0, searched in the first two bars.
+# Pass 26 (REAL SYNC): the beat grid's trust threshold. At or above
+# this confidence the grid may drive phase alignment (engine SYNC)
+# and the refined BPM may replace the coarse autocorrelation BPM.
+# Below it the honest behaviour is tempo-only sync — never fake an
+# alignment the analysis cannot support.
+GRID_CONFIDENT = 0.5
 
-    This is a downbeat *candidate*, not a meter detector: house/techno
-    tracks that start on the kick are usually right, anything else needs
-    the manual nudge in the UI.  Returns (offset_frames, confidence).
+_GRID_SECONDS = 60        # analysis window for the grid fold
+_GRID_BINS = 64           # phase resolution of the folded profile
+_ONSET_HOP = 120          # 2.5 ms envelope step (400 Hz)
+_ONSET_WIN = 240          # 5 ms RMS window behind each step
+
+def _onset_envelope(audio, seconds=_GRID_SECONDS):
+    """Positive energy-flux envelope at 400 Hz: a 5 ms RMS
+    window stepped every 2.5 ms (cumulative-sum squares, so the
+    overlap costs nothing). The fine step is what lets the fold
+    locate a beat to a few ms — at the 100 Hz envelope
+    estimate_bpm uses, the flux peak's block lag alone cost
+    ~15 ms of grid error. None when too little audio to fold."""
+    mono = audio[:int(RATE*seconds)].mean(axis=1).astype(np.float64)
+    if len(mono) < _ONSET_WIN + 64*_ONSET_HOP: return None
+    cs = np.concatenate([[0.0], np.cumsum(mono*mono)])
+    starts = np.arange(0, len(mono) - _ONSET_WIN + 1, _ONSET_HOP)
+    energy = np.sqrt((cs[starts + _ONSET_WIN] - cs[starts])/_ONSET_WIN)
+    return np.maximum(0, np.diff(energy))
+
+def _fold_profile(onset, period_hops, bins=_GRID_BINS):
+    """Sum the onset envelope into one beat's worth of phase bins:
+    bin b accumulates every onset whose time falls at phase
+    b/bins of a beat. A steady beat piles its energy into a few
+    bins; drifting or absent beats smear it across all of them."""
+    idx = np.arange(len(onset))
+    phase = (idx % period_hops) / period_hops
+    b = np.minimum((phase*bins).astype(np.int64), bins-1)
+    return np.bincount(b, weights=onset, minlength=bins)
+
+def _profile_peak(profile):
+    """(phase_in_beats, sharpness) of a folded profile. The peak
+    bin is refined by parabolic interpolation (sub-bin phase);
+    sharpness is 1 - mean/max: ~1 when all the energy sits on one
+    phase, ~0 when the profile is flat."""
+    peak = int(np.argmax(profile))
+    top = float(profile[peak])
+    if top <= 0: return 0.0, 0.0
+    prev = float(profile[(peak-1) % len(profile)])
+    nxt = float(profile[(peak+1) % len(profile)])
+    denom = prev - 2*top + nxt
+    delta = 0.5*(prev-nxt)/denom if denom else 0.0
+    phase = ((peak + float(np.clip(delta, -0.5, 0.5))) / len(profile)) % 1.0
+    sharp = 1.0 - float(profile.mean())/top
+    return phase, float(np.clip(sharp, 0, 1))
+
+def estimate_beat_grid(audio, bpm):
+    """Beat grid v2 (pass 26): (offset_frames, confidence, refined_bpm).
+
+    Method: fold the onset envelope modulo the beat period. The
+    coarse BPM (estimate_bpm's autocorrelation lag is quantised to
+    10 ms, up to ~0.3% off — enough to drift a quarter beat over a
+    minute) is first refined by searching ±1.5% for the period
+    whose fold piles the most onset energy onto one phase. The
+    phase of that pile is the grid offset.
+
+    Confidence = fold sharpness x segment consistency. The window
+    is folded again in three segments; if the segment phases
+    disagree by more than a fifth of a beat the tempo is drifting
+    (live recordings, rips) and confidence collapses — the engine
+    then falls back to tempo-only SYNC instead of aligning to a
+    grid that does not stay put.
     """
-    if not bpm: return 0, 0.0
-    mono = audio[:int(RATE*8)].mean(axis=1)
-    hop = 480
-    count = len(mono)//hop
-    if count < 16: return 0, 0.0
-    energy = np.sqrt(np.mean(mono[:count*hop].reshape(count, hop)**2, axis=1))
-    onset = np.maximum(0, np.diff(energy))
-    beat_hops = (RATE*60.0/bpm)/hop
-    window = max(1, int(min(len(onset), beat_hops*8)))
-    seg = onset[:window]
-    if seg.max() < 1e-5: return 0, 0.0
-    # prefer an onset that repeats one beat later (a real downbeat repeats)
-    scores = seg.copy()
-    step = int(round(beat_hops))
-    if step and len(seg) > step: scores[:len(seg)-step] += 0.5*seg[step:]
-    idx = int(np.argmax(scores))
-    conf = float(np.clip(scores[idx]/(np.mean(seg)+1e-9)/8, 0, 1))
-    return int(idx*hop), conf
+    if not bpm: return 0, 0.0, bpm
+    onset = _onset_envelope(audio)
+    if onset is None or float(onset.max()) < 1e-5: return 0, 0.0, bpm
+    coarse_period = 60.0*(RATE/_ONSET_HOP)/bpm   # beat period in hops
+    if len(onset) < 4*coarse_period: return 0, 0.0, bpm
+    best = None
+    for scale in np.linspace(0.985, 1.015, 61):
+        period = coarse_period/scale
+        profile = _fold_profile(onset, period)
+        top = float(profile.max())
+        if best is None or top > best[0]:
+            best = (top, bpm*scale, profile)
+    _, refined_bpm, profile = best
+    period = 60.0*(RATE/_ONSET_HOP)/refined_bpm
+    phase, sharp = _profile_peak(profile)
+    # Segment consistency: fold thirds separately at the refined
+    # period and compare their phases against the global one.
+    consistency = 1.0
+    seg_len = len(onset)//3
+    if seg_len >= 12*period:
+        worst = 0.0
+        for s in range(3):
+            seg = onset[s*seg_len:(s+1)*seg_len] if s < 2 else onset[2*seg_len:]
+            seg_phase, _ = _profile_peak(_fold_profile(seg, period))
+            # The segment's fold is relative to its own start;
+            # shift it back by the start's beat count so the phase
+            # is comparable to the global one.
+            seg_phase = (seg_phase + (s*seg_len)/period) % 1.0
+            dev = abs((seg_phase - phase + 0.5) % 1.0 - 0.5)
+            worst = max(worst, dev)
+        consistency = float(np.clip(1.0 - worst/0.20, 0, 1))
+    confidence = float(np.clip(sharp*consistency, 0, 1))
+    beat_frames = RATE*60.0/refined_bpm
+    offset = int(round(phase*beat_frames)) % max(1, int(round(beat_frames)))
+    return offset, confidence, float(refined_bpm)
+
+def estimate_beat_offset(audio, bpm):
+    """(offset_frames, confidence) — the pass-26 grid estimator
+    without its refined BPM. Kept for the original call sites."""
+    offset, confidence, _ = estimate_beat_grid(audio, bpm)
+    return offset, confidence
 
 def estimate_key(audio):
     """Chroma + Krumhansl profile correlation. Returns (key, camelot, conf)."""
@@ -116,16 +201,24 @@ class AnalysisCache:
         self.db.execute("""CREATE TABLE IF NOT EXISTS analysis(
             path TEXT PRIMARY KEY, fingerprint TEXT, bpm REAL, confidence REAL,
             beat_offset INTEGER, key_name TEXT, camelot TEXT, key_confidence REAL)""")
+        # Pass 26: the grid confidence is cached too — SYNC's
+        # phase alignment trusts the grid only when it is stored.
+        # Rows written before pass 26 have NULL here; load_track
+        # treats that as "measure the grid once and enrich".
+        columns = [r[1] for r in self.db.execute("PRAGMA table_info(analysis)")]
+        if 'beat_confidence' not in columns:
+            self.db.execute("ALTER TABLE analysis ADD COLUMN beat_confidence REAL")
         self.db.commit()
     def get(self, path):
         fp = fingerprint(path)
-        row = self.db.execute("SELECT bpm,confidence,beat_offset,key_name,camelot,key_confidence FROM analysis WHERE path=? AND fingerprint=?",
+        row = self.db.execute("SELECT bpm,confidence,beat_offset,key_name,camelot,key_confidence,beat_confidence FROM analysis WHERE path=? AND fingerprint=?",
                               (str(Path(path).resolve()), fp)).fetchone()
         if not row: return None
-        return dict(bpm=row[0], confidence=row[1], beat_offset=row[2], key=row[3], camelot=row[4], key_confidence=row[5])
+        return dict(bpm=row[0], confidence=row[1], beat_offset=row[2], key=row[3], camelot=row[4], key_confidence=row[5], beat_confidence=row[6])
     def put(self, path, result):
-        self.db.execute("INSERT OR REPLACE INTO analysis VALUES (?,?,?,?,?,?,?,?)",
+        self.db.execute("INSERT OR REPLACE INTO analysis VALUES (?,?,?,?,?,?,?,?,?)",
                         (str(Path(path).resolve()), fingerprint(path), result.get('bpm'), result.get('confidence'),
-                         result.get('beat_offset'), result.get('key'), result.get('camelot'), result.get('key_confidence')))
+                         result.get('beat_offset'), result.get('key'), result.get('camelot'), result.get('key_confidence'),
+                         result.get('beat_confidence')))
         self.db.commit()
     def close(self): self.db.close()
