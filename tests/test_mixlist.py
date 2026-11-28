@@ -1,11 +1,16 @@
 """mixlist: performed .als -> pasted-ready tracklist (stdlib only).
 
-The fixture is a synthetic performed set in the same shape as
-test_als_writer's base (gzip XML; AudioTrack/DeviceChain/MainSequencer
-with a ClipSlotList for Session clips and ClipTimeable/ArrangerAutomation/
-Events for the Arrangement), with clips at known beat positions at a
-known tempo (120 BPM, so 1 beat = 0.5 s). Nothing here proves a real
-Live-recorded set parses; that stays a real-machine check (MIXLIST.md).
+The fixtures are synthetic performed sets (gzip XML) with clips at
+known beat positions at a known tempo (120 BPM, so 1 beat = 0.5 s).
+Most use the legacy ClipTimeable/ArrangerAutomation/Events placement
+(the container pre-pass-27 MixAble exports wrote); the container
+section at the bottom rebuilds the same sets in the real Live 10
+placement (MainSequencer/Sample/ArrangerAutomation/Events, audited
+2026-11-28 against a real-format generated set and the user's real
+exported file) and pins the Sample-over-ClipTimeable preference and
+the FreezeSequencer exclusion. Nothing here proves a set recorded
+and saved by Live 10 itself parses; that stays a real-machine check
+(MIXLIST.md).
 """
 import gzip
 
@@ -242,3 +247,133 @@ def test_cli_stdout_and_out_file(tmp_path, capsys):
     written = target.read_text(encoding="utf-8")
     assert written.splitlines()[1] == "1. 00:00 First — Alpha"
     assert written.splitlines()[0].startswith("# Mixlist — ")
+
+
+# ---------------------------------------------------------------------------
+# Container audit (2026-11-28): the real Live 10 placement is
+# MainSequencer/Sample/ArrangerAutomation/Events. ClipTimeable is the
+# MIDI container that pre-pass-27 MixAble exports used by mistake
+# (Live ignores it there); the reader prefers Sample per track and
+# falls back to ClipTimeable, and never reads the FreezeSequencer
+# mirror.
+# ---------------------------------------------------------------------------
+
+def _track_real(track_id, name, session_clips, arrangement_clips,
+                legacy_clips=(), freeze_clips=()):
+    """A track in the real Live 10 shape: Arrangement under Sample,
+    optional legacy clips under ClipTimeable, optional freeze mirror
+    under DeviceChain/FreezeSequencer/Sample."""
+    xml = (
+        f'<AudioTrack Id="{track_id}"><Name>'
+        f'<EffectiveName Value="{name}"/><UserName Value="{name}"/>'
+        f'<Annotation Value=""/></Name>'
+        '<DeviceChain><MainSequencer><ClipSlotList>'
+        + "".join(_slot(c) for c in session_clips) +
+        '</ClipSlotList><Sample><ArrangerAutomation><Events>'
+        + "".join(arrangement_clips) +
+        '</Events></ArrangerAutomation></Sample>')
+    if legacy_clips:
+        xml += ('<ClipTimeable><ArrangerAutomation><Events>'
+                + "".join(legacy_clips) +
+                '</Events></ArrangerAutomation></ClipTimeable>')
+    xml += '</MainSequencer>'
+    if freeze_clips:
+        xml += ('<FreezeSequencer><Sample><ArrangerAutomation><Events>'
+                + "".join(freeze_clips) +
+                '</Events></ArrangerAutomation></Sample></FreezeSequencer>')
+    xml += '<DeviceChain><Devices/></DeviceChain></DeviceChain></AudioTrack>'
+    return xml
+
+
+def _performed_xml_real(deck_a, deck_b, tempo=120):
+    """Deck dicts: session / arrangement (Sample) plus optional
+    legacy (ClipTimeable) and freeze (FreezeSequencer mirror)."""
+    tracks = (
+        _track_real(10, "Deck A", deck_a["session"], deck_a["arrangement"],
+                    deck_a.get("legacy", ()), deck_a.get("freeze", ()))
+        + _track_real(11, "Deck B", deck_b["session"], deck_b["arrangement"],
+                      deck_b.get("legacy", ()), deck_b.get("freeze", ())))
+    master = ""
+    if tempo is not None:
+        master = ('<MasterTrack><DeviceChain><DeviceChain><Mixer>'
+                  f'<Tempo><Manual Value="{tempo}"/></Tempo>'
+                  '</Mixer></DeviceChain></DeviceChain></MasterTrack>')
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<Ableton MajorVersion="5" MinorVersion="10.0_377" '
+            'SchemaChangeCount="3" Creator="Ableton Live 10.1.43" Revision="">'
+            '<LiveSet><NextPointeeId Value="900"/><Tracks>'
+            + tracks + '</Tracks>' + master +
+            '</LiveSet></Ableton>')
+
+
+def _write_set_real(tmp_path, deck_a, deck_b, tempo=120,
+                    name="performed_real.als"):
+    path = tmp_path / name
+    path.write_bytes(gzip.compress(
+        _performed_xml_real(deck_a, deck_b, tempo).encode("utf-8")))
+    return path
+
+
+def _main_set_real(tmp_path):
+    """The main scenario rebuilt in the real (Sample) container."""
+    alpha = "C:\\music\\Alpha - First.wav"
+    beta = "C:\\music\\Beta - Second.wav"
+    gamma = "C:\\music\\Gamma - Third.wav"
+    deck_a = {
+        "session": [_clip_xml(90, 0, "Session Only - Nobody",
+                              "C:\\music\\Nobody - Session.wav")],
+        "arrangement": [
+            _clip_xml(1, 0, "First - Alpha", alpha, 0, 480),
+            _clip_xml(2, 800, "Third - Gamma", gamma, 0, 400),
+        ],
+    }
+    deck_b = {
+        "session": [],
+        "arrangement": [
+            _clip_xml(3, 400, "Second - Beta", beta, 0, 400),
+            _clip_xml(4, 440, "Second – Hot Cue B", beta, 32, 400),
+            _clip_xml(5, 1200, "First - Alpha", alpha, 0, 480),
+        ],
+    }
+    return _write_set_real(tmp_path, deck_a, deck_b)
+
+
+def test_real_sample_container_gives_same_tracklist(tmp_path):
+    path = _main_set_real(tmp_path)
+    text = mixlist.mixlist_from_als(path, date_str="2026-11-27")
+    assert text == (
+        "# Mixlist — 2026-11-27 / Total 14:00 / 120 BPM\n"
+        "1. 00:00 First — Alpha\n"
+        "2. 03:20 Second — Beta\n"
+        "3. 06:40 Third — Gamma\n"
+        "4. 10:00 First — Alpha\n")
+    assert "Session Only" not in text
+
+
+def test_sample_preferred_over_legacy_cliptimeable(tmp_path):
+    deck_a = {
+        "session": [],
+        "arrangement": [
+            _clip_xml(1, 0, "First - Alpha", "C:\\music\\Alpha - First.wav",
+                      0, 480)],
+        "legacy": [
+            _clip_xml(2, 0, "Ghost - Legacy", "C:\\music\\Legacy - Ghost.wav",
+                      0, 480)],
+    }
+    path = _write_set_real(tmp_path, deck_a, _empty_decks())
+    text = mixlist.mixlist_from_als(path, date_str="2026-11-27")
+    assert text.splitlines()[1:] == ["1. 00:00 First — Alpha"]
+    assert "Ghost" not in text
+
+
+def test_freeze_sequencer_mirror_is_not_counted(tmp_path):
+    clips = [_clip_xml(1, 0, "First - Alpha",
+                       "C:\\music\\Alpha - First.wav", 0, 480)]
+    deck_a = {"session": [], "arrangement": clips, "freeze": clips}
+    path = _write_set_real(tmp_path, deck_a, _empty_decks())
+    import als_writer
+    root = als_writer.load_als(path).getroot()
+    found = mixlist.arrangement_clips(root)
+    assert len(found) == 1
+    text = mixlist.mixlist_from_als(path, date_str="2026-11-27")
+    assert text.splitlines()[1:] == ["1. 00:00 First — Alpha"]

@@ -11,11 +11,16 @@ DDJ-RB の BROWSE ノブで曲順を変えても成立する (ユーザー判断
   - パースは als_writer.load_als (gzip / 非圧縮 XML 両対応)。
   - デッキは als_writer と同じ前提: 最初の 2 本の AudioTrack が
     Deck A / Deck B。
-  - Arrangement のクリップは MainSequencer 内の ArrangerAutomation 配下の
-    AudioClip (公開資料 fileformats.org の ALS 形式ドキュメントでも
-    Arrangement クリップは ClipTimeable/ArrangerAutomation/Events と
-    されている)。Session のクリップは ClipSlotList の中にあるので、
-    ArrangerAutomation の外の AudioClip は数えない。
+  - Arrangement のクリップの在処 (2026-11-28、ユーザーの実ファイルと
+    pass 27 の確定形式で監査済み): 本物の Live 10 では AudioTrack の
+    DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events の
+    AudioClip。ClipTimeable は MIDI トラック用の入れ物で、pass 27
+    以前の MixAble 書き出し (perf_als) が誤ってそちらに書いていた
+    (Live は無視する)。読み取りは MainSequencer の中だけを探し、
+    トラックごとに Sample を優先、そこにクリップが無ければ
+    ClipTimeable にフォールバックする (旧書き出しの救済)。
+    FreezeSequencer 配下はフリーズ時の鏡像なので読まない。
+    Session のクリップは ClipSlotList の中にあるので数えない。
   - クリップの開始位置は AudioClip の Time 属性 (拍)、長さは
     CurrentEnd - CurrentStart (拍)。テンポは als_writer._set_tempo が
     書く場所 (MasterTrack / MainTrack の Tempo/Manual) から読む。
@@ -38,10 +43,13 @@ DDJ-RB の BROWSE ノブで曲順を変えても成立する (ユーザー判断
 使い方 (CLI):
     python mixlist.py SET.als [--out tracklist.txt]
 
-検証範囲: tests/test_mixlist.py で、als_writer のテストと同じ流儀の
-合成 fixture (Arrangement に既知の拍位置でクリップを置いたもの) に対して
-抽出・マージ・時刻換算・整形を検証する。本物の Live 10 が録音した
-.als で読めるかは実機確認が別途必要 (MIXLIST.md 参照)。
+検証範囲: tests/test_mixlist.py で、合成 fixture (Arrangement に既知の
+拍位置でクリップを置いたもの) に対して抽出・マージ・時刻換算・整形を
+検証する。入れ物については 2026-11-28 の監査で、本物の形式
+(Sample 配下) で生成した演奏 .als と、ユーザーの実書き出しファイル
+(ClipTimeable 配下) の両方から同じ読み取り結果になることを確認し、
+fixture でも両形式・優先規則・フリーズ鏡像を固定した。Live 10 自身が
+録音して保存したセットでの実機確認は別途必要 (MIXLIST.md 参照)。
 """
 from __future__ import annotations
 
@@ -98,6 +106,33 @@ def _file_display_name(file_ref_text):
     return re.split(r"[\\/]", file_ref_text.strip())[-1]
 
 
+def _track_arrangement_clip_elements(track) -> list:
+    """1 トラック分の Arrangement の AudioClip 要素を返す。
+
+    探すのは MainSequencer の中だけ (FreezeSequencer 配下はフリーズ時の
+    鏡像で、同じクリップが二重に数えられるため読まない)。本物の入れ物
+    Sample を優先し、そこにクリップが無ければ、pass 27 以前の MixAble
+    書き出しが使っていた ClipTimeable にフォールバックする。
+    MainSequencer の骨格自体が無い相手にはトラック全体から拾う。
+    """
+    sequencer = track.find("./DeviceChain/MainSequencer")
+    if sequencer is None:
+        found = []
+        for automation in track.iter("ArrangerAutomation"):
+            found.extend(automation.iter("AudioClip"))
+        return found
+    for holder_name in ("Sample", "ClipTimeable"):
+        holder = sequencer.find(holder_name)
+        if holder is None:
+            continue
+        found = []
+        for automation in holder.iter("ArrangerAutomation"):
+            found.extend(automation.iter("AudioClip"))
+        if found:
+            return found
+    return []
+
+
 def arrangement_clips(root) -> list:
     """Deck A / B の Arrangement クリップを時間順に返す。
 
@@ -110,18 +145,17 @@ def arrangement_clips(root) -> list:
             f"AudioTrack が {len(tracks)} 本しかありません (Deck A / B の 2 本が必要)")
     clips = []
     for deck, track in zip(("A", "B"), tracks[:2]):
-        for automation in track.iter("ArrangerAutomation"):
-            for clip in automation.iter("AudioClip"):
-                start = _float(clip.get("Time"), 0.0)
-                cur_start = _float(als_writer._get_value(clip, "CurrentStart"), 0.0)
-                cur_end = _float(als_writer._get_value(clip, "CurrentEnd"), 0.0)
-                clips.append({
-                    "deck": deck,
-                    "start_beats": start,
-                    "end_beats": start + max(cur_end - cur_start, 0.0),
-                    "name": als_writer._get_value(clip, "Name", "") or "",
-                    "file": _clip_file(clip),
-                })
+        for clip in _track_arrangement_clip_elements(track):
+            start = _float(clip.get("Time"), 0.0)
+            cur_start = _float(als_writer._get_value(clip, "CurrentStart"), 0.0)
+            cur_end = _float(als_writer._get_value(clip, "CurrentEnd"), 0.0)
+            clips.append({
+                "deck": deck,
+                "start_beats": start,
+                "end_beats": start + max(cur_end - cur_start, 0.0),
+                "name": als_writer._get_value(clip, "Name", "") or "",
+                "file": _clip_file(clip),
+            })
     clips.sort(key=lambda c: (c["start_beats"], c["deck"]))
     return clips
 

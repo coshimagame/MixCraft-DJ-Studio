@@ -61,3 +61,10 @@ Total は最後のクリップの終わりまで、時刻はセットのテン�
 - 合成 fixture での検証は tests/test_mixlist.py で済んでいるが、
   本物の Live 10 が録音した .als で読めるかは実機確認が別途必要
   (als_writer と同じ立場)。
+- 入れ物の監査 (2026-11-28): 本物の Live 10 では Arrangement クリップは
+  MainSequencer/Sample/ArrangerAutomation 配下 (ClipTimeable は MIDI
+  用で、pass 27 以前の MixAble 書き出しが誤用していた)。読み取りは
+  Sample を優先し、空なら ClipTimeable にフォールバックする。
+  本物の形式で生成した演奏 .als とユーザーの実書き出しファイルで、
+  両方の入れ物から同じ結果が読めることを確認済み。
+  FreezeSequencer の鏡像は数えない。
