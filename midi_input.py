@@ -28,6 +28,20 @@ BROWSE turn/push (the app's set list is display-only), the LOAD
 buttons, the RB's own SYNC buttons (SYNC lives on pad 6), the
 loop in/out buttons (the surface has no loop controls since
 pass 5), and pads 7-8.
+
+Pass 32 (user direction 2026-11-28 — rekordbox's browser
+semantics: 「BROWSEでミックスリストの曲選んで左右のロードで
+デッキに乗せる、それはrekordboxと同じ仕様にしてほしい」):
+BROWSE turn and the LOAD buttons are assigned now. The knob
+(CC 64 on the browser channel) walks a selection cursor in
+the set list — difference-count encoding, decoded exactly
+like the Remote Script's browse (v1.6): CW 0x01-0x1E is
++1..+30 detents, CCW 0x7F-0x62 is -1..-30. LOAD 1 / LOAD 2
+(notes 70 / 71) load the cursor row onto deck A / deck B
+through the same door as a double-click. BROWSE PUSH
+(note 65) stays unassigned — the app has no honest use for
+it yet, and inventing one would violate the same rule v1
+followed.
 """
 import time
 from collections import deque
@@ -80,8 +94,19 @@ def translate(kind, channel, number, value):
             return ('monitor', channel)
         if channel in (7, 8) and 0 <= number < len(PAD_ACTIONS):
             return ('pad', channel - 7, number + 1)
+        # Pass 32: LOAD 1 / LOAD 2 (browser channel, notes
+        # 70 / 71 — midi_map.DDJ_RB's ('load', deck)).
+        if channel == 6 and number in (70, 71):
+            return ('load_row', number - 70)
         return None
     if kind == 'cc':
+        # Pass 32: BROWSE turn (browser channel, CC 64) —
+        # difference-count, decoded like the Remote Script's
+        # browse: below 64 the value IS the CW detent count,
+        # above it the value minus 128 is the CCW count.
+        if channel == 6 and number == 64:
+            delta = value if value < 64 else value - 128
+            return ('browse', delta) if delta else None
         if channel in (0, 1):
             if number == 19:
                 return ('volume', channel, value)
@@ -353,6 +378,14 @@ class MidiController:
             self._tempo_fader(intent[1], intent[2])
         elif kind == 'monitor':
             window.toggle_monitor(intent[1])
+        elif kind == 'browse':
+            # Pass 32: the knob walks the set-list cursor;
+            # the window clamps and repaints.
+            window.move_setlist_cursor(intent[1])
+        elif kind == 'load_row':
+            # Pass 32: LOAD 1/2 load the cursor row onto the
+            # named deck (rekordbox's left/right LOAD).
+            window.load_cursor_row(intent[1])
 
     def _tempo_fader(self, deck, value):
         """TEMPO fader -> master SET BPM, via the window's own

@@ -61,11 +61,10 @@ def test_translate_jog_is_relative():
 
 
 def test_translate_unassigned_in_v1():
-    # BROWSE (set list is display-only), LOAD, the RB's SYNC and
-    # loop buttons have no honest target yet.
-    assert translate('cc', 6, 64, 10) is None
+    # Still unassigned: BROWSE PUSH (no honest use yet), the
+    # RB's SYNC and loop buttons. BROWSE turn and LOAD left
+    # this list in pass 32 — see test_pass32_browse_load.py.
     assert translate('note', 6, 65, 127) is None
-    assert translate('note', 6, 70, 127) is None
     assert translate('note', 0, 88, 127) is None
     assert translate('note', 0, 16, 127) is None
     assert translate('note', 3, 11, 127) is None

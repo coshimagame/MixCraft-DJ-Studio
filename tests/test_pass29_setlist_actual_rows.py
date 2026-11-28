@@ -145,10 +145,15 @@ def test_off_list_play_then_stop_moves_actual_row_only(
 
 def test_two_off_list_tracks_keep_load_order_and_decks(
         window, tmp_path):
+    # Pass 32 supersedes the ORDER half of this test: actual
+    # rows are now most-recent deck load first (Rule B — a
+    # song loaded onto a deck goes to the TOP of the list),
+    # so Signals (loaded second) leads and Heya follows. The
+    # decks each row speaks for are unchanged.
     heya, signals = _setup(window, tmp_path)
     _load(window, 0, heya)
     _load(window, 1, signals)
-    assert [r['deck'] for r in window._actual_rows] == [0, 1]
+    assert [r['deck'] for r in window._actual_rows] == [1, 0]
     _play(window, 0)
     _play(window, 1)
     # His screenshot's state, finally representable: both decks
@@ -157,7 +162,7 @@ def test_two_off_list_tracks_keep_load_order_and_decks(
     assert window._actual_live_statuses() == ['playing', 'playing']
     assert window._setlist_live_statuses() == ['queued']
     assert window.setlist_rows.count() == 3
-    assert _row_chips(window) == ['A', 'B', 'A']
+    assert _row_chips(window) == ['B', 'A', 'A']
 
 
 def test_listed_track_never_gets_an_actual_row(window, tmp_path):

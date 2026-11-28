@@ -814,11 +814,22 @@ class SetlistRow(QFrame):
     """One set-list row (pass 24): a double-click loads the
     entry's file onto the standby deck (Window.load_setlist_
     entry). The row's labels do not handle the click, so it
-    propagates up to this frame."""
-    def __init__(self, index, on_activate):
+    propagates up to this frame.
+
+    Pass 32: a single click SELECTS the row — it moves the
+    browse cursor (the same selection the DDJ-RB's BROWSE knob
+    walks and its LOAD buttons load from), so mouse and
+    hardware share one notion of 'the selected row', the way
+    rekordbox's browser does."""
+    def __init__(self, index, on_activate, on_select=None):
         super().__init__()
         self.entry_index = index
         self._on_activate = on_activate
+        self._on_select = on_select
+    def mousePressEvent(self, event):
+        if self._on_select is not None:
+            self._on_select(self.entry_index)
+        super().mousePressEvent(event)
     def mouseDoubleClickEvent(self, event):
         self._on_activate(self.entry_index)
         super().mouseDoubleClickEvent(event)
@@ -1610,6 +1621,7 @@ class Window(QMainWindow):
         self.result.ready.connect(self.loaded)
         self.loading = set()
         self.setlist_data = None   # loaded set list (normalized dict)
+        self._setlist_cursor = None   # pass 32: browse cursor identity
         self.clip_tracks = []      # setlist_to_clip_tracks() result, for the Live hand-off
         self.deck_a_bpm = None     # Deck A track BPM — fallback for the centre SET BPM dial
         self.mix_timer = new_mix_timer()   # pass 8: performance elapsed timer
@@ -2460,6 +2472,22 @@ class Window(QMainWindow):
         self.engine.command('stop_preview')
         self.engine.command('load',index,track)
         deck.wave.track = track
+        # Pass 32, Rule B: a song loaded onto a deck goes to
+        # the TOP of the set list. This is the one moment
+        # every load route shares (deck drop, 読込 dialog,
+        # double-click, DDJ-RB LOAD), so an off-list song's
+        # actual row is created / moved to the top here —
+        # including a re-drop of the file the deck already
+        # holds, which the claims update alone cannot see
+        # (its claim never clears). A listed song gets no
+        # actual row (pass 29): its claim is the whole story.
+        if self.setlist_data is not None:
+            planned = (self.setlist_data or {}).get('tracks') or []
+            if not any(_path_matches(e.get('path'), track.path)
+                       for e in planned):
+                idx = self._actual_row_for(index, track.path)
+                if idx is not None:
+                    self._actual_to_top(idx)
         deck.refresh_bar_offset()   # pass 28: the new track's offset
         deck.name.setText(deck_title_text(track.path, self.setlist_data))
         self._render_deck_key(deck, track)
@@ -2777,6 +2805,9 @@ class Window(QMainWindow):
         # state — the file's own played/playing snapshot is not
         # adopted (the decks are the truth, from here on).
         self._reset_setlist_live()
+        # Pass 32: the browse cursor starts on the first row
+        # of a freshly opened list (Rule C).
+        self._cursor_to_first()
         self.render_setlist()
         # Pass 13: a set list opened after the decks were loaded
         # brings their 'Title — Artist' metadata with it — refresh
@@ -2866,27 +2897,35 @@ class Window(QMainWindow):
             if decks[i]['track'] is None:
                 return i
         return 1
-    def load_setlist_entry(self, index):
-        """Double-click on a set-list row (pass 24): load the
-        entry's local file onto the standby deck. Entries from
-        the phone page may carry no local file at all — that is
-        said in the status bar, never silently ignored."""
-        entries = (self.setlist_data or {}).get('tracks') or []
-        if not 0 <= index < len(entries):
-            return
-        entry = entries[index]
+    def _load_entry_on(self, entry, deck):
+        """Load one set-list entry's file onto ONE deck (pass
+        32 refactor): the single door every row load walks
+        through — double-click (via the standby deck), an
+        actual row, and the DDJ-RB LOAD buttons (their named
+        deck) — so the journal, the analysis and the claims
+        treat them identically. Entries from the phone page
+        may carry no local file at all — that is said in the
+        status bar, never silently ignored."""
         path = entry.get('path')
         if not path or not Path(path).is_file():
             self._status_fn = lambda lang: \
                 i18n.tr('setlist_entry_no_file', lang)
             self._apply_status()
-            return
-        deck = self.standby_deck()
+            return False
         self.load(deck, path)
         title = entry.get('title') or Path(path).stem
         self._status_fn = lambda lang, t=title, d='AB'[deck]: \
             i18n.tr('setlist_entry_loaded', lang).format(title=t, deck=d)
         self._apply_status()
+        return True
+
+    def load_setlist_entry(self, index):
+        """Double-click on a set-list row (pass 24): load the
+        entry's local file onto the standby deck."""
+        entries = (self.setlist_data or {}).get('tracks') or []
+        if not 0 <= index < len(entries):
+            return
+        self._load_entry_on(entries[index], self.standby_deck())
     def _arm_setlist_drops(self):
         """Arm the set-list panel and EVERY descendant for drops
         (pass 25). Two pass-24 gaps this closes: the panel never
@@ -2942,7 +2981,8 @@ class Window(QMainWindow):
             else:
                 rejected.append(candidate.name)
         if added:
-            if self.setlist_data is None:
+            born = self.setlist_data is None
+            if born:
                 self.setlist_data = {
                     'format': 'mixcraft-setlist', 'version': 1,
                     'exported_at': None, 'set_bpm': None,
@@ -2954,7 +2994,14 @@ class Window(QMainWindow):
                 self._reset_setlist_live()
             self.setlist_data['tracks'].extend(added)
             self.clip_tracks = setlist_to_clip_tracks(self.setlist_data)
+            if born:
+                # Pass 32: a list born from a drop starts with
+                # the browse cursor on its first row (Rule C).
+                self._cursor_to_first()
             self.render_setlist()
+            # Pass 32, Rule A: the dropped songs fill the
+            # empty decks (see _autofill_empty_decks).
+            self._autofill_empty_decks(added)
         if added or rejected:
             def status_fn(lang, a=len(added), r=tuple(rejected)):
                 parts = []
@@ -2967,6 +3014,33 @@ class Window(QMainWindow):
                 return ' • '.join(parts)
             self._status_fn = status_fn
             self._apply_status()
+    def _autofill_empty_decks(self, entries):
+        """Pass 32, Rule A (user 2026-11-28: 「デッキに曲がない
+        状態なら1曲目はAデッキに、2曲目はBデッキに入るはず」):
+        entries just dropped onto the set list fill the EMPTY
+        decks in A-then-B order, in drop order, through the
+        same Window.load the double-click uses — so the
+        journal, the analysis and the set-list claims all
+        follow from the one path. A deck counts as empty when
+        nothing is loaded on it and no load is in flight (a
+        load this very batch started counts as spoken for).
+        With both decks occupied the drop only adds rows, as
+        before. Opening a set-list FILE does not do this —
+        open_setlist never auto-loaded, and that stays."""
+        taken = set()
+        for entry in entries:
+            path = entry.get('path')
+            if not path:
+                continue
+            for deck in (0, 1):
+                if deck in taken or deck in self.loading:
+                    continue
+                if self.engine.decks[deck]['track'] is not None:
+                    continue
+                self.load(deck, path)
+                taken.add(deck)
+                break
+
     # -- Pass 27: set list <-> performance linkage ------------------
     # One source of truth: the engine's decks. Every load route
     # (set-list double-click, deck 読込 / file dialog, deck drag &
@@ -2985,6 +3059,10 @@ class Window(QMainWindow):
         self._actual_played = set()
         self._actual_claims = [None, None]
         self._setlist_sig = None
+        # Pass 32: the browse cursor (Rule C) belongs to the
+        # list, so a fresh list forgets it; the loader then
+        # places it on the first row.
+        self._setlist_cursor = None
 
     def _claim_for(self, deck, path, tracks):
         """The row a deck speaks for when it starts playing
@@ -3052,6 +3130,17 @@ class Window(QMainWindow):
                                 for e in tracks):
                 if actual is None:
                     actual = self._actual_row_for(i, path)
+                    if actual is not None:
+                        # Pass 32, Rule B (user 2026-11-28: a
+                        # song dropped / loaded onto a deck goes
+                        # to the TOP of the list): a fresh claim
+                        # means this deck just took the file, so
+                        # its actual row becomes the topmost —
+                        # actual rows are ordered most-recent
+                        # deck load first. Every load route ends
+                        # here (deck drop, 読込 dialog, double-
+                        # click, DDJ-RB LOAD), so they all agree.
+                        actual = self._actual_to_top(actual)
                 if actual is not None:
                     self._actual_rows[actual]['deck'] = i
                     if d['playing']:
@@ -3084,6 +3173,27 @@ class Window(QMainWindow):
         self._actual_rows.append(entry)
         return len(self._actual_rows) - 1
 
+    def _actual_to_top(self, idx):
+        """Move an actual row to the top of the actual section
+        (pass 32, Rule B), remapping the index-based live
+        state — the played ledger and both decks' claims — so
+        every index keeps pointing at its own row."""
+        if idx <= 0:
+            return idx
+
+        def remap(j):
+            if j == idx:
+                return 0
+            return j + 1 if j < idx else j
+
+        row = self._actual_rows.pop(idx)
+        self._actual_rows.insert(0, row)
+        self._actual_played = {remap(j) for j in self._actual_played}
+        self._actual_claims = [
+            remap(c) if c is not None else None
+            for c in self._actual_claims]
+        return 0
+
     def _actual_live_statuses(self):
         """Live statuses for the actual rows alone — the same
         pure rule as the planned rows (pass 27), computed over
@@ -3102,19 +3212,80 @@ class Window(QMainWindow):
         row's own file."""
         if not 0 <= index < len(self._actual_rows):
             return
-        entry = self._actual_rows[index]
-        path = entry.get('path')
-        if not path or not Path(path).is_file():
-            self._status_fn = lambda lang: \
-                i18n.tr('setlist_entry_no_file', lang)
-            self._apply_status()
+        self._load_entry_on(self._actual_rows[index],
+                            self.standby_deck())
+
+    # -- Pass 32, Rule C: the browse cursor ----------------------
+    # One selection shared by the mouse (a click on a row) and
+    # the DDJ-RB (BROWSE turn walks it, LOAD 1/2 load from it) —
+    # rekordbox's browser semantics. A cursor identity is
+    # ('actual', path) for an actual row — the path survives
+    # the Rule-B reordering — or ('planned', index) for a
+    # planned row, whose index never moves.
+    def _setlist_identities(self):
+        """Every rendered row's cursor identity, in display
+        order (actual rows above planned rows)."""
+        ids = [('actual', row.get('path'))
+               for row in self._actual_rows]
+        tracks = (self.setlist_data or {}).get('tracks') or []
+        ids += [('planned', i) for i in range(len(tracks))]
+        return ids
+
+    def _cursor_to_first(self):
+        ids = self._setlist_identities()
+        self._setlist_cursor = ids[0] if ids else None
+
+    def _select_setlist_row(self, section, index):
+        """Mouse click on a row: the cursor goes there (the
+        double-click that may follow still loads, unchanged)."""
+        if section == 'actual':
+            if not 0 <= index < len(self._actual_rows):
+                return
+            self._setlist_cursor = (
+                'actual', self._actual_rows[index].get('path'))
+        else:
+            tracks = (self.setlist_data or {}).get('tracks') or []
+            if not 0 <= index < len(tracks):
+                return
+            self._setlist_cursor = ('planned', index)
+        self.render_setlist()
+
+    def move_setlist_cursor(self, steps):
+        """BROWSE turn: walk the cursor `steps` rows (the
+        knob's difference-count magnitude), clamped at both
+        ends — no wrap, like rekordbox's browser."""
+        ids = self._setlist_identities()
+        if not ids or not steps:
             return
-        deck = self.standby_deck()
-        self.load(deck, path)
-        title = entry.get('title') or Path(path).stem
-        self._status_fn = lambda lang, t=title, d='AB'[deck]: \
-            i18n.tr('setlist_entry_loaded', lang).format(title=t, deck=d)
-        self._apply_status()
+        try:
+            pos = ids.index(self._setlist_cursor)
+        except ValueError:
+            pos = 0
+        new = min(len(ids) - 1, max(0, pos + steps))
+        if ids[new] != self._setlist_cursor:
+            self._setlist_cursor = ids[new]
+            self.render_setlist()
+
+    def load_cursor_row(self, deck):
+        """LOAD 1 / LOAD 2: load the cursor row's file onto
+        the NAMED deck, through the same door as a double-
+        click — a file-less row explains itself in the status
+        bar with the same words."""
+        ids = self._setlist_identities()
+        if not ids:
+            return
+        ident = self._setlist_cursor \
+            if self._setlist_cursor in ids else ids[0]
+        section, key = ident
+        if section == 'actual':
+            entry = next((row for row in self._actual_rows
+                          if row.get('path') == key), None)
+            if entry is None:
+                return
+        else:
+            entry = ((self.setlist_data or {}).get('tracks')
+                     or [])[key]
+        self._load_entry_on(entry, deck)
 
     def _setlist_live_statuses(self):
         tracks = (self.setlist_data or {}).get('tracks') or []
@@ -3145,7 +3316,10 @@ class Window(QMainWindow):
                 tuple(self._actual_live_statuses()),
                 tuple((r.get('path'), r.get('deck'))
                       for r in self._actual_rows),
-                self._monitor_paths())
+                self._monitor_paths(),
+                # Pass 32: the browse cursor's frame is painted
+                # from the same render, so it joins the signature.
+                self._setlist_cursor)
 
     def _refresh_setlist_live(self):
         """Re-render the rows only when the live signature moved
@@ -3193,7 +3367,10 @@ class Window(QMainWindow):
                     self._actual_rows):
                 items.append((row, entry,
                               'AB'[entry.get('deck') or 0],
-                              self._load_actual_entry))
+                              self._load_actual_entry,
+                              lambda idx: self._select_setlist_row(
+                                  'actual', idx),
+                              ('actual', entry.get('path'))))
         for row in display_rows(
                 self.setlist_data,
                 statuses=self._setlist_live_statuses()):
@@ -3208,9 +3385,12 @@ class Window(QMainWindow):
             items.append((row, entry,
                           'AB'[entry_deck] if entry_deck in (0, 1)
                           else 'A' if row['number'] % 2 == 1 else 'B',
-                          self.load_setlist_entry))
-        for row_index, (row, entry, deck_letter, activate) in \
-                enumerate(items):
+                          self.load_setlist_entry,
+                          lambda idx: self._select_setlist_row(
+                              'planned', idx),
+                          ('planned', row['index'])))
+        for row_index, (row, entry, deck_letter, activate,
+                        select, identity) in enumerate(items):
             # Pass 14: the rows live on old-LCD glass now, and an old
             # LCD has no colour — the fixed status colours become
             # INK DENSITIES plus the text badges: played = dim ink,
@@ -3335,11 +3515,19 @@ class Window(QMainWindow):
             # Pass 24: the row is a SetlistRow — a double-click
             # loads the entry's file onto the standby deck.
             # Pass 29: actual rows activate from their own list.
-            container = SetlistRow(row['index'], activate)
+            # Pass 32: a click selects the row (the browse
+            # cursor), and the cursor row wears the amber frame
+            # (the [browse_cursor="true"] STYLE rules) — an outline,
+            # not a fill, so it composes with the playing row's
+            # inversion and the pass-30 chip instead of
+            # fighting them.
+            container = SetlistRow(row['index'], activate, select)
             if row['status'] == 'playing':
                 container.setObjectName('setrowplaying')
             else:
                 container.setObjectName(f'setrow{row_index % 2}')
+            if identity == self._setlist_cursor:
+                container.setProperty('browse_cursor', True)
             container.setToolTip(i18n.tr('setlist_row_tip', self.lang))
             container.setLayout(line)
             self.setlist_rows.addWidget(container)
@@ -3497,9 +3685,17 @@ STYLE = (
     # of striping and a hairline under each row; the NOW PLAYING row
     # is the inverted ink block (its labels wear the pale styles
     # render_setlist gives them).
-    f'QFrame#setrow0 {{ background:rgba(34,43,28,0.05); border:none; border-bottom:1px solid rgba(34,43,28,0.25); border-radius:0px; }}'
-    f'QFrame#setrow1 {{ background:transparent; border:none; border-bottom:1px solid rgba(34,43,28,0.25); border-radius:0px; }}'
-    f'QFrame#setrowplaying {{ background:{COLOR_LCD_INK}; border:none; border-bottom:1px solid {COLOR_LCD_INK}; border-radius:0px; }}'
+    f'QFrame#setrow0 {{ background:rgba(34,43,28,0.05); border:2px solid transparent; border-bottom:1px solid rgba(34,43,28,0.25); border-radius:0px; }}'
+    f'QFrame#setrow1 {{ background:transparent; border:2px solid transparent; border-bottom:1px solid rgba(34,43,28,0.25); border-radius:0px; }}'
+    f'QFrame#setrowplaying {{ background:{COLOR_LCD_INK}; border:2px solid transparent; border-bottom:1px solid {COLOR_LCD_INK}; border-radius:0px; }}'
+    # Pass 32: the browse cursor's frame — every row always
+    # carries a 2px transparent border (above) so the amber
+    # outline (the app's one attention colour, the drop
+    # highlight's) can land without shifting the layout by a
+    # pixel. An outline only: it never recolours the row, so
+    # the playing row's inversion and chip stay legible under
+    # it.
+    f'QFrame#setrow0[browse_cursor="true"], QFrame#setrow1[browse_cursor="true"], QFrame#setrowplaying[browse_cursor="true"] {{ border-color:{COLOR_KNOB_ACCENT}; }}'
     f'QPushButton {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1b20, stop:1 #121317); border:1px solid #2c2e36; border-radius:3px; padding:6px 10px; font-weight:600; color:{COLOR_TEXT}; }}'
     f'QPushButton:hover {{ background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #282a31, stop:1 #17181d); border-color:#3d404a; }}'
     f'QPushButton:pressed {{ background:#0a0a0d; border-color:#1d1f24; }}'
