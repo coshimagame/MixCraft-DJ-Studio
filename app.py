@@ -1374,12 +1374,34 @@ class Deck(QFrame):
         self.monitor_btn.clicked.connect(
             lambda: window.toggle_monitor(index))
         state_row.addWidget(self.monitor_btn)
+        # Pass 33 (user request 2026-11-28: 「bpm変えても音変わら
+        # ないようにできる？」): the KEY LOCK chip, third in the
+        # state row — a deck-state toggle belongs with ON AIR /
+        # MONITOR, and the info block's fixed width keeps it off
+        # the layout-minimum budget a seventh pad would have blown
+        # (pass 24's window-fit floor). Checkable, starts ON (the
+        # engine's default); the engine command goes through the
+        # same toggled signal as the pads, and Window.tick keeps
+        # the chip following the engine state. Screen-only: the
+        # DDJ-RB pad tuple in midi_input.py is an explicit
+        # six-button list and stays that way.
+        self.key_lock = QPushButton('')
+        self.key_lock.setCheckable(True)
+        self.key_lock.setChecked(True)
+        self.key_lock.setFixedHeight(19)   # matches the state chips
+        self.key_lock.setToolTip(i18n.tr('key_lock_tip', window.lang))
+        self.key_lock.toggled.connect(
+            lambda on, i=index: window.engine.command('key_lock', i, on))
+        self.key_lock.toggled.connect(self.set_key_lock_chip)
+        state_row.addWidget(self.key_lock)
         state_row.addStretch()
         info.addLayout(state_row)
         self.onair_on = None
         self.monitor_on = None
+        self.key_lock_on = None
         self.set_onair(False)
         self.set_monitor(False)
+        self.set_key_lock_chip(True)
         info.addStretch()
         grid.addWidget(info_box, 0, 1)
         self.wave = Waveform(COLOR_WAVE_BLUE)
@@ -1509,6 +1531,28 @@ class Deck(QFrame):
                 'border:1px solid rgba(34,43,28,0.35);border-radius:2px;'
                 'font-size:11px;font-weight:700;padding:2px 8px')
         self.info_box.set_heavy_frame(on)
+    def set_key_lock_chip(self, on, force=False):
+        """Pass 33: paint the KEY LOCK chip — FILLED ink while ON
+        (an active function, like ON AIR), hollow while OFF (like
+        MONITOR off). The text itself is the language registry's
+        ('key_lock'); this only paints, and Window.tick calls it
+        with the engine's state so the chip follows the deck even
+        when the checked state was set under blocked signals."""
+        on = bool(on)
+        if self.key_lock_on == on and not force:
+            return
+        self.key_lock_on = on
+        if on:
+            self.key_lock.setStyleSheet(
+                f'background:{COLOR_LCD_INK};color:{COLOR_LCD_PALE};'
+                f'border:1px solid {COLOR_LCD_INK};border-radius:2px;'
+                'font-size:11px;font-weight:800;padding:2px 8px')
+        else:
+            self.key_lock.setStyleSheet(
+                f'background:transparent;color:{COLOR_LCD_INK_DIM};'
+                'border:1px solid rgba(34,43,28,0.35);border-radius:2px;'
+                'font-size:11px;font-weight:700;padding:2px 8px')
+
     def set_monitor(self, on, force=False):
         """Pass 15: the MONITOR chip's state — HOLLOW ink (heavy
         outline, no fill) while this deck is monitored, so it can
@@ -2096,6 +2140,8 @@ class Window(QMainWindow):
             self._reg(deck.quant.setText, 'quantize')
             self._reg(deck.sync.setText, 'sync')
             self._reg(deck.sync.setToolTip, 'sync_tip')
+            self._reg(deck.key_lock.setText, 'key_lock')
+            self._reg(deck.key_lock.setToolTip, 'key_lock_tip')
             # Pass 28: the bar-offset stepper's caption + tips.
             self._reg(deck.bar_label.setText, 'bar_offset')
             self._reg(deck.bar_label.setToolTip, 'bar_offset_tip')
@@ -3544,12 +3590,16 @@ class Window(QMainWindow):
         try: self.journal.drain(self.engine)
         except OSError as e: self.status.setText(f'Autosave error: {e}')
         for widget,d in zip(self.decks,self.engine.decks):
-            for button, key in [(widget.quant,'quantize'),(widget.sync,'sync')]:
+            for button, key in [(widget.quant,'quantize'),(widget.sync,'sync'),(widget.key_lock,'key_lock')]:
                 button.blockSignals(True); button.setChecked(d[key]); button.blockSignals(False)
             # Pass 15: the ON AIR chip + heavy LCD frames follow the
             # engine's real per-deck playing state, live — play,
             # pause, stop and track-end all land here within a tick.
             widget.set_onair(d['playing'])
+            # Pass 33: the KEY LOCK chip's fill follows the engine
+            # state the same way (its checked state was just synced
+            # above, under blocked signals).
+            widget.set_key_lock_chip(d['key_lock'])
             if widget.wave.playing != d['playing']:
                 widget.wave.playing = d['playing']
                 widget.wave.update()

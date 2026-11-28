@@ -154,6 +154,7 @@ def _new_state():
     return dict(track=None, duration=None, position=0.0, at=0.0,
                 playing=False, rate=1.0, cue=0.0, hotcues={},
                 loop_start=None, loop_end=None, loop_active=False,
+                key_lock=True,
                 params=dict(PARAM_DEFAULTS))
 
 
@@ -297,6 +298,7 @@ class _Reconstructor:
             keep = dict(d["params"])
             fresh = _new_state()
             fresh["params"] = keep
+            fresh["key_lock"] = d["key_lock"]   # pass 33: decks keep it across loads, as in the engine
             fresh["track"] = value
             fresh["at"] = frame
             seconds = self.durations.get(value)
@@ -378,6 +380,14 @@ class _Reconstructor:
             d["loop_active"] = False
         elif action == "tempo" and d is not None:
             d["rate"] = min(2.0, max(0.5, float(value)))
+        elif action == "key_lock" and d is not None:
+            # Pass 33: bookkeeping only. Replay never renders
+            # audio, so the stretch stage cannot change segments,
+            # positions or automation — the flag is carried so the
+            # reconstructed deck state matches the live engine's,
+            # and the Live export ignores it (Live warps on its
+            # own), exactly as the live export does.
+            d["key_lock"] = bool(value)
         elif action == "sync_align" and d is not None:
             # Pass 26: the engine's phase alignment, recorded as
             # an absolute position — apply it verbatim.

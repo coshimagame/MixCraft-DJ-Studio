@@ -84,6 +84,18 @@ STRINGS = {
         "jp": "テンポ＋拍位相同期（両方の拍グリッドが確かな時。"
               "そうでなければテンポのみ）。音程も変わります。",
     },
+    # Pass 33 (user request 2026-11-28: 「bpm変えても音変わらない
+    # ようにできる？」): key lock — the deck's tempo moves without
+    # its pitch (MASTER TEMPO on a CDJ). On by default.
+    "key_lock": {"en": "KEY LOCK", "jp": "キーロック"},
+    "key_lock_tip": {
+        "en": "Key lock — the deck's tempo can move (SYNC / SET "
+              "BPM) without its pitch changing. Off = vinyl-style: "
+              "pitch follows the speed.",
+        "jp": "キーロック ― テンポを変えても（シンク／セットBPM）"
+              "音程が変わりません。OFF ではレコード式に、速度と"
+              "一緒に音程も変わります。",
+    },
     # Pass 26: SYNC fell back to tempo-only for this track — the
     # status bar says so plainly instead of faking an alignment.
     "sync_tempo_only": {

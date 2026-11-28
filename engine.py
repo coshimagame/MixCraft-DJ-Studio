@@ -9,8 +9,12 @@ Phase 2 additions:
   GAIN and a resonant-free one-pole FILTER (LP below centre, HP above).
 - soft-knee limiter above 0.90 instead of a bare hard clip at 0.98.
 - CUE / HOT CUE / LOOP / Quantize (beat-grid snapping), SYNC and tempo
-  (rate playback — this pitches the audio; pitch-preserving time-stretch
-  is NOT implemented and is not claimed).
+  (rate playback).
+- Pass 33 (user request 2026-11-28: 「bpm変えても音変わらないように
+  できる？」): KEY LOCK — a per-deck WSOLA time-stretch stage in the
+  read path, ON by default. With it on, a deck's rate changes its
+  tempo only; the pitch stays at the song's own. With it off, the
+  deck is the original resampler (pitch follows rate, vinyl-style).
 - beat grid, key and analysis cache via analysis.py.
 - Pass 26: SYNC is tempo match + BEAT-PHASE alignment when both
   tracks' beat grids are confident (analysis.GRID_CONFIDENT) — a
@@ -387,15 +391,142 @@ class _OnePole:
         return y
 
 
+# Pass 33: KEY LOCK time-stretch (WSOLA). A window of
+# STRETCH_WINDOW frames is overlap-added every STRETCH_HOP output
+# frames; the similarity search may move a window's source start by
+# at most ±STRETCH_TOL frames from its nominal position. The
+# nominal analysis cursor advances by exactly STRETCH_HOP * rate
+# per window regardless of the offset chosen, so the
+# source->output time mapping is anchored and cannot drift:
+# output frame t renders the source around start + t * rate, and
+# the deck's reported position advances exactly as it does in the
+# resample path — sync, phase lock and the journal keep their
+# existing source-frame semantics untouched. Both decks run the
+# identical stage, so the read-ahead (~STRETCH_WINDOW frames,
+# ≈43 ms) is the same on both and no position compensation is
+# needed anywhere. Cleanest in the 0.85–1.18 rate range (SET BPM
+# ±6 plus track-vs-set differences); outside it the stage still
+# runs — quality degrades, nothing drops or crashes.
+STRETCH_WINDOW = 2048
+STRETCH_HOP = 512
+STRETCH_TOL = 512
+
+class _TimeStretcher:
+    """Incremental WSOLA state for one deck (pass 33).
+
+    `reset(position)` primes the stage at a source position; any
+    discontinuity (seek / cue / hotcue jump, sync_align nudge,
+    loop-state change of position, track load, key-lock toggle)
+    is detected by the deck read comparing the live position
+    against `expected` — the position the previous read left —
+    and resets here, so no audio is ever smeared across a jump.
+    """
+
+    def __init__(self):
+        self.win = np.hanning(STRETCH_WINDOW).astype(np.float64)
+        self.expected = None
+        self.reset(0.0)
+
+    def reset(self, position):
+        self.ana = float(position)   # nominal source start of the next window
+        self.out = np.zeros((0, 2), dtype=np.float64)
+        self.env = np.zeros(0, dtype=np.float64)
+        self.head = 0                # frames of `out` already emitted
+        self.synth = 0               # output index the next window lands on
+        self.primed = False
+        # `expected` is deliberately NOT set here: the deck read
+        # owns it (it knows the position it last left behind).
+
+    @staticmethod
+    def _source(audio, start, count, loop):
+        """`count` source frames from integer `start`, as float64.
+        Loop-active reads wrap at the loop end exactly like the
+        resample path's index mapping; non-loop reads past the
+        track end (and before 0) come back as silence."""
+        total = len(audio)
+        idx = start + np.arange(count)
+        if loop is not None:
+            lo, hi = loop
+            idx = np.where(idx >= hi, lo + (idx - lo) % (hi - lo), idx)
+            return audio[np.clip(idx, 0, total - 1)].astype(np.float64)
+        out = np.zeros((count, 2), dtype=np.float64)
+        valid = (idx >= 0) & (idx < total)
+        if np.any(valid):
+            out[valid] = audio[idx[valid]]
+        return out
+
+    def _place_window(self, audio, rate, loop):
+        W, HOP, TOL = STRETCH_WINDOW, STRETCH_HOP, STRETCH_TOL
+        overlap = W - HOP
+        nominal = self.ana
+        chosen = int(round(nominal))
+        if self.primed:
+            # Similarity search: the candidate window whose head
+            # best continues the already-synthesised overlap wins.
+            # Correlation is normalised by candidate energy so a
+            # loud passage cannot win on level alone.
+            ref = np.zeros(overlap, dtype=np.float64)
+            env = self.env[self.synth:self.synth + overlap]
+            seg = self.out[self.synth:self.synth + overlap]
+            ok = env > 1e-4
+            if np.any(ok):
+                ref[ok] = seg.mean(axis=1)[ok] / env[ok]
+            if np.max(np.abs(ref)) > 1e-9:
+                cand = self._source(audio, int(round(nominal)) - TOL,
+                                    overlap + 2 * TOL, loop).mean(axis=1)
+                scores = np.correlate(cand, ref, mode='valid')
+                energy = np.sqrt(np.convolve(
+                    cand * cand, np.ones(overlap), mode='valid'))
+                scores = scores / (energy + 1e-9)
+                chosen += int(np.argmax(scores)) - TOL
+        src = self._source(audio, chosen, W, loop)
+        end = self.synth + W
+        if len(self.out) < end:
+            pad = end - len(self.out)
+            self.out = np.concatenate(
+                [self.out, np.zeros((pad, 2), dtype=np.float64)])
+            self.env = np.concatenate(
+                [self.env, np.zeros(pad, dtype=np.float64)])
+        self.out[self.synth:end] += src * self.win[:, None]
+        self.env[self.synth:end] += self.win
+        self.ana = nominal + HOP * rate
+        self.synth += HOP
+        self.primed = True
+
+    def read(self, audio, rate, frames, loop):
+        """`frames` pitch-preserved output frames. Source is
+        consumed at `rate` source frames per output frame (the
+        caller advances the deck position by frames * rate, the
+        same accounting as the resample path)."""
+        while self.synth < self.head + frames:
+            self._place_window(audio, rate, loop)
+        seg = self.out[self.head:self.head + frames]
+        env = self.env[self.head:self.head + frames]
+        out = np.zeros((frames, 2), dtype=np.float64)
+        ok = env > 1e-4
+        if np.any(ok):
+            out[ok] = seg[ok] / env[ok, None]
+        self.head += frames
+        if self.head >= 16384:   # compact the consumed prefix
+            self.out = self.out[self.head:].copy()
+            self.env = self.env[self.head:].copy()
+            self.synth -= self.head
+            self.head = 0
+        return out.astype(np.float32)
+
+
 def _new_deck():
     # Pass 28: volume starts at unity (1.0). The old 0.8 start,
     # stacked on the master's 0.8 start, cost ~3.9 dB before the
     # crossfader — part of the user's 「音が小さい」 report
     # (measured in tests/test_pass28_gain_chain.py).
+    # Pass 33: key_lock defaults ON (the user asked for the
+    # behaviour itself) and persists across loads (see _apply).
     return dict(track=None, position=0, playing=False, volume=1.0,
                 gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5,
                 cue=0, hotcues={}, loop_start=None, loop_end=None, loop_active=False,
                 quantize=False, rate=1.0, sync=False, sync_mode=None,
+                key_lock=True, _stretch=None,
                 _lp_low=None, _lp_high=None, _lp_filter=None, _hp_filter=None)
 
 # Pass 26 (REAL SYNC): phase alignment constants. The lock corrects
@@ -589,7 +720,7 @@ class Engine:
             # the command's own event, at the same frame, in order.
             extra_events = []
             if action == 'load':
-                keep = {k: d[k] for k in ('volume','gain','eq_low','eq_mid','eq_high','filter','quantize')}
+                keep = {k: d[k] for k in ('volume','gain','eq_low','eq_mid','eq_high','filter','quantize','key_lock')}
                 d.update(_new_deck()); d.update(keep)
                 self._deck_cur[index] = {k: d[k] for k in ('volume','gain','eq_low','eq_mid','eq_high','filter')}
                 d['track'] = value
@@ -651,6 +782,13 @@ class Engine:
                 d['loop_active'] = d['loop_start'] is not None and d['loop_end'] > d['loop_start']
             elif action == 'loop_exit': d['loop_active'] = False
             elif action == 'quantize': d['quantize'] = bool(value)
+            elif action == 'key_lock':
+                # Pass 33: pitch-preserving stretch on/off for
+                # this deck. The stretcher is dropped so the next
+                # read primes in the new mode at the live position
+                # — no smeared transition between the two paths.
+                d['key_lock'] = bool(value)
+                d['_stretch'] = None
             elif action == 'tempo': d['rate'] = float(np.clip(value, 0.5, 2.0))
             elif action == 'sync':
                 d['sync'] = bool(value)
@@ -748,7 +886,44 @@ class Engine:
             d['_lp_filter'] = d['_hp_filter'] = None
         return x.astype('float32')
 
+    def _read_deck_stretched(self, d, frames):
+        """Pass 33: the key-locked read. The WSOLA stage renders
+        `frames` output frames while the deck position advances by
+        exactly frames * rate — the same accounting as the
+        resample path, including its loop wrap and end-of-track
+        stop — so position reporting, sync and the journal are
+        untouched by the stretch. Any position discontinuity
+        since the last read (seek / cue / hotcue / sync_align /
+        jog landing between blocks) resets the stage at the live
+        position instead of smearing audio across the jump."""
+        audio = d['track'].audio
+        rate = d['rate']
+        loop = None
+        if d['loop_active'] and d['loop_start'] is not None \
+                and d['loop_end'] is not None \
+                and d['loop_end'] > d['loop_start']:
+            loop = (d['loop_start'], d['loop_end'])
+        st = d['_stretch']
+        if st is None:
+            st = d['_stretch'] = _TimeStretcher()
+            st.reset(d['position'])
+        elif st.expected is not None \
+                and abs(float(d['position']) - st.expected) > 1e-6:
+            st.reset(d['position'])
+        block = st.read(audio, rate, frames, loop)
+        end = d['position'] + frames * rate
+        if loop is not None and end >= loop[1]:
+            lo, hi = loop
+            end = lo + (end - lo) % (hi - lo)
+        d['position'] = min(end, len(audio))
+        if loop is None and end >= len(audio):
+            d['playing'] = False
+        st.expected = float(d['position'])
+        return block
+
     def _read_deck(self, d, frames):
+        if d['key_lock']:
+            return self._read_deck_stretched(d, frames)
         audio = d['track'].audio
         rate = d['rate']
         indices = d['position'] + rate*np.arange(frames)

@@ -10,7 +10,12 @@ def playing(audio):
     return e
 
 def test_loop_no_zero_padding_inside_block():
+    # Pass 33: this pins the RESAMPLE read path's loop index
+    # mapping sample-for-sample. Key lock (default on since
+    # pass 33) is a different read stage — its loop behaviour is
+    # covered in tests/test_pass33_key_lock.py — so it is off here.
     e=playing(np.full(5000,.2))
+    e.command('key_lock',0,False)
     e.command('seek',0,100);e.command('loop_in',0)
     e.command('seek',0,200);e.command('loop_out',0)
     e.command('seek',0,180)
@@ -19,8 +24,13 @@ def test_loop_no_zero_padding_inside_block():
 
 @pytest.mark.parametrize('rate',[.5,1.25,2.0])
 def test_rate_sampler_matches_continuous_reference(rate):
+    # Pass 33: the sampler under test IS the resample path; key
+    # lock (default on since pass 33) replaces it with the WSOLA
+    # stage, so it is switched off to keep testing the sampler
+    # itself. Assertions unchanged.
     audio=np.arange(10000)/100000
     e=playing(audio)
+    e.command('key_lock',0,False)
     e.command('seek',0,100);e.command('tempo',0,rate)
     result=np.concatenate([e.render(137),e.render(211)])[:,0]
     assert np.allclose(result,(100+rate*np.arange(348))/100000,atol=1e-7)
