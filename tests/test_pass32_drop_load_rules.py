@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 
 import app as appmod
 from engine import RATE, load_track
+from pathlib import Path
 
 
 @pytest.fixture()
@@ -169,7 +170,11 @@ def test_deck_drop_event_loads_and_tops_the_row(window, tmp_path):
                        Qt.KeyboardModifier.NoModifier)
     window.decks[1].dropEvent(event)    # dropped onto deck B's strip
     window.tick()
-    assert calls == [(1, str(signals))]
+    # The deck is the point; the path is compared parsed —
+    # QUrl.toLocalFile() hands back '/' separators on Windows
+    # where str(Path) has '\'.
+    assert len(calls) == 1 and calls[0][0] == 1
+    assert Path(calls[0][1]) == signals
     assert [r['title'] for r in window._actual_rows] == ['Signals']
     assert window._actual_rows[0]['deck'] == 1
     assert any('Signals' in t for t in _row_texts(window, 0))
