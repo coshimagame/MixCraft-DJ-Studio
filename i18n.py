@@ -229,7 +229,7 @@ STRINGS = {
     "stop": {"en": "STOP", "jp": "停止"},
     "timer_reset": {"en": "RESET", "jp": "リセット"},
     "open_setlist": {"en": "OPEN SETLIST JSON", "jp": "セットリストを開く"},
-    "setlist_dialog": {"en": "Setlist JSON", "jp": "セットリスト"},
+    "setlist_dialog": {"en": "Setlist", "jp": "セットリスト"},
     "col_title": {"en": "TITLE / ARTIST", "jp": "タイトル / アーティスト"},
     "col_time": {"en": "TIME", "jp": "時間"},
     "col_status": {"en": "STATUS", "jp": "状態"},
@@ -320,6 +320,15 @@ STRINGS = {
               "• {clips} clip conversions held",
         "jp": "セットリスト読込: {name} • {count} 曲 • 合計 {total} "
               "• クリップ変換 {clips} 件を保持中",
+    },
+    # Pass 31: a Live set (.als) imported back as a set list —
+    # the status says how many songs came back and how many of
+    # them carry no file reference that could be resolved.
+    "setlist_loaded_als": {
+        "en": "Live set loaded as setlist: {name} • {count} tracks "
+              "• total {total} • {nofile} without a file",
+        "jp": "Live セットをセットリストとして読込: {name} • "
+              "{count} 曲 • 合計 {total} • ファイルなし {nofile} 曲",
     },
 }
 

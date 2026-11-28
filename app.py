@@ -62,6 +62,7 @@ from engine import (Engine, Journal, RATE, GRID_CONFIDENT,
 from audio_config import (diagnose_ladder, rb_name_match,
                           resolve_output)
 from midi_input import MidiController
+import als_import
 import i18n
 import perf_als
 from setlist import (SetlistFormatError, display_rows, display_summary,
@@ -2748,11 +2749,24 @@ class Window(QMainWindow):
                 return files[0]
         return None
     def open_setlist(self):
-        path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist JSON (*.json)')
+        path,_ = QFileDialog.getOpenFileName(self,i18n.tr('setlist_dialog', self.lang),'','Setlist (*.json *.als)')
         if not path: return
+        # Pass 31: a Live set (.als) comes back as a set list —
+        # the return half of the MixAble ⇄ Live exchange. The
+        # extracted entries install through the very same path
+        # as a phone JSON below (paths preserved, so row
+        # double-click deck loads work); the only difference is
+        # the status line, which says plainly how many songs
+        # were read and how many carry no file.
+        no_file = None
         try:
-            data = load_setlist(path)
-        except SetlistFormatError as error:
+            if path.lower().endswith('.als'):
+                imported = als_import.read_als_set(path)
+                data = imported['setlist']
+                no_file = imported['no_file']
+            else:
+                data = load_setlist(path)
+        except (SetlistFormatError, als_import.AlsError) as error:
             self._status_fn = lambda lang, e=error: \
                 i18n.tr('setlist_error', lang).format(error=e)
             self._apply_status()
@@ -2772,8 +2786,14 @@ class Window(QMainWindow):
         summary = display_summary(data)
         name, count = Path(path).name, summary['track_count']
         total, clips = summary['total_text'], len(self.clip_tracks)
-        self._status_fn = lambda lang: i18n.tr('setlist_loaded', lang).format(
-            name=name, count=count, total=total, clips=clips)
+        if no_file is None:
+            self._status_fn = lambda lang: \
+                i18n.tr('setlist_loaded', lang).format(
+                    name=name, count=count, total=total, clips=clips)
+        else:
+            self._status_fn = lambda lang, n=no_file: \
+                i18n.tr('setlist_loaded_als', lang).format(
+                    name=name, count=count, total=total, nofile=n)
         self._apply_status()
     def toggle_mix_timer(self):
         now = time.monotonic()
@@ -3179,8 +3199,15 @@ class Window(QMainWindow):
                 statuses=self._setlist_live_statuses()):
             entry = entries[row['index']] \
                 if row['index'] < len(entries) else {}
+            # Pass 31: a row imported from a Live set carries
+            # the deck its track really was (track 1 = A,
+            # track 2 = B) — the letter follows the entry, not
+            # the alternation. Phone lists carry no deck and
+            # keep the alternation untouched.
+            entry_deck = entry.get('deck')
             items.append((row, entry,
-                          'A' if row['number'] % 2 == 1 else 'B',
+                          'AB'[entry_deck] if entry_deck in (0, 1)
+                          else 'A' if row['number'] % 2 == 1 else 'B',
                           self.load_setlist_entry))
         for row_index, (row, entry, deck_letter, activate) in \
                 enumerate(items):
