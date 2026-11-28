@@ -324,12 +324,19 @@ def test_file_ref_names_the_performed_file_on_every_clip(tmp_path):
         assert als_writer._get_value(ref, 'HasRelativePath') \
             == 'false'
         assert list(ref.find('RelativePath')) == []
-    # The session donor itself is untouched.
+    # Pass 30 supersedes the last pass-27 assertion ("the
+    # session donor itself is untouched"): the Session view
+    # is now populated too, and slot 0 — the donor's own slot
+    # — is one of the slots filled, holding a clone OF that
+    # donor carrying the first performed song, its reference
+    # rewritten with the same full consistency (the output
+    # set is the performance, in both views).
     donor = tracks[0].find('.//ClipSlotList//AudioClip')
     dref = donor.find('./SampleRef/FileRef')
-    assert als_writer._get_value(dref, 'Name') == 'Donor Song.wav'
+    assert als_writer._get_value(dref, 'Name') == 'Alpha.wav'
+    assert als_writer._get_value(dref, 'Path') == performed
     dblob = bytes.fromhex(dref.find('Data').text.strip())
-    assert dblob.decode('utf-16-le') == donor_abs + '\0'
+    assert dblob.decode('utf-16-le') == performed + '\0'
 
 
 # --- timeline rebase ---------------------------------------------------

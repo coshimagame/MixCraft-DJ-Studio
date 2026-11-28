@@ -388,7 +388,12 @@ class Waveform(QWidget):
         show_grid = grid is not None \
             and (self.track.beat_confidence >= GRID_CONFIDENT
                  or self.track.anchor_cue is not None)
-        tick_offset = grid.offset if grid is None else (
+        # Pass 30: the None case must not touch grid at all (the
+        # condition was inverted — a beatless / unanalysed track,
+        # whose grid() is None, crashed the paint with an
+        # AttributeError storm). tick_offset is only read under
+        # show_grid, which already requires a grid.
+        tick_offset = 0 if grid is None else (
             grid_offset_through(grid, self.track.anchor_cue)
             if self.track.anchor_cue is not None else grid.offset)
         if show_grid:
@@ -3211,6 +3216,28 @@ class Window(QMainWindow):
             # (carried in the item tuple), not the alternation.
             line = QHBoxLayout()
             line.setContentsMargins(6, 3, 6, 3)
+            # Pass 30 (user 2026-11-28: 「リストの方は再生中の曲が
+            # わかるようにしてほしい」): the now-playing signal
+            # also lives at the row's LEFT edge — a FILLED chip —
+            # not only as text in the rightmost badge column,
+            # which his 150% scaling clips off the panel (his
+            # screenshot showed only 「待」 of the status column).
+            # On the inverted row the fill is the glass-pale ink
+            # with ink letters, so it reads as a lit lamp on the
+            # ink block; other rows keep an empty slot of the
+            # same width so the columns stay aligned.
+            now_chip = QLabel(
+                i18n.status_badge('playing', self.lang)
+                if row['status'] == 'playing' else '')
+            now_chip.setFixedWidth(48)
+            now_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if row['status'] == 'playing':
+                now_chip.setStyleSheet(
+                    f'color:{COLOR_LCD_INK};background:{COLOR_LCD_PALE};'
+                    f'border:1px solid {COLOR_LCD_PALE};'
+                    f'border-radius:2px;font-family:{MONO_STACK};'
+                    'font-size:10px;font-weight:800')
+            line.addWidget(now_chip)
             deck_bar = QFrame()
             deck_bar.setFixedWidth(5)
             deck_bar.setStyleSheet(f'background:{COLOR_LCD_INK_DIM};border:none')

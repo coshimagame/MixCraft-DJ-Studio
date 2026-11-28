@@ -42,6 +42,15 @@ pass 28: エンベロープの値域は Live の素の値域に統一した
 以前は GAIN / EQ を dB、FILTER をノブ位置で書いており、Live
 では無音・無効値・最小値張り付きになっていた。
 
+pass 30: 同じ演奏を Session ビューにも並べる (ユーザーの
+ビジョン 2026-11-28: Arrangement で直せるだけでなく、同じ
+セットを Live の Session でそのままもう一度 DJ できるよう
+に)。デッキのトラックごとに、演奏した曲を演奏順に ClipSlot
+へ 1 曲 1 スロット (再演は 2 スロット)。クリップはその
+トラック自身のセッションクリップの複製で、開始位置は演奏
+の開始位置、終わりは曲末。トラックにセッションクリップが
+無ければ警告して Arrangement のみにする。
+
 検証範囲: tests/test_perf_als.py で合成 fixture に対して注入 →
 再パース検証まで。生成した .als を本物の Live 10 が開けるか、
 エンベロープが意図通り効くかは実機確認が別途必要。
@@ -247,12 +256,11 @@ def _scrub_donor_ref(file_ref, audio_file, stat):
         hint.text = None
 
 
-def _prepare_perf_clip(template, entry, allocator, report):
-    """複製したクリップに演奏セグメント 1 つ分を反映する。"""
-    clip = copy.deepcopy(template)
-    clip.set("Time", _fmt(entry["time_beats"]))
-    _set_value(clip, "Name", entry.get("name") or "")
-
+def _apply_sample_ref(clip, entry, report):
+    """クリップの FileRef / SampleRef を演奏ファイルの参照に
+    一貫させる (Arrangement / Session 共通)。曲の長さ (秒) を
+    返す — entry の値が無ければ実ファイルから測った値、どちら
+    も無ければ None。"""
     file_path = entry.get("file") or ""
     sample_ref = clip.find("SampleRef")
     file_ref = clip.find(".//FileRef")
@@ -268,7 +276,6 @@ def _prepare_perf_clip(template, entry, allocator, report):
             _set_value(file_ref, "OriginalFileSize", stat.st_size)
         _set_value(file_ref, "OriginalCrc", 0)
     duration = entry.get("duration_seconds")
-    bpm = entry.get("bpm")
     if sample_ref is not None:
         if stat is not None:
             _set_value(sample_ref, "LastModDate", int(stat.st_mtime))
@@ -286,20 +293,26 @@ def _prepare_perf_clip(template, entry, allocator, report):
                 rate = 44100
             _set_value(sample_ref, "DefaultDuration",
                        int(round(duration * rate)))
+    return duration
 
-    _set_value(clip, "CurrentStart", entry["offset_beats"])
-    _set_value(clip, "CurrentEnd", entry["end_beats"])
+
+def _set_clip_region(clip, start_beats, end_beats, duration, bpm,
+                     report, entry):
+    """クリップの再生区間 (CurrentStart / CurrentEnd、Loop、
+    Warp マーカー) を設定する (Arrangement / Session 共通)。"""
+    _set_value(clip, "CurrentStart", start_beats)
+    _set_value(clip, "CurrentEnd", end_beats)
     _set_value(clip, "IsWarped", True)
     loop_el = clip.find("Loop")
     if loop_el is None:
         loop_el = ET.SubElement(clip, "Loop")
-    _set_value(loop_el, "LoopStart", entry["offset_beats"])
-    _set_value(loop_el, "LoopEnd", entry["end_beats"])
+    _set_value(loop_el, "LoopStart", start_beats)
+    _set_value(loop_el, "LoopEnd", end_beats)
     _set_value(loop_el, "StartRelative", 0)
     _set_value(loop_el, "LoopOn", False)
-    _set_value(loop_el, "OutMarker", entry["end_beats"])
-    _set_value(loop_el, "HiddenLoopStart", entry["offset_beats"])
-    _set_value(loop_el, "HiddenLoopEnd", entry["end_beats"])
+    _set_value(loop_el, "OutMarker", end_beats)
+    _set_value(loop_el, "HiddenLoopStart", start_beats)
+    _set_value(loop_el, "HiddenLoopEnd", end_beats)
     if duration and bpm:
         markers = clip.find("WarpMarkers")
         if markers is None:
@@ -317,9 +330,65 @@ def _prepare_perf_clip(template, entry, allocator, report):
             f"{entry.get('name')}: 曲の長さまたは BPM が無いため "
             "Warp マーカーは元のままです")
 
+
+def _realloc_ids(clip, allocator):
     for el in clip.iter():
         if el.get("Id") is not None:
             el.set("Id", str(allocator.alloc()))
+
+
+def _prepare_perf_clip(template, entry, allocator, report):
+    """複製したクリップに演奏セグメント 1 つ分を反映する。"""
+    clip = copy.deepcopy(template)
+    clip.set("Time", _fmt(entry["time_beats"]))
+    _set_value(clip, "Name", entry.get("name") or "")
+    duration = _apply_sample_ref(clip, entry, report)
+    _set_clip_region(clip, entry["offset_beats"], entry["end_beats"],
+                     duration, entry.get("bpm"), report, entry)
+    _realloc_ids(clip, allocator)
+    return clip
+
+
+# ---------------------------------------------------------------------------
+# Session ビュー (pass 30)
+# ---------------------------------------------------------------------------
+
+def _session_donor(track):
+    """そのトラック自身のセッションスロットにある最初の
+    AudioClip (そのトラックの Session クリップの複製元)。
+    無ければ None — 他トラックのクリップやスケルトンで代用
+    しない (形を発明しない)。"""
+    try:
+        slots = als_writer._slots(track)
+    except AlsError:
+        return None
+    for slot in slots:
+        value = als_writer._slot_value(slot)
+        if value is not None:
+            clip = value.find("AudioClip")
+            if clip is not None:
+                return clip
+    return None
+
+
+def _prepare_session_clip(template, entry, allocator, report):
+    """Session 用クリップ: 演奏した曲を、演奏の開始位置
+    (ホットキュー / 再生開始位置 = entry の offset) から曲の
+    終わりまで入れた形にする。Live の Session でそのまま
+    もう一度 DJ するための置き方で、Arrangement のセグメント
+    (演奏区間だけ) とは終わりが違う。曲の長さが分からなけれ
+    ば演奏区間の終わりで代用する。"""
+    clip = copy.deepcopy(template)
+    clip.set("Time", "0")
+    _set_value(clip, "Name", entry.get("name") or "")
+    duration = _apply_sample_ref(clip, entry, report)
+    bpm = entry.get("bpm")
+    end_beats = entry["end_beats"]
+    if duration and bpm:
+        end_beats = float(duration) * float(bpm) / 60.0
+    _set_clip_region(clip, entry["offset_beats"], end_beats,
+                     duration, bpm, report, entry)
+    _realloc_ids(clip, allocator)
     return clip
 
 
@@ -391,6 +460,8 @@ def inject_perf(root, plan) -> dict:
             f"AudioTrack が {len(tracks)} 本しかありません (Deck A / B の 2 本が必要)")
     deck_tracks = {"A": tracks[0], "B": tracks[1]}
     report = {"clips_written": 0, "decks": {"A": 0, "B": 0},
+              "session_clips": {"A": 0, "B": 0},
+              "slots_extended": {}, "scenes_extended": 0,
               "envelopes_written": {}, "donor": None, "tempo_set": False,
               "arrangement_cleared": 0,
               "warnings": list(plan.get("warnings") or [])}
@@ -437,6 +508,59 @@ def inject_perf(root, plan) -> dict:
                 _prepare_perf_clip(template, entry, allocator, report))
             report["clips_written"] += 1
             report["decks"][deck] += 1
+
+    # Pass 30 (user vision 2026-11-28): the SAME performance
+    # also goes to the Session view, so the set can be DJ'd
+    # again inside Live. Per deck track, one session clip per
+    # performed song, in performance order, filling successive
+    # ClipSlots (a reprise gets two slots — pass 28.1's rule).
+    # Each clip is a clone of THAT track's own session donor,
+    # with the file reference fully rewritten and the region
+    # running from the played start offset to the end of the
+    # song. Only the slots filled are replaced; the rest of
+    # the template (devices, routing, remaining slots) is
+    # untouched. A track with no session donor gets a plain
+    # warning, never an invented clip shape.
+    session_needed = 0
+    for deck in ("A", "B"):
+        entries = (plan.get("clips") or {}).get(deck) or []
+        if not entries:
+            continue
+        track = deck_tracks[deck]
+        session_donor = _session_donor(track)
+        if session_donor is None:
+            report["warnings"].append(
+                f"Deck {deck} のトラックにセッション用クリップが無い"
+                "ため、Session ビューへの配置はできませんでした "
+                "(Arrangement には書き出されています。テンプレートの "
+                "そのトラックにクリップを 1 つ入れて保存し直すと、"
+                "Session にも並ぶようになります)")
+            continue
+        session_template = copy.deepcopy(session_donor)
+        try:
+            slots = als_writer._ensure_slots(
+                track, len(entries), report, deck)
+        except AlsError:
+            report["warnings"].append(
+                f"Deck {deck} のトラックにクリップスロットが無いため、"
+                "Session ビューへの配置はできませんでした")
+            continue
+        session_needed = max(session_needed, len(entries))
+        for slot_el, entry in zip(slots, entries):
+            value = als_writer._slot_value(slot_el)
+            if value is None:
+                report["warnings"].append(
+                    f"{entry.get('name')}: スロットの入れ物 (Value) が"
+                    "無く、Session に配置できませんでした")
+                continue
+            for child in list(value):
+                value.remove(child)
+            value.append(_prepare_session_clip(
+                session_template, entry, allocator, report))
+            report["session_clips"][deck] += 1
+    if session_needed:
+        als_writer._ensure_scenes(root, session_needed, report,
+                                  allocator)
 
     for key, points in (plan.get("envelopes") or {}).items():
         if not points:
@@ -706,8 +830,11 @@ def main(argv=None) -> int:
         print(f"NG: {exc}", file=sys.stderr)
         return 1
     envs = report["envelopes_written"]
+    session = report.get("session_clips") or {}
     print(f"OK: クリップ {report['clips_written']} 個 / "
           f"エンベロープ {len(envs)} 本を書き出しました: {args.out}")
+    print(f"  Session: Deck A {session.get('A', 0)} 個 / "
+          f"Deck B {session.get('B', 0)} 個")
     print(f"  Deck A: {report['decks']['A']} / Deck B: {report['decks']['B']}"
           f" / クリップ元: {report['donor']} / テンポ設定: "
           f"{'済' if report['tempo_set'] else '未'}")
