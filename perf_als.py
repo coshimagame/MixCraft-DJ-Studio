@@ -51,6 +51,16 @@ pass 30: 同じ演奏を Session ビューにも並べる (ユーザーの
 の開始位置、終わりは曲末。トラックにセッションクリップが
 無ければ警告して Arrangement のみにする。
 
+pass 34: 書き出し時に、デッキトラックのデバイス静的値
+(Manual) をニュートラルへ戻す。土台テンプレートは実セット
+から保存された物で、静的値には作成時の状態が残る (ユーザーの
+実テンプレでは、Remote Script のテストで倒し切った EQ Three
+が低域 0.000316 = -inf のまま保存されていた)。エンベロープは
+演奏区間しか覆わないので、エンベロープの無い Session クリップ
+や範囲外の Arrangement はその静的値で鳴り、「演奏は入って
+いるのにデッキの音が出ない」ことになる。エンベロープと
+クリップには一切触らない。
+
 検証範囲: tests/test_perf_als.py で合成 fixture に対して注入 →
 再パース検証まで。生成した .als を本物の Live 10 が開けるか、
 エンベロープが意図通り効くかは実機確認が別途必要。
@@ -145,6 +155,50 @@ DECK_TARGETS = {
     # 側の Manual を合わせる (inject_perf の filter_sides)。
     "filter_type": ("device", "AutoFilter", ("FilterType",)),
 }
+
+
+# Pass 34: 書き出し時にデッキトラックの静的値 (Manual) を戻す
+# ニュートラル値。値域は pass 28 の素の値域: 音量 / GAIN / EQ は
+# 振幅 (1.0 = 0 dB)、フィルターカットオフは Hz (中央 = 全開は
+# performance._filter_hz(0.5) = 20000 Hz を実行時に解決)、
+# FilterType は 0 = LP。
+STATIC_NEUTRALS = (
+    ("volume", 1.0),
+    ("gain", 1.0),
+    ("eq_low", 1.0),
+    ("eq_mid", 1.0),
+    ("eq_high", 1.0),
+    ("filter", None),
+    ("filter_type", 0),
+)
+
+
+def _neutralise_statics(track, keep_filter_type=False):
+    """デッキトラックの静的 (Manual) 値をニュートラルに戻す
+    (pass 34)。戻したパラメータ数を返す。
+
+    対象は Mixer の Volume、Utility (StereoGain) の Gain、
+    EQ Three (FilterEQ3) の 3 バンド、Auto Filter の Cutoff と
+    FilterType。デバイスの OnOff には触らない。パラメータが
+    土台に無いものは黙って飛ばす (存在しないパラメータを発明
+    しない、従来の方針)。エンベロープとクリップは別要素なの
+    で、ここでは一切触らない。
+
+    keep_filter_type のデッキは FilterType を戻さない: 片側だけ
+    のフィルター演奏では pass 28 の調整が演奏した向きへ Manual
+    を合わせており、そちらが正しい初期値になるため。"""
+    count = 0
+    for key, neutral in STATIC_NEUTRALS:
+        if key == "filter_type" and keep_filter_type:
+            continue
+        if key == "filter":
+            neutral = performance._filter_hz(0.5)
+        param = _param(track, DECK_TARGETS[key])
+        if param is None:
+            continue
+        _set_value(param, "Manual", neutral)
+        count += 1
+    return count
 
 
 def _master_track(root):
@@ -463,7 +517,7 @@ def inject_perf(root, plan) -> dict:
               "session_clips": {"A": 0, "B": 0},
               "slots_extended": {}, "scenes_extended": 0,
               "envelopes_written": {}, "donor": None, "tempo_set": False,
-              "arrangement_cleared": 0,
+              "arrangement_cleared": 0, "statics_neutralised": {},
               "warnings": list(plan.get("warnings") or [])}
 
     donor = als_writer._find_donor_clip(deck_tracks.values(), root)
@@ -631,6 +685,24 @@ def inject_perf(root, plan) -> dict:
                 f"Deck {letter} のフィルタータイプを "
                 f"{'LP' if side == 'lp' else 'HP'} に合わせました "
                 "(演奏のフィルター方向)")
+
+    # Pass 34: neutralise the deck tracks' static (Manual)
+    # device values inherited from the base template, so
+    # regions with no envelope coverage — above all the
+    # Session clips — do not play through whatever state the
+    # template happened to be saved in. This runs AFTER the
+    # pass-28 FilterType adjustment above: for a deck with a
+    # single-sided filter performance, that adjustment has
+    # already set FilterType to the performed side, which is
+    # the correct starting value and is kept.
+    filter_decided = {letter for letter, side
+                      in (plan.get("filter_sides") or {}).items()
+                      if side in ("lp", "hp")}
+    for letter in ("A", "B"):
+        report["statics_neutralised"][letter] = \
+            _neutralise_statics(
+                deck_tracks[letter],
+                keep_filter_type=letter in filter_decided)
 
     als_writer._set_tempo(root, plan.get("set_bpm"), report)
     allocator.finish()
