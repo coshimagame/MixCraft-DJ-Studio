@@ -47,6 +47,7 @@ _enable_bundled_asio()
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+from queue import SimpleQueue
 from PySide6.QtCore import (Qt, QTimer, Signal, QObject, QEvent,
     QRectF, QPointF)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
@@ -1179,6 +1180,74 @@ def audio_diag_summary(diag, lang):
         return i18n.tr('diag_outcome_fallback', lang)
     return i18n.tr('diag_outcome_unknown', lang)
 
+# ---------------------------------------------------------------------------
+# Pass 39: in-app master WAV recording. The audio callbacks hand
+# over finished master blocks (post master gain — what he
+# hears); a worker thread writes them so the stream never waits
+# on the disk. A write failure is recorded, never raised into a
+# callback: the window's tick notices, says so in the status bar
+# and resets the REC button — the performance never stops for
+# the recorder.
+# ---------------------------------------------------------------------------
+
+class WavRecorder:
+    """Queue + worker WAV writer for the master mix (48 kHz,
+    stereo float — the engine's own format). start/stop are
+    idempotent; feed() is safe from any audio callback."""
+
+    def __init__(self):
+        self.path = None
+        self.error = None
+        self.frames = 0
+        self._queue = SimpleQueue()
+        self._thread = None
+        self._accepting = False
+
+    @property
+    def active(self):
+        return self._thread is not None
+
+    def start(self, path):
+        if self._thread is not None:
+            return self.path
+        self.path = Path(path)
+        self.error = None
+        self.frames = 0
+        self._accepting = True
+        self._thread = threading.Thread(target=self._run,
+                                        daemon=True)
+        self._thread.start()
+        return self.path
+
+    def feed(self, block):
+        if self._accepting and self.error is None:
+            self._queue.put(np.array(block, dtype='float32',
+                                     copy=True))
+
+    def stop(self):
+        if self._thread is None:
+            return self.path
+        self._accepting = False
+        self._queue.put(None)
+        self._thread.join(timeout=10)
+        self._thread = None
+        return self.path
+
+    def _run(self):
+        try:
+            with sf.SoundFile(str(self.path), mode='w',
+                              samplerate=RATE, channels=2,
+                              subtype='FLOAT') as out:
+                while True:
+                    block = self._queue.get()
+                    if block is None:
+                        break
+                    out.write(block)
+                    self.frames += len(block)
+        except Exception as error:  # surfaced, never raised
+            self.error = str(error)
+
+
 BUNDLED_TEMPLATE_NAME = 'template.als'
 
 def bundled_template_path(roots=None):
@@ -1740,6 +1809,9 @@ class Window(QMainWindow):
         self._cue_live = False
         self._cue_blocks = deque(maxlen=8)
         self._cue_lock = threading.Lock()
+        # Pass 39: the master WAV recorder (see WavRecorder).
+        self._recorder = None
+        self._recording = False
         self.audio_status_count = 0
         self.callback_count = 0
         self.callback_seconds = 0.0
@@ -2142,13 +2214,22 @@ class Window(QMainWindow):
         self.diag_button = QPushButton('EXPORT DIAGNOSTICS / 診断を書き出す')
         self.diag_button.clicked.connect(self.export_diagnostics)
         utility.addWidget(self.diag_button)
+        # Pass 39: the REC toggle — the master mix he hears,
+        # written to a WAV in the data folder while it plays.
+        # Never disabled: with no stream open it explains itself
+        # in the status bar instead of pretending to record.
+        self.rec_button = QPushButton('● REC')
+        self.rec_button.setCheckable(True)
+        self.rec_button.clicked.connect(self.toggle_recording)
+        utility.addWidget(self.rec_button)
         # Pass 24: the utility bar's controls wear the slimmer
         # padding (STYLE's [util="true"] rules) — the bar's height
         # is part of the window's floor on short screens.
         for util_widget in (self.duration, self.preview_button,
                             self.preview_stop, self.export_button,
                             self.live_button, self.devices,
-                            self.apply_button, self.diag_button):
+                            self.apply_button, self.diag_button,
+                            self.rec_button):
             util_widget.setProperty('util', True)
         layout.addWidget(utility_bar)
         # BOTTOM ZONE (pass 9 sketch): left, one compact MIXER BLOCK
@@ -2292,6 +2373,7 @@ class Window(QMainWindow):
         self._reg(self.live_button.setText, 'export_live')
         self._reg(self.apply_button.setText, 'apply')
         self._reg(self.diag_button.setText, 'diag_export')
+        self._reg(self._paint_rec_button, 'rec_button')
         self._reg(self.setlist_label.setText, 'setlist_caption')
         self._reg(self.mix_reset.setText, 'timer_reset')
         self._reg(self.setlist_open.setText, 'open_setlist')
@@ -2707,6 +2789,70 @@ class Window(QMainWindow):
             self, i18n.tr('diag_title', self.lang),
             i18n.tr('diag_saved', self.lang).format(
                 name=dest.name, summary=summary))
+    def _paint_rec_button(self, _text=None):
+        """Pass 39: the REC button's face follows the state —
+        ● REC at rest, ■ 録音中 while a take runs. Registered
+        as a language label, so a language switch repaints it
+        in the right state too."""
+        key = 'rec_button_on' if self._recording else 'rec_button'
+        self.rec_button.setText(i18n.tr(key, self.lang))
+        self.rec_button.setChecked(self._recording)
+    def toggle_recording(self):
+        """Pass 39: REC on/off. Starting with no stream open
+        explains itself in the status bar and stays off — the
+        button never pretends to record silence. Stopping shows
+        where the take landed."""
+        if self._recording:
+            self._stop_recording(show_dialog=True)
+            return
+        if self.stream is None:
+            self.rec_button.setChecked(False)
+            self._status_fn = lambda lang: \
+                i18n.tr('rec_no_audio', lang)
+            self._apply_status()
+            return
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        path = Path(self.data_dir) / f'MixAble-{stamp}.wav'
+        self._recorder = WavRecorder()
+        self._recorder.start(path)
+        self._recording = True
+        self.engine.command('rec_start', None, str(path))
+        self._paint_rec_button()
+        self._status_fn = lambda lang, n=path.name: \
+            i18n.tr('rec_started', lang).format(name=n)
+        self._apply_status()
+    def _stop_recording(self, show_dialog):
+        if not self._recording:
+            return
+        self._recording = False
+        path = self._recorder.stop() if self._recorder else None
+        self.engine.command('rec_stop', None,
+                            str(path) if path else None)
+        self._paint_rec_button()
+        if show_dialog and path is not None:
+            QMessageBox.information(
+                self, i18n.tr('rec_saved_title', self.lang),
+                i18n.tr('rec_saved', self.lang).format(path=path))
+    def _poll_recorder(self):
+        """Pass 39 (called from tick): a recorder write failure
+        surfaces in the status bar and resets the button —
+        cleanly, without touching the stream or the show."""
+        recorder = self._recorder
+        if recorder is None or not self._recording:
+            return
+        if recorder.error is not None:
+            self._recording = False
+            recorder.stop()
+            self._paint_rec_button()
+            self._status_fn = lambda lang, e=recorder.error: \
+                i18n.tr('rec_error', lang).format(error=e)
+            self._apply_status()
+    def _tap_recorder(self, block):
+        """Pass 39: every audio callback hands its finished
+        master block (post master gain — what he hears) to the
+        recorder. A no-op unless a take is running."""
+        if self._recording and self._recorder is not None:
+            self._recorder.feed(block)
     def _audio_rb_signature(self):
         """The visible DDJ-RB outputs as a comparable tuple —
         the audio retry's change detector (pass 25)."""
@@ -2758,7 +2904,9 @@ class Window(QMainWindow):
         if status: self.audio_status_count += 1
         self.engine.cue_decks = self.monitor_decks
         cue = np.zeros((frames, 2), dtype='float32')
-        outdata[:, 0:2] = self.engine.render(frames, cue)
+        master = self.engine.render(frames, cue)
+        self._tap_recorder(master)
+        outdata[:, 0:2] = master
         outdata[:, 2:4] = cue
 
     def callback_paired_master(self, outdata, frames, time_info,
@@ -2772,7 +2920,9 @@ class Window(QMainWindow):
         if status: self.audio_status_count += 1
         self.engine.cue_decks = self.monitor_decks
         cue = np.zeros((frames, 2), dtype='float32')
-        outdata[:] = self.engine.render(frames, cue)
+        master = self.engine.render(frames, cue)
+        self._tap_recorder(master)
+        outdata[:] = master
         with self._cue_lock:
             self._cue_blocks.append(cue)
 
@@ -2797,7 +2947,9 @@ class Window(QMainWindow):
     def callback(self,outdata,frames,time_info,status):
         started = time.perf_counter()
         if status: self.audio_status_count += 1
-        outdata[:] = self.engine.render(frames)
+        block = self.engine.render(frames)
+        self._tap_recorder(block)
+        outdata[:] = block
         elapsed = time.perf_counter()-started
         self.callback_count += 1
         self.callback_seconds += elapsed
@@ -3961,6 +4113,7 @@ class Window(QMainWindow):
         # so the performance capture survives a dead device.
         if self.stream is None:
             self.engine.apply_pending()
+        self._poll_recorder()
         try: self.journal.drain(self.engine)
         except OSError as e: self.status.setText(f'Autosave error: {e}')
         for widget,d in zip(self.decks,self.engine.decks):
@@ -4090,6 +4243,12 @@ class Window(QMainWindow):
         self.timer.stop()
         self.midi.close()
         self.pool.shutdown(wait=True)
+        # Pass 39: a take still running ends with the window —
+        # the file is finalised and the rec_stop is journalled
+        # before the drain below.
+        if self._recording:
+            self._stop_recording(show_dialog=False)
+            self.engine.apply_pending()
         self._close_streams()
         self.journal.drain(self.engine)
         self.journal.file.close()

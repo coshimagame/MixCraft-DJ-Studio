@@ -503,7 +503,13 @@ class _Reconstructor:
         self.now -= shift
 
     def run(self, events):
-        events = sorted((e for e in events if e.get("action")),
+        # Pass 39: rec_start / rec_stop are the WAV recorder's
+        # toggles — the export ignores them entirely, including
+        # for the journal's end frame (stopping a take after the
+        # music has ended must not stretch the last clips).
+        events = sorted((e for e in events if e.get("action")
+                         and e.get("action") not in
+                         ("rec_start", "rec_stop")),
                         key=lambda e: e.get("frame") or 0)
         for event in events:
             self._apply_event(event)

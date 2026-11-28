@@ -324,6 +324,26 @@ STRINGS = {
         "jp": "DDJ-RBから音は出ますが、この出力にはヘッドホン"
               "キュー用の出口がありません",
     },
+    # Pass 39: in-app master WAV recording.
+    "rec_button": {"en": "● REC", "jp": "● 録音"},
+    "rec_button_on": {"en": "■ REC…", "jp": "■ 録音中"},
+    "rec_no_audio": {
+        "en": "No audio output is open — recording cannot start",
+        "jp": "音声が開けていないので、録音できません",
+    },
+    "rec_started": {
+        "en": "Recording: {name}",
+        "jp": "録音中: {name}",
+    },
+    "rec_saved_title": {"en": "Recording saved", "jp": "録音を保存しました"},
+    "rec_saved": {
+        "en": "The take was saved to:\n{path}",
+        "jp": "録音を保存しました:\n{path}",
+    },
+    "rec_error": {
+        "en": "Recording stopped — the file could not be written: {error}",
+        "jp": "録音を停止しました — ファイルに書けませんでした: {error}",
+    },
     # Pass 36: the diagnostics export — one button beside the
     # device picker refreshes the ladder record and copies it to
     # the Desktop under a findable name; the dialog reports where

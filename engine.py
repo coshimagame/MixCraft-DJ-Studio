@@ -990,6 +990,13 @@ class Engine:
                     self.decks[target]['position'] = 0
                     for x in self.decks: x.update(playing=True, rate=1.0, sync=False, loop_active=False)
             elif action == 'stop_preview': self._restore_preview()
+            elif action in ('rec_start', 'rec_stop'):
+                # Pass 39: the master WAV recorder lives in the
+                # window; the engine only journals the toggle
+                # (the generic events.put below) so the
+                # performance record shows when a take ran. The
+                # Live export ignores these events.
+                pass
             self.events.put(dict(frame=self.frame, sample_rate=RATE, action=action, deck=index, value=value))
             for e_action, e_deck, e_value in extra_events:
                 self.events.put(dict(frame=self.frame, sample_rate=RATE,
