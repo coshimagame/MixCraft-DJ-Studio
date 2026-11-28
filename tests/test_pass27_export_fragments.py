@@ -423,6 +423,53 @@ def test_clips_land_in_the_sample_container_not_cliptimeable(tmp_path):
     assert '301' in pointees
 
 
+# --- device lookup against the REAL template shape ---------------------
+
+def _real_shaped_base(tmp_path):
+    """Rebuild the fixture base in the genuine Live 10 shape:
+    devices nested at DeviceChain/DeviceChain/Devices (the
+    user's real template), and AutoFilter's cutoff named
+    <Cutoff>. The old _device only looked at the outer
+    DeviceChain's direct children — where only the Mixer sits
+    in a real file — so on his base every gain/EQ/filter
+    envelope was silently skipped (only Volume landed)."""
+    root = ET.fromstring(_base_xml())
+    for track in root.iter('AudioTrack'):
+        chain = track.find('./DeviceChain')
+        nested = ET.SubElement(chain, 'DeviceChain')
+        devices = ET.SubElement(nested, 'Devices')
+        for tag in ('StereoGain', 'FilterEQ3', 'AutoFilter'):
+            el = chain.find(tag)
+            if el is not None:
+                chain.remove(el)
+                devices.append(el)
+        auto_filter = devices.find('AutoFilter')
+        if auto_filter is not None:
+            freq = auto_filter.find('Frequency')
+            if freq is not None:
+                freq.tag = 'Cutoff'
+    return _write_base(
+        tmp_path, xml=ET.tostring(root, encoding='unicode'))
+
+
+def test_all_deck_envelopes_land_on_a_real_shaped_base(tmp_path):
+    base = _real_shaped_base(tmp_path)
+    wav_a = _make_wav(tmp_path / 'Alpha.wav')
+    wav_b = _make_wav(tmp_path / 'Beta.wav')
+    out = tmp_path / 'perf.als'
+    report = perf_als.generate(
+        base, _events_two_decks(wav_a, wav_b), out,
+        set_bpm=120.0,
+        bpms={str(wav_a): 120.0, str(wav_b): 120.0})
+    written = report['envelopes_written']
+    for letter in ('A', 'B'):
+        for name in ('volume', 'gain', 'eq_low', 'eq_mid',
+                     'eq_high', 'filter'):
+            assert f'{name}_{letter}' in written, (name, letter)
+    assert not [w for w in report['warnings']
+                if '書けませんでした' in w]
+
+
 # --- engine: mutual sync never phase-locks -----------------------------
 
 def _make_track(bpm, offset, conf, seconds=30, name='t.wav'):

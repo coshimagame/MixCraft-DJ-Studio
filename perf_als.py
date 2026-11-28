@@ -73,10 +73,22 @@ def _target_id(param_el):
 
 
 def _device(track, tag):
-    """DeviceChain の直接の子からデバイス要素を探す。"""
+    """トラックのデバイス要素を探す。
+
+    本物の Live 10 ではデバイスは DeviceChain / DeviceChain /
+    Devices の中に入っている (ユーザーの実テンプレで確認)。
+    以前は外側 DeviceChain の直接の子しか見ておらず、実テンプ
+    レートでは Mixer (直接の子) 以外の全デバイス — Utility /
+    EQ Three / Auto Filter — を見落として、GAIN・EQ・FILTER
+    のエンベロープが全部書けていなかった。Devices の中を
+    優先し、直接の子 (合成フィクスチャの形) にも当てる。"""
     chain = track.find("./DeviceChain")
     if chain is None:
         return None
+    for devices in chain.iter("Devices"):
+        for el in devices:
+            if el.tag == tag:
+                return el
     for el in chain:
         if el.tag == tag:
             return el
@@ -105,7 +117,10 @@ DECK_TARGETS = {
     "eq_low": ("device", "FilterEQ3", ("GainLo", "GainLow")),
     "eq_mid": ("device", "FilterEQ3", ("GainMid", "GainMiddle")),
     "eq_high": ("device", "FilterEQ3", ("GainHi", "GainHigh")),
-    "filter": ("device", "AutoFilter", ("Frequency",)),
+    # 実 Live 10.1.43 の AutoFilter のカットオフは <Cutoff>
+    # (直接の子に Frequency は無い — 奥にある同名要素は LFO
+    # 側で別物)。フィクスチャ等の旧形に Frequency も残す。
+    "filter": ("device", "AutoFilter", ("Cutoff", "Frequency")),
 }
 
 
