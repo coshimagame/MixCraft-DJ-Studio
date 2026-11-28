@@ -69,9 +69,11 @@ def _track(track_id, name, base, donor=False, eq=True):
            + _param('GainHi', '0', base + 4) + '</FilterEQ3>' if eq else '')
         + '<AutoFilter>' + _param('Frequency', '0.5', base + 5)
         + '</AutoFilter>')
-    arranger = ('<ClipTimeable><ArrangerAutomation><Events/><Envelopes/>'
-                '</ArrangerAutomation></ClipTimeable>' if donor else
-                '<ClipTimeable/>')
+    # Genuine shape (pass 27 real-machine finding): the audio
+    # arrangement container is MainSequencer/Sample on every
+    # audio track; ClipTimeable is the MIDI timeable.
+    arranger = ('<Sample><ArrangerAutomation><Events/><Envelopes/>'
+                '</ArrangerAutomation></Sample>')
     return (f'<AudioTrack Id="{track_id}"><Name>'
             f'<EffectiveName Value="{name}"/></Name><DeviceChain>'
             + devices +
@@ -111,7 +113,9 @@ def _base_xml(eq_b=True):
         + '</Tracks>'
         '<MasterTrack><DeviceChain><Mixer>'
         + _param('Tempo', '100', 301) +
-        '</Mixer><MainSequencer><ClipTimeable/></MainSequencer>'
+        '</Mixer><FreezeSequencer><AudioSequencer><Sample>'
+        '<ArrangerAutomation><Events/><Envelopes/></ArrangerAutomation>'
+        '</Sample></AudioSequencer></FreezeSequencer>'
         '</DeviceChain></MasterTrack>'
         '</LiveSet></Ableton>')
 
@@ -139,8 +143,13 @@ def _ev(frame, action, deck=None, value=None):
 
 
 def _arrangement(track):
-    return track.find('./DeviceChain/MainSequencer/ClipTimeable/'
-                      'ArrangerAutomation')
+    arranger = track.find('./DeviceChain/MainSequencer/Sample/'
+                          'ArrangerAutomation')
+    if arranger is None:    # MasterTrack: no MainSequencer
+        arranger = track.find('./DeviceChain/FreezeSequencer/'
+                              'AudioSequencer/Sample/'
+                              'ArrangerAutomation')
+    return arranger
 
 
 def _clips(track):
@@ -377,6 +386,41 @@ def test_id_space_and_lomid_match_genuine_saves(tmp_path):
     for track in tracks:
         for clip in _clips(track):
             assert als_writer._get_value(clip, 'LomId') == '0'
+
+
+# --- the container Live actually reads --------------------------------
+
+def test_clips_land_in_the_sample_container_not_cliptimeable(tmp_path):
+    """THE pass-27 root cause, from the user's Live screenshots:
+    the exported set showed his template's session clips but a
+    completely blank arrangement. His file's genuine parts
+    prove why — a real Live 10 audio track keeps its
+    arrangement in MainSequencer/Sample/ArrangerAutomation
+    (empty in his base), the master in FreezeSequencer/
+    AudioSequencer/Sample, and ClipTimeable (the MIDI timeable)
+    appears NOWHERE in the genuine structure. The old writer
+    created ClipTimeable and put everything there; Live
+    ignored the whole subtree. Pin the genuine locations."""
+    base = _write_base(tmp_path)
+    wav_a = _make_wav(tmp_path / 'Alpha.wav')
+    wav_b = _make_wav(tmp_path / 'Beta.wav')
+    out = tmp_path / 'perf.als'
+    perf_als.generate(base, _events_two_decks(wav_a, wav_b), out,
+                      set_bpm=120.0,
+                      bpms={str(wav_a): 120.0, str(wav_b): 120.0})
+    root = als_writer.load_als(out).getroot()
+    assert list(root.iter('ClipTimeable')) == []
+    tracks = als_writer._audio_tracks(root)
+    assert len(_clips(tracks[0])) == 1
+    assert len(_clips(tracks[1])) == 1
+    # The tempo envelope reaches the master's genuine
+    # container (the old code raised on the master, which has
+    # no MainSequencer, and silently dropped it).
+    master = root.find('./LiveSet/MasterTrack')
+    menv = _arrangement(master).find('Envelopes')
+    pointees = [e.find('./EnvelopeTarget/PointeeId').get('Value')
+                for e in menv]
+    assert '301' in pointees
 
 
 # --- engine: mutual sync never phase-locks -----------------------------

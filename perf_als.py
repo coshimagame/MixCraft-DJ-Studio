@@ -7,10 +7,15 @@
 直せるセット」を作る。als_writer.py と同じ方針:
 
   - クリップ XML は捏造しない。ベース .als の既存 AudioClip を
-    複製し、Arrangement (MainSequencer / ClipTimeable /
-    ArrangerAutomation / Events — 構造名は mixlist.py が参照する
-    fileformats.org の ALS 形式ドキュメントで確認したもの) に
-    演奏した位置・区間で置く。
+    複製し、Arrangement (オーディオトラックは MainSequencer /
+    Sample / ArrangerAutomation / Events、マスターは
+    FreezeSequencer / AudioSequencer / Sample 配下) に演奏した
+    位置・区間で置く。入れ物の場所は pass 27 の実機検証で確定
+    した: 以前使っていた ClipTimeable は MIDI トラック用で、
+    オーディオトラックに書いても Live 10.1.43 は丸ごと無視
+    した (ユーザーの実ファイルでは本物の Sample /
+    ArrangerAutomation が空のまま残り、書き出し分だけが
+    ClipTimeable に入っていた)。
   - オートメーションは ArrangerAutomation / Envelopes に
     Envelope (EnvelopeTarget / PointeeId → パラメータの
     AutomationTarget Id) として書く。対象パラメータがテン
@@ -125,19 +130,43 @@ def _tempo_param(root):
 # Arrangement の入れ物
 # ---------------------------------------------------------------------------
 
+def _timeable_sample(track):
+    """Arrangement の入れ物 (<Sample>) を返す (pass 27 実機確定)。
+
+    オーディオトラック: DeviceChain / MainSequencer / Sample。
+    マスター: DeviceChain / FreezeSequencer / AudioSequencer /
+    Sample (マスターに MainSequencer は無い)。FreezeSequencer
+    直下の Sample はフリーズ用の別物なので踏まない。無ければ
+    None — ClipTimeable のような「Live が読まない入れ物」を
+    作って成功したことにはしない。"""
+    chain = track.find("./DeviceChain") if track is not None else None
+    if chain is None:
+        return None
+    sequencer = chain.find("MainSequencer")
+    if sequencer is not None:
+        sample = sequencer.find("Sample")
+        if sample is not None:
+            return sample
+    for audio_sequencer in chain.iter("AudioSequencer"):
+        sample = audio_sequencer.find("Sample")
+        if sample is not None:
+            return sample
+    return None
+
+
 def _arranger(track):
-    """(Events, Envelopes) を返す。途中の要素が無ければ作る
-    (要素名は ALS 形式ドキュメントで確認したものだけ)。"""
-    chain = track.find("./DeviceChain")
-    sequencer = chain.find("MainSequencer") if chain is not None else None
-    if sequencer is None:
-        raise AlsError("トラックに MainSequencer がありません")
-    timeable = sequencer.find("ClipTimeable")
-    if timeable is None:
-        timeable = ET.SubElement(sequencer, "ClipTimeable")
-    arranger = timeable.find("ArrangerAutomation")
+    """(Events, Envelopes) を返す。本物の <Sample> の中の
+    ArrangerAutomation を使い、Events / Envelopes だけが無け
+    れば作る (本物の空の ArrangerAutomation は Events と
+    AutomationTransformViewState を持ち、Envelopes はオート
+    メーションがある時に Live 自身が足す形)。"""
+    sample = _timeable_sample(track)
+    if sample is None:
+        raise AlsError(
+            "トラックに Arrangement の入れ物 (Sample) がありません")
+    arranger = sample.find("ArrangerAutomation")
     if arranger is None:
-        arranger = ET.SubElement(timeable, "ArrangerAutomation")
+        arranger = ET.SubElement(sample, "ArrangerAutomation")
     events = arranger.find("Events")
     if events is None:
         events = ET.SubElement(arranger, "Events")
@@ -287,28 +316,41 @@ def _make_envelope(pointee_id, points, allocator):
 def _clear_arrangement(track):
     """トラックの ArrangerAutomation の中身 (クリップとエンベロープ)
     を空にする。取り除いたクリップ数を返す。入れ物が無ければ何も
-    しない (作りもしない)。"""
+    しない (作りもしない)。
+
+    掃除先は本物の入れ物 (Sample 配下)。加えて、pass 27 以前の
+    書き出しを土台にした場合に残る旧入れ物 (MainSequencer /
+    ClipTimeable 配下) も空にする — Live には見えないが、出力の
+    Arrangement は「この演奏だけ」という約束をファイル上でも
+    守るため。"""
     if track is None:
         return 0
+    arrangers = []
+    sample = _timeable_sample(track)
+    if sample is not None:
+        arranger = sample.find("ArrangerAutomation")
+        if arranger is not None:
+            arrangers.append(arranger)
     chain = track.find("./DeviceChain")
     sequencer = chain.find("MainSequencer") if chain is not None else None
     timeable = sequencer.find("ClipTimeable") \
         if sequencer is not None else None
-    arranger = timeable.find("ArrangerAutomation") \
-        if timeable is not None else None
-    if arranger is None:
-        return 0
+    if timeable is not None:
+        legacy = timeable.find("ArrangerAutomation")
+        if legacy is not None:
+            arrangers.append(legacy)
     removed = 0
-    events = arranger.find("Events")
-    if events is not None:
-        removed = len([el for el in events
-                       if el.tag in ("AudioClip", "MidiClip")])
-        for child in list(events):
-            events.remove(child)
-    envelopes = arranger.find("Envelopes")
-    if envelopes is not None:
-        for child in list(envelopes):
-            envelopes.remove(child)
+    for arranger in arrangers:
+        events = arranger.find("Events")
+        if events is not None:
+            removed += len([el for el in events
+                            if el.tag in ("AudioClip", "MidiClip")])
+            for child in list(events):
+                events.remove(child)
+        envelopes = arranger.find("Envelopes")
+        if envelopes is not None:
+            for child in list(envelopes):
+                envelopes.remove(child)
     return removed
 
 

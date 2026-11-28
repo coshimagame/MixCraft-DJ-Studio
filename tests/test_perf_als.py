@@ -46,9 +46,12 @@ def _track(track_id, name, base, donor=False, eq=True):
            + _param('GainHi', '0', base + 4) + '</FilterEQ3>' if eq else '')
         + '<AutoFilter>' + _param('Frequency', '0.5', base + 5)
         + '</AutoFilter>')
-    arranger = ('<ClipTimeable><ArrangerAutomation><Events/><Envelopes/>'
-                '</ArrangerAutomation></ClipTimeable>' if donor else
-                '<ClipTimeable/>')
+    # Pass 27 (real-machine finding): the audio arrangement
+    # lives in MainSequencer/Sample — ClipTimeable is the MIDI
+    # timeable and Live ignores audio clips placed there. Every
+    # genuine audio track carries the (empty) Sample container.
+    arranger = ('<Sample><ArrangerAutomation><Events/><Envelopes/>'
+                '</ArrangerAutomation></Sample>')
     return (f'<AudioTrack Id="{track_id}"><Name>'
             f'<EffectiveName Value="{name}"/></Name><DeviceChain>'
             + devices +
@@ -88,7 +91,9 @@ def _base_xml(eq_b=True):
         + '</Tracks>'
         '<MasterTrack><DeviceChain><Mixer>'
         + _param('Tempo', '100', 301) +
-        '</Mixer><MainSequencer><ClipTimeable/></MainSequencer>'
+        '</Mixer><FreezeSequencer><AudioSequencer><Sample>'
+        '<ArrangerAutomation><Events/><Envelopes/></ArrangerAutomation>'
+        '</Sample></AudioSequencer></FreezeSequencer>'
         '</DeviceChain></MasterTrack>'
         '</LiveSet></Ableton>')
 
@@ -121,8 +126,13 @@ def _events(wav_a, wav_b):
 
 
 def _arrangement(track):
-    return track.find('./DeviceChain/MainSequencer/ClipTimeable/'
-                      'ArrangerAutomation')
+    arranger = track.find('./DeviceChain/MainSequencer/Sample/'
+                          'ArrangerAutomation')
+    if arranger is None:    # MasterTrack: no MainSequencer
+        arranger = track.find('./DeviceChain/FreezeSequencer/'
+                              'AudioSequencer/Sample/'
+                              'ArrangerAutomation')
+    return arranger
 
 
 def _envelope_for(track, pointee_id):

@@ -70,8 +70,8 @@ def _track(track_id, name, slots):
         f'<Annotation Value="KEEP-{name}"/></Name>'
         '<DeviceChain><MainSequencer><ClipSlotList>'
         + "".join(slots) +
-        '</ClipSlotList><ClipTimeable><ArrangerAutomation><Events/>'
-        '</ArrangerAutomation></ClipTimeable></MainSequencer>'
+        '</ClipSlotList><Sample><ArrangerAutomation><Events/>'
+        '</ArrangerAutomation></Sample></MainSequencer>'
         '<DeviceChain><Devices/></DeviceChain></DeviceChain></AudioTrack>')
 
 
