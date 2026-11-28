@@ -50,6 +50,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QFileDialog, QComboBox, QMessageBox, QFrame, QProgressBar, QScrollArea,
     QSizePolicy)
+from analysis import AnalysisCache
 from engine import (Engine, Journal, RATE, GRID_CONFIDENT,
                     WAVE_WINDOW_SECONDS, apply_cue_anchor,
                     format_mix_clock, grid_offset_through,
@@ -294,6 +295,15 @@ def paint_lcd_glass(p, rect, bezel=True):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(rect.adjusted(0, 0, -1, -1))
 
+def _is_bar_tick(k, bar_offset, beats_per_bar):
+    """Pass 28: grid beat k is a BAR (downbeat) tick when
+    (k - bar_offset) is a whole number of bars. The analysis
+    fixes the beat phase only; bar_offset (0..3, the deck's
+    stepper) is the user's downbeat correction, and both
+    waveform views draw their strong ticks from this."""
+    return (k - bar_offset) % beats_per_bar == 0
+
+
 class Result(QObject):
     ready = Signal(int, object, str)
 
@@ -383,13 +393,19 @@ class Waveform(QWidget):
             if self.track.anchor_cue is not None else grid.offset)
         if show_grid:
             beat = grid.beat_frames
+            # Pass 28: the BAR ticks honour the track's bar
+            # offset — beat k is a bar start when (k - bar_offset)
+            # is a whole number of bars. Analysis fixes the beat
+            # phase only; the downbeat is the user's correction.
+            bar_off = self.track.bar_offset if self.track else 0
             k_first = math.ceil((start - tick_offset) / beat)
             k_last = int((end - tick_offset) / beat)
             for k in range(k_first, k_last + 1):
                 x = int(frame_to_x(tick_offset + k * beat,
                                    start, end, w))
                 p.setPen(QColor(34, 43, 28,
-                                85 if k % grid.beats_per_bar == 0
+                                85 if _is_bar_tick(k, bar_off,
+                                                   grid.beats_per_bar)
                                 else 36))
                 p.drawLine(x, 0, x, main_h)
         # Pass 24 (user report 2026-11-27: 「波形がまだガタガタ」):
@@ -437,13 +453,16 @@ class Waveform(QWidget):
             p.drawLine(x, omid_i-y, x, omid_i+y)
         if show_grid:
             # Overview: BAR ticks only — beat ticks would merge
-            # into a solid band at whole-track scale.
+            # into a solid band at whole-track scale. Pass 28:
+            # the bars start at the bar-offset downbeat, not at
+            # the analysed beat phase.
             bar = grid.bar_frames
-            k_first = math.ceil((0 - tick_offset) / bar)
-            k_last = int((total - tick_offset) / bar)
+            bar_origin = tick_offset + bar_off * beat
+            k_first = math.ceil((0 - bar_origin) / bar)
+            k_last = int((total - bar_origin) / bar)
             p.setPen(QColor(34, 43, 28, 70))
             for k in range(k_first, k_last + 1):
-                x = int((tick_offset + k * bar) / max(1, total) * w)
+                x = int((bar_origin + k * bar) / max(1, total) * w)
                 p.drawLine(x, oy, x, oy + WAVE_OVERVIEW_HEIGHT)
         p.setPen(QPen(QColor(COLOR_LCD_INK), 2))
         p.drawLine(pos_x, oy, pos_x, oy + WAVE_OVERVIEW_HEIGHT)
@@ -1148,6 +1167,25 @@ def deck_title_text(path, setlist_data=None):
     return Path(path).name
 
 
+class BarOffsetLabel(QLabel):
+    """Pass 28: the bar-offset stepper's readout — focusable, and
+    the Left / Right arrow keys nudge the offset exactly like the
+    − / ＋ buttons beside it (keyboard parity for the stepper)."""
+    def __init__(self, deck):
+        super().__init__('0')
+        self._deck = deck
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Left:
+            self._deck.window.cycle_bar_offset(self._deck.index, -1)
+        elif event.key() == Qt.Key.Key_Right:
+            self._deck.window.cycle_bar_offset(self._deck.index, +1)
+        else:
+            super().keyPressEvent(event)
+
+
 class Deck(QFrame):
     def __init__(self, window, index):
         super().__init__()
@@ -1266,13 +1304,46 @@ class Deck(QFrame):
         self.clock.setFixedWidth(164)
         self.clock.setText('00:00.0')
         readouts.addWidget(self.clock)
+        # Pass 28 (user report 2026-11-28: 「小節があってない」):
+        # the bar-offset stepper, beside the clock — analysis
+        # finds the beat phase but not which beat starts the bar,
+        # so the user cycles the downbeat 0..3 beats here. It
+        # moves the waveform's bar ticks and feeds the Live
+        # export's bar alignment; Window.cycle_bar_offset owns
+        # the state change + analysis-cache persistence.
+        self.bar_label = QLabel('')
+        self.bar_label.setStyleSheet(
+            f'color:{COLOR_LCD_INK_SOFT};font-size:11px;font-weight:700')
+        self.bar_label.setToolTip(i18n.tr('bar_offset_tip', window.lang))
+        readouts.addWidget(self.bar_label)
+        self.bar_minus = QPushButton('−')
+        self.bar_plus = QPushButton('＋')
+        for button, step in ((self.bar_minus, -1), (self.bar_plus, +1)):
+            button.setFixedSize(20, 20)
+            button.setStyleSheet(
+                f'color:{COLOR_LCD_INK};background:transparent;'
+                'border:1px solid rgba(34,43,28,0.35);border-radius:2px;'
+                'font-size:12px;font-weight:800;padding:0')
+            button.setToolTip(i18n.tr('bar_offset_tip', window.lang))
+            button.clicked.connect(
+                lambda _checked=False, s=step:
+                window.cycle_bar_offset(index, s))
+            readouts.addWidget(button)
+        self.bar_value = BarOffsetLabel(self)
+        self.bar_value.setFixedSize(18, 20)
+        self.bar_value.setStyleSheet(
+            f'color:{COLOR_LCD_INK};font-size:12px;font-weight:800')
+        self.bar_value.setToolTip(i18n.tr('bar_offset_tip', window.lang))
+        readouts.addWidget(self.bar_value)
         readouts.addStretch()
         info.addLayout(readouts)
+        self.refresh_bar_offset()
         # Pass 15 state markers (user direction, 2026-11-27): ON AIR
         # — a FILLED ink chip, lit only while this deck is actually
         # playing — and MONITOR — a HOLLOW ink chip that is also the
-        # headphone-monitor SELECT (clicking it is the select;
-        # Window.toggle_monitor owns the exclusivity and the state).
+        # headphone-monitor toggle for THIS deck (clicking it is the
+        # toggle; Window.toggle_monitor owns the state — per-deck
+        # since pass 28, both decks may be monitored at once).
         # Filled vs hollow: the two states cannot be confused, even
         # in monochrome. Both chips live on the glass, in ink.
         state_row = QHBoxLayout()
@@ -1305,8 +1376,11 @@ class Deck(QFrame):
         # box, the five knobs (GAIN / HIGH / MID / LOW / FILTER,
         # centre = neutral) in their own column box. Only the
         # widgets' homes changed — the value domain (0-100), the
-        # defaults (volume 80, parameters 50) and every engine command
-        # below are exactly what they sent from inside the deck.
+        # defaults (parameters 50; the channel fader starts at
+        # 100 = unity since pass 28, where the old 80 start was
+        # one of the stacked attenuations behind 「音が小さい」)
+        # and every engine command below are exactly what they
+        # sent from inside the deck.
         self.fader_box = QWidget()
         fader_box = QVBoxLayout(self.fader_box)
         fader_box.setContentsMargins(0, 0, 0, 0)
@@ -1318,7 +1392,7 @@ class Deck(QFrame):
         self.volume = QSlider(Qt.Orientation.Vertical)
         self.volume.setStyleSheet(fader_qss)
         self.volume.setRange(0, 100)
-        self.volume.setValue(80)
+        self.volume.setValue(100)   # pass 28: unity start (was 80)
         self.volume.setFixedWidth(84)
         self.volume.setFixedHeight(240)
         self.volume.valueChanged.connect(lambda v: window.engine.command('volume', index, v/100))
@@ -1385,6 +1459,17 @@ class Deck(QFrame):
             button.setMinimumWidth(52)
             pads_row.addWidget(button)
         grid.addLayout(pads_row, 1, 2)
+    def refresh_bar_offset(self):
+        """Pass 28: repaint the bar-offset stepper from the loaded
+        track (0 and disabled while the deck is empty — there is
+        no grid to shift)."""
+        track = self.wave.track if hasattr(self, 'wave') else None
+        value = track.bar_offset if track is not None else 0
+        if hasattr(self, 'bar_value'):
+            self.bar_value.setText(str(value))
+            for button in (self.bar_minus, self.bar_plus):
+                button.setEnabled(track is not None)
+
     def set_onair(self, on, force=False):
         """Pass 15: the ON AIR chip + the info window's heavy ink
         frame follow the engine's real playing state for this deck
@@ -1409,10 +1494,11 @@ class Deck(QFrame):
         self.info_box.set_heavy_frame(on)
     def set_monitor(self, on, force=False):
         """Pass 15: the MONITOR chip's state — HOLLOW ink (heavy
-        outline, no fill) while this deck is the monitored one, so
-        it can never be confused with the filled ON AIR chip. The
-        state itself lives in Window.monitor_deck; this only paints
-        it (and re-texts on a language switch, via force)."""
+        outline, no fill) while this deck is monitored, so it can
+        never be confused with the filled ON AIR chip. Pass 28:
+        the state lives in Window.monitor_decks (per-deck, both
+        may be on); this only paints it (and re-texts on a
+        language switch, via force)."""
         on = bool(on)
         if self.monitor_on == on and not force:
             return
@@ -1521,13 +1607,20 @@ class Window(QMainWindow):
         self.clip_tracks = []      # setlist_to_clip_tracks() result, for the Live hand-off
         self.deck_a_bpm = None     # Deck A track BPM — fallback for the centre SET BPM dial
         self.mix_timer = new_mix_timer()   # pass 8: performance elapsed timer
-        # Pass 15: the headphone-monitor select — None, or the deck
-        # index (0/1) being monitored. Exclusive by construction
-        # (one value). The engine has no separate cue bus, so this
-        # state is the surface's monitor select, and its real job in
-        # the engine is the transition audition's TARGET: preview()
-        # runs the transition INTO the monitored deck.
-        self.monitor_deck = None
+        # Pass 15: the headphone-monitor select. The engine has no
+        # separate cue bus, so this state is the surface's monitor
+        # select, and its real job in the engine is the transition
+        # audition's TARGET: preview() runs the transition INTO
+        # the monitored deck.
+        # Pass 28 (user direction, 2026-11-28: 「モニターはどちら
+        # か一方だけでなく両方できるようにしてほしい」): the
+        # select is PER-DECK now — monitor_decks is the set of
+        # decks being monitored (both may be in it), and
+        # _monitor_order remembers enable order so the
+        # monitor_deck property can still name the most recently
+        # enabled deck (the audition's target rule).
+        self.monitor_decks = set()
+        self._monitor_order = []
         # Pass 27 (user report, 2026-11-28: 「ミックスリストと演奏
         # 中の曲の相互連携が取れてなくて矛盾してる」): the set
         # list's played / now-playing / next markers are derived
@@ -1556,6 +1649,17 @@ class Window(QMainWindow):
         data = Path(os.getenv('LOCALAPPDATA', str(Path.home()/'.local/share'))) / 'MixCraftDJStudio'
         self.data_dir = data
         self.settings = load_app_settings(data)
+        # Pass 28: the analysis cache is wired in at last —
+        # load_track was built for it, but the app never passed
+        # one, so every load re-analysed from scratch and a
+        # per-track correction (the bar offset) had nowhere to
+        # persist. A cache failure must never break loading:
+        # cache=None is load_track's long-standing fallback.
+        try:
+            data.mkdir(parents=True, exist_ok=True)
+            self.cache = AnalysisCache(data / 'analysis.db')
+        except Exception:
+            self.cache = None
         self.journal = Journal(data/'sessions'/f'{time.time_ns()}.jsonl')
         root = QWidget()
         scroll = QScrollArea()
@@ -1857,13 +1961,16 @@ class Window(QMainWindow):
         mix_top.addWidget(self.mixer_label)
         mix_top.addStretch()
         # MASTER volume as a knob (pass 6): same Knob widget and the
-        # same wiring the horizontal slider had — range 0-100, default
-        # 80, 'master' command with v/100. Pass 20: the master wears
+        # same wiring the horizontal slider had — range 0-100,
+        # 'master' command with v/100. Pass 28: the default is 100
+        # (unity) — the old 80 start stacked a second -1.9 dB on
+        # the channel fader's 80 (「音が小さい」, measured in
+        # tests/test_pass28_gain_chain.py). Pass 20: the master wears
         # the muted-amber accent (like GAIN / FILTER) — it belongs
         # to neither deck, the accent marks it as a master control.
         self.master = Knob('MASTER', COLOR_KNOB_ACCENT, bipolar=False)
         self.master.setRange(0, 100)
-        self.master.setValue(80)
+        self.master.setValue(100)
         self.master.valueChanged.connect(lambda v: self.engine.command('master', value=v/100))
         mix_top.addWidget(self.master)
         mix_top.addStretch()
@@ -1955,6 +2062,12 @@ class Window(QMainWindow):
             self._reg(deck.quant.setText, 'quantize')
             self._reg(deck.sync.setText, 'sync')
             self._reg(deck.sync.setToolTip, 'sync_tip')
+            # Pass 28: the bar-offset stepper's caption + tips.
+            self._reg(deck.bar_label.setText, 'bar_offset')
+            self._reg(deck.bar_label.setToolTip, 'bar_offset_tip')
+            self._reg(deck.bar_minus.setToolTip, 'bar_offset_tip')
+            self._reg(deck.bar_plus.setToolTip, 'bar_offset_tip')
+            self._reg(deck.bar_value.setToolTip, 'bar_offset_tip')
         self._reg(self.set_bpm_label.setText, 'set_bpm')
         self._reg(self.set_dial.set_caption, 'set_bpm')
         self._reg(self.set_dial.setToolTip, 'set_bpm_tip')
@@ -2299,7 +2412,7 @@ class Window(QMainWindow):
         self.decks[index].name.setText(i18n.tr('loading', self.lang)+Path(path).name)
         self.decks[index].load.setEnabled(False)
         def work():
-            try: self.result.ready.emit(index,load_track(path),'')
+            try: self.result.ready.emit(index,load_track(path, self.cache),'')
             except Exception as e: self.result.ready.emit(index,None,str(e))
         self.pool.submit(work)
     def loaded(self,index,track,error):
@@ -2325,6 +2438,7 @@ class Window(QMainWindow):
         self.engine.command('stop_preview')
         self.engine.command('load',index,track)
         deck.wave.track = track
+        deck.refresh_bar_offset()   # pass 28: the new track's offset
         deck.name.setText(deck_title_text(track.path, self.setlist_data))
         self._render_deck_key(deck, track)
         # Pass 20: the deck's BPM readout is gone (user review fix)
@@ -2344,20 +2458,69 @@ class Window(QMainWindow):
         # Pass 15: the audition runs INTO the monitored deck (the
         # deck being cued up is the one a DJ monitors); with no
         # monitor selection it keeps the original A -> B direction.
+        # Pass 28: with both decks monitored, the target is the
+        # most recently monitor-ENABLED deck (monitor_deck).
         target = self.monitor_deck if self.monitor_deck is not None else 1
         self.engine.command('preview', deck=target,
                             value=self.duration.currentData())
+    @property
+    def monitor_deck(self):
+        """The most recently monitor-enabled deck that is still
+        on, or None — pass 15's single value kept as a read view
+        of the pass-28 per-deck state (the audition's target).
+        Assigning replaces the whole monitor state (older
+        callers and test doubles do this)."""
+        return self._monitor_order[-1] if self._monitor_order else None
+
+    @monitor_deck.setter
+    def monitor_deck(self, value):
+        if value is None:
+            self.monitor_decks = set()
+            self._monitor_order = []
+        else:
+            self.monitor_decks = {value}
+            self._monitor_order = [value]
+        if hasattr(self, 'decks'):
+            self._refresh_monitor_buttons()
+
     def toggle_monitor(self, index):
-        """Pass 15: the per-deck MONITOR select — exclusive (one
-        deck at most; selecting the monitored deck again clears
-        it). Repaints both decks' monitor chips and the set-list
-        row marker."""
-        self.monitor_deck = None if self.monitor_deck == index else index
+        """Pass 28 (user direction, 2026-11-28): the MONITOR
+        toggle is per-deck and independent — toggling one deck
+        never touches the other, and both may be monitored at
+        once. The deck chips and the DDJ-RB headphone CUE buttons
+        (note 84) each call this for their own deck only.
+        Repaints both decks' monitor chips and the set-list row
+        markers."""
+        if index in self.monitor_decks:
+            self.monitor_decks.discard(index)
+            self._monitor_order.remove(index)
+        else:
+            self.monitor_decks.add(index)
+            self._monitor_order.append(index)
         self._refresh_monitor_buttons()
         self.render_setlist()
     def _refresh_monitor_buttons(self):
         for i, deck in enumerate(self.decks):
-            deck.set_monitor(self.monitor_deck == i, force=True)
+            deck.set_monitor(i in self.monitor_decks, force=True)
+    def cycle_bar_offset(self, index, step):
+        """Pass 28: cycle a deck track's bar offset (0..3) — the
+        stepper buttons and the readout's arrow keys land here.
+        The new value rides the Track, persists to the analysis
+        cache (so the next load of the same file starts there),
+        and repaints the stepper + waveform bar ticks."""
+        deck = self.decks[index]
+        track = deck.wave.track
+        if track is None:
+            return
+        track.bar_offset = (track.bar_offset + step) % 4
+        if self.cache is not None:
+            try:
+                self.cache.set_bar_offset(track.path,
+                                          track.bar_offset)
+            except Exception:
+                pass    # persistence is a courtesy, never a blocker
+        deck.refresh_bar_offset()
+        deck.wave.update()
     def export(self):
         path,_ = QFileDialog.getSaveFileName(self,'Save events','mixcraft-events.json','JSON (*.json)')
         if path:
@@ -2428,11 +2591,37 @@ class Window(QMainWindow):
             track = deck.wave.track
             if track is not None and track.bpm:
                 bpms[track.path] = track.bpm
+        # Pass 28: grid sources for the export's bar alignment —
+        # the deck tracks' live grids win; any other performed
+        # file falls back to the analysis cache's stored grid.
+        grids = {}
+        for deck in self.decks:
+            track = deck.wave.track
+            if track is not None:
+                grids[track.path] = {
+                    'beat_offset': track.beat_offset,
+                    'bar_offset': track.bar_offset}
+        if self.cache is not None:
+            for event in history:
+                if event.get('action') != 'load' \
+                        or not event.get('value'):
+                    continue
+                path = event['value']
+                if path in grids:
+                    continue
+                try:
+                    row = self.cache.get(path)
+                except Exception:
+                    row = None
+                if row:
+                    grids[path] = {
+                        'beat_offset': row.get('beat_offset') or 0,
+                        'bar_offset': row.get('bar_offset') or 0}
         try:
             report = perf_als.generate(base, history, out,
                                        set_bpm=set_bpm,
                                        setlist_data=self.setlist_data,
-                                       bpms=bpms)
+                                       bpms=bpms, grids=grids)
         except Exception as error:
             self._status_fn = lambda lang, e=error: \
                 i18n.tr('live_export_error', lang).format(error=e)
@@ -2454,6 +2643,10 @@ class Window(QMainWindow):
         self._apply_status()
         done_text = i18n.tr('live_export_done_dialog', self.lang).format(
             path=out, clips=clips, envelopes=envelopes, base=base)
+        if report.get('events_copy'):
+            done_text += '\n\n' + i18n.tr(
+                'live_export_events_copy', self.lang).format(
+                path=report['events_copy'])
         if warning:
             done_text += f'\n\n{warning}'
         QMessageBox.information(
@@ -2805,15 +2998,24 @@ class Window(QMainWindow):
                    and self._deck_claims[i] is not None}
         return live_statuses(tracks, playing, self._setlist_played)
 
+    def _monitor_paths(self):
+        """The loaded-track paths of every monitored deck
+        (pass 28: both decks may be monitored at once, so the
+        set-list marker is a SET of paths, not one)."""
+        paths = set()
+        for i in self.monitor_decks:
+            track = self.decks[i].wave.track
+            if track is not None:
+                path = getattr(track, 'path', None)
+                if path:
+                    paths.add(path)
+        return frozenset(paths)
+
     def _setlist_signature(self):
         """What the rendered rows depend on: the live statuses
-        plus the monitor row marker's target path."""
-        monitor_path = None
-        if self.monitor_deck is not None:
-            mtrack = self.decks[self.monitor_deck].wave.track
-            if mtrack is not None:
-                monitor_path = getattr(mtrack, 'path', None)
-        return (tuple(self._setlist_live_statuses()), monitor_path)
+        plus the monitor row markers' target paths."""
+        return (tuple(self._setlist_live_statuses()),
+                self._monitor_paths())
 
     def _refresh_setlist_live(self):
         """Re-render the rows only when the live signature moved
@@ -2837,13 +3039,11 @@ class Window(QMainWindow):
         self._setlist_sig = self._setlist_signature()
         # Pass 13: no summary line is composed here any more (see
         # the panel build) — render_setlist only renders the rows.
-        # Pass 15: the monitored deck's loaded track, when it is in
+        # Pass 15: a monitored deck's loaded track, when it is in
         # the list, wears the hollow MONITOR marker on its row.
-        monitor_path = None
-        if self.monitor_deck is not None:
-            mtrack = self.decks[self.monitor_deck].wave.track
-            if mtrack is not None:
-                monitor_path = mtrack.path
+        # Pass 28: EVERY monitored deck's track wears it (both
+        # decks may be monitored at once).
+        monitor_paths = self._monitor_paths()
         entries = (self.setlist_data or {}).get('tracks') or []
         # Pass 27: the rows' statuses are the LIVE ones (decks'
         # real state via the claims/ledger), not the file's
@@ -2927,9 +3127,9 @@ class Window(QMainWindow):
             # pass 13's rule). Other rows keep an empty slot of the
             # same width so the badge column stays aligned.
             entry = entries[row['index']] if row['index'] < len(entries) else {}
-            is_monitored = bool(monitor_path
-                                and _path_matches(entry.get('path'),
-                                                  monitor_path))
+            is_monitored = any(
+                _path_matches(entry.get('path'), monitored_path)
+                for monitored_path in monitor_paths)
             mon = QLabel(i18n.tr('monitor_short', self.lang)
                          if is_monitored else '')
             mon.setFixedWidth(58)

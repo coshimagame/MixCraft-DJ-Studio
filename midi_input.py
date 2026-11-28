@@ -35,7 +35,18 @@ from collections import deque
 from engine import RATE
 
 SCAN_INTERVAL = 3.0          # seconds between connection retries
-JOG_FRAMES_PER_TICK = RATE // 200   # 5 ms of track per jog delta unit
+# Pass 28 (user report 2026-11-28: 「タンテの解像度をもっとあげて」):
+# one jog delta unit now moves 1 ms of track (was 5 ms). The
+# DDJ-RB encodes spin speed in the delta's magnitude, so a slow
+# turn steps in single milliseconds while a fast spin — larger
+# deltas, at a higher message rate — still travels. The dispatch
+# forwards the step as an engine 'jog' DELTA (see engine._apply):
+# deltas accumulate in the command queue, where the pass 23-27
+# absolute seeks each recomputed their target from the position
+# of that instant and a burst of messages inside one poll drain
+# collapsed to the last message's step alone.
+JOG_STEP_FRAMES = RATE // 1000      # 1 ms of track per jog delta unit
+JOG_FRAMES_PER_TICK = JOG_STEP_FRAMES   # pre-pass-28 name (same unit)
 # Pass 26 (user direction 2026-11-28: 「setbpmはスライダーで変えたら
 # 追随してほしい」): the TEMPO faders no longer offset their own
 # deck's rate — they move the master SET BPM, the way the Live
@@ -97,15 +108,22 @@ def translate(kind, channel, number, value):
     return None
 
 
-def led_states(playing, monitor_deck):
+def led_states(playing, monitored):
     """(channel, note, on) for every LED the app drives: PLAY
     (note 11, deck channel) follows the deck's playing state; the
     headphone CUE button (note 84, deck channel) follows the
-    app's monitor select."""
+    app's monitor state for ITS deck. Pass 28: monitor is
+    per-deck (both may be on), so `monitored` is the set of
+    monitored deck indexes — a lone deck index or None (the
+    pre-pass-28 shape) is still accepted."""
+    if monitored is None:
+        monitored = ()
+    elif isinstance(monitored, int):
+        monitored = (monitored,)
     out = []
     for deck in (0, 1):
         out.append((deck, 11, bool(playing[deck])))
-        out.append((deck, 84, monitor_deck == deck))
+        out.append((deck, 84, deck in monitored))
     return out
 
 
@@ -269,8 +287,12 @@ class MidiController:
         if self._out_port is None:
             return
         decks = self.window.engine.decks
-        states = led_states([d['playing'] for d in decks],
-                            self.window.monitor_deck)
+        # Pass 28: the per-deck monitor set when the window has
+        # one; the legacy single value otherwise (test doubles).
+        monitored = getattr(self.window, 'monitor_decks', None)
+        if monitored is None:
+            monitored = getattr(self.window, 'monitor_deck', None)
+        states = led_states([d['playing'] for d in decks], monitored)
         for channel, note, on in states:
             key = (channel, note)
             if self._led_cache.get(key) != on:
@@ -314,17 +336,19 @@ class MidiController:
             window.master.setValue(round(intent[1] * 100 / 127))
         elif kind == 'jog':
             _, deck, delta = intent
-            state = engine.decks[deck]
-            if state['track'] is not None:
+            if engine.decks[deck]['track'] is not None:
                 # Pass 24 (user hardware report, 2026-11-27: 「スク
                 # ラッチ（なっじの方向逆）」): the v1 sign felt
-                # backwards at the platter, so the seek runs
-                # AGAINST the raw delta. translate() still decodes
-                # the wire value faithfully; the inversion lives
-                # here, in what the app does with it.
-                target = state['position'] - delta * JOG_FRAMES_PER_TICK
-                target = min(max(0, target), len(state['track'].audio))
-                engine.command('seek', deck, int(target))
+                # backwards at the platter, so the jog runs AGAINST
+                # the raw delta. translate() still decodes the wire
+                # value faithfully; the inversion lives here, in
+                # what the app does with it.
+                # Pass 28: forwarded as an engine 'jog' DELTA (see
+                # JOG_STEP_FRAMES) — the engine applies it to the
+                # live position, so a burst of messages accumulates
+                # instead of collapsing onto one stale position,
+                # and no quantize snap quantises the move to beats.
+                engine.command('jog', deck, -delta * JOG_STEP_FRAMES)
         elif kind == 'tempo':
             self._tempo_fader(intent[1], intent[2])
         elif kind == 'monitor':

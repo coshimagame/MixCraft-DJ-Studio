@@ -44,7 +44,10 @@ def _track(track_id, name, base, donor=False, eq=True):
         + ('<FilterEQ3>' + _param('GainLo', '0', base + 2)
            + _param('GainMid', '0', base + 3)
            + _param('GainHi', '0', base + 4) + '</FilterEQ3>' if eq else '')
-        + '<AutoFilter>' + _param('Frequency', '0.5', base + 5)
+        # Pass 28: the real AutoFilter shape — Cutoff in Hz and a
+        # FilterType (0=LP / 1=HP), as in the user's template.
+        + '<AutoFilter>' + _param('Cutoff', '20000', base + 5)
+        + _param('FilterType', '0', base + 6)
         + '</AutoFilter>')
     # Pass 27 (real-machine finding): the audio arrangement
     # lives in MainSequencer/Sample — ClipTimeable is the MIDI
@@ -171,14 +174,18 @@ def test_generate_places_clips_and_envelopes(tmp_path):
     assert als_writer._get_value(clips_a[0], 'Name') == 'Alpha'
 
     # Volume A (PointeeId 100): the crossfader is baked in —
-    # centre at 0 s (0.8 x cos(pi/4)), ~0 once cross hits 1.0.
+    # centre at 0 s (1.0 x cos(pi/4); the channel volume starts
+    # at unity since pass 28), ~0 once cross hits 1.0.
     volume_a = _envelope_for(tracks[0], 100)
-    assert volume_a[0] == (0.0, pytest.approx(0.8 * 0.70710678))
+    assert volume_a[0] == (0.0, pytest.approx(1.0 * 0.70710678))
     assert volume_a[1][0] == 2.0
     assert volume_a[1][1] == pytest.approx(0.0, abs=1e-9)
-    # Neutral EQ / GAIN are flat 0 dB lines on their own targets.
-    assert all(v == 0.0 for _, v in _envelope_for(tracks[0], 103))
-    assert all(v == 0.0 for _, v in _envelope_for(tracks[1], 201))
+    # Neutral EQ / GAIN are flat UNITY lines on their own
+    # targets — pass 28: Live's plain domain for both is
+    # amplitude (1.0 = 0 dB). The pre-pass-28 code wrote dB
+    # numbers, so neutral landed on 0.0 = silence in Live.
+    assert all(v == 1.0 for _, v in _envelope_for(tracks[0], 103))
+    assert all(v == 1.0 for _, v in _envelope_for(tracks[1], 201))
     # Tempo envelope on the master track, and Manual updated.
     master = root.find('./LiveSet/MasterTrack')
     tempo_env = _envelope_for(master, 301)

@@ -49,6 +49,16 @@ class Track:
     # (see apply_cue_anchor). The user's own cue outranks the
     # analysed grid phase — see _anchored_offset.
     anchor_cue: int | None = None
+    # Pass 28 (user report 2026-11-28: 「小節があってない」):
+    # which beat of the analysed grid starts the bar (0..3).
+    # Analysis finds the BEAT phase only, so the downbeat is
+    # ambiguous by whole beats; the user sets this per track
+    # (deck stepper), it persists in the analysis cache, moves
+    # the waveform's bar ticks, and the Live export aligns the
+    # first track's downbeat to a bar line with it. Beat phase
+    # (sync, quantize) never depends on it. (Declared last so
+    # the existing positional constructions keep their meaning.)
+    bar_offset: int = 0
     def grid(self):
         return BeatGrid(self.bpm, self.beat_offset) if self.bpm else None
 
@@ -90,6 +100,7 @@ def load_track(path, cache=None):
     if cached:
         beat_conf = cached.get('beat_confidence')
         bpm, offset = cached['bpm'], cached['beat_offset'] or 0
+        bar_offset = cached.get('bar_offset') or 0
         if beat_conf is None:
             # Pass 26: a pre-pass-26 cache row has no grid
             # confidence. Measure the grid once (adopting the
@@ -103,9 +114,12 @@ def load_track(path, cache=None):
                                  beat_offset=offset, key=cached['key'],
                                  camelot=cached['camelot'],
                                  key_confidence=cached['key_confidence'],
-                                 beat_confidence=beat_conf))
+                                 beat_confidence=beat_conf,
+                                 bar_offset=bar_offset))
         return Track(str(Path(path).resolve()), audio, peaks, bpm, cached['confidence'],
-                     offset, beat_conf or 0.0, cached['key'], cached['camelot'], cached['key_confidence'] or 0.0)
+                     offset, beat_conf or 0.0, cached['key'], cached['camelot'],
+                     cached['key_confidence'] or 0.0,
+                     bar_offset=bar_offset)
     bpm, confidence = estimate_bpm(audio)
     offset, beat_conf, refined = estimate_beat_grid(audio, bpm)
     if beat_conf >= GRID_CONFIDENT and refined:
@@ -119,7 +133,7 @@ def load_track(path, cache=None):
     if cache:
         cache.put(path, dict(bpm=bpm, confidence=confidence, beat_offset=offset,
                              key=key, camelot=camelot, key_confidence=key_conf,
-                             beat_confidence=beat_conf))
+                             beat_confidence=beat_conf, bar_offset=0))
     return Track(str(Path(path).resolve()), audio, peaks, bpm, confidence,
                  offset, beat_conf, key, camelot, key_conf)
 
@@ -374,7 +388,11 @@ class _OnePole:
 
 
 def _new_deck():
-    return dict(track=None, position=0, playing=False, volume=0.8,
+    # Pass 28: volume starts at unity (1.0). The old 0.8 start,
+    # stacked on the master's 0.8 start, cost ~3.9 dB before the
+    # crossfader — part of the user's 「音が小さい」 report
+    # (measured in tests/test_pass28_gain_chain.py).
+    return dict(track=None, position=0, playing=False, volume=1.0,
                 gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5,
                 cue=0, hotcues={}, loop_start=None, loop_end=None, loop_active=False,
                 quantize=False, rate=1.0, sync=False, sync_mode=None,
@@ -428,9 +446,9 @@ class Engine:
     def __init__(self):
         self.decks = [_new_deck() for _ in range(2)]
         self.cross = 0.5
-        self.master = 0.8
-        self._cur = dict(cross=0.5, master=0.8)
-        self._deck_cur = [dict(volume=0.8, gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5) for _ in range(2)]
+        self.master = 1.0   # pass 28: unity start (was 0.8)
+        self._cur = dict(cross=0.5, master=1.0)
+        self._deck_cur = [dict(volume=1.0, gain=1.0, eq_low=1.0, eq_mid=1.0, eq_high=1.0, filter=0.5) for _ in range(2)]
         self.commands = SimpleQueue()
         self.events = SimpleQueue()
         self.frame = 0
@@ -591,6 +609,26 @@ class Engine:
             elif action == 'seek':
                 if d['track'] is not None:
                     d['position'] = self._snap(d, int(np.clip(value, 0, len(d['track'].audio))))
+            elif action == 'jog':
+                # Pass 28 (user report 2026-11-28: 「タンテの解像度を
+                # もっとあげて」): the jog sends a signed DELTA in
+                # frames, applied to the live position. The delta
+                # form is the fix for the real resolution limit:
+                # pass 23-27 computed each seek target in the MIDI
+                # layer from the engine position of that instant,
+                # so every message drained in one poll burst aimed
+                # at nearly the same place and only the last one's
+                # step survived — a fast spin lost most of its
+                # travel and a slow one stepped coarsely. Deltas
+                # accumulate in the command queue itself. NO
+                # quantize snap: snapping a continuous control to
+                # beats would destroy the resolution outright
+                # (seek / cue_set keep their snap — those are
+                # deliberate jumps).
+                if d['track'] is not None:
+                    d['position'] = float(np.clip(
+                        d['position'] + float(value), 0,
+                        len(d['track'].audio)))
             elif action == 'volume': d['volume'] = float(np.clip(value, 0, 1))
             elif action == 'gain': d['gain'] = float(np.clip(value, 0, 2))
             elif action in ('eq_low', 'eq_mid', 'eq_high'):

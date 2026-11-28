@@ -89,11 +89,11 @@ def test_automation_series_record_command_values():
               ev(F(2), 'cross', None, 0.0), ev(F(3), 'cross', None, 1.0),
               ev(F(4), 'cross', None, 1.0)]   # duplicate: not re-recorded
     recon = performance.reconstruct(events)
-    assert recon['automation'][0]['volume'] == [(0, 0.8), (F(1), 0.5)]
+    assert recon['automation'][0]['volume'] == [(0, 1.0), (F(1), 0.5)]
     assert recon['automation'][1]['gain'] == [(0, 1.0), (F(1), 1.5)]
     assert recon['automation']['cross'] == \
         [(0, 0.5), (F(2), 0.0), (F(3), 1.0)]
-    assert recon['automation']['master'] == [(0, 0.8)]
+    assert recon['automation']['master'] == [(0, 1.0)]
 
 
 def test_sync_rate_is_recomputed_from_bpms():
@@ -135,15 +135,20 @@ def test_build_perf_plan_converts_and_bakes_crossfader():
     assert clip['offset_beats'] == 0.0
     assert clip['end_beats'] == pytest.approx(20.0)
     assert clip['name'] == 'Song — Artist'
-    # Volume A: 0.8 x cos(pi/4) at cross centre -> ~0 at cross
+    # Volume A: 1.0 x cos(pi/4) at cross centre -> ~0 at cross
     # 1.0 (10 beats), held to the performance end (20 beats).
     volume_a = plan['envelopes']['volume_A']
-    assert volume_a[0] == (0.0, pytest.approx(0.8 * 0.70710678))
+    assert volume_a[0] == (0.0, pytest.approx(1.0 * 0.70710678))
     assert volume_a[1] == (pytest.approx(10.0), pytest.approx(0.0, abs=1e-9))
     assert volume_a[2] == (pytest.approx(20.0), pytest.approx(0.0, abs=1e-9))
-    # Neutral EQ / GAIN are 0 dB lines; tempo is the set BPM.
-    assert all(v == 0.0 for _, v in plan['envelopes']['eq_low_A'])
-    assert all(v == 0.0 for _, v in plan['envelopes']['gain_A'])
+    # Neutral EQ / GAIN are UNITY amplitude lines (pass 28:
+    # Live's plain domain is amplitude, 1.0 = 0 dB — the old
+    # dB numbers made neutral read as 0.0 = silence); tempo is
+    # the set BPM. The untouched FILTER writes no envelope.
+    assert all(v == 1.0 for _, v in plan['envelopes']['eq_low_A'])
+    assert all(v == 1.0 for _, v in plan['envelopes']['gain_A'])
+    assert 'filter_A' not in plan['envelopes']
+    assert plan['filter_sides']['A'] == 'none'
     assert plan['envelopes']['tempo'] == [(0.0, 120.0), (20.0, 120.0)]
 
 

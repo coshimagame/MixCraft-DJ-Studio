@@ -457,8 +457,15 @@ def test_all_deck_envelopes_land_on_a_real_shaped_base(tmp_path):
     wav_a = _make_wav(tmp_path / 'Alpha.wav')
     wav_b = _make_wav(tmp_path / 'Beta.wav')
     out = tmp_path / 'perf.als'
+    # Pass 28: an untouched FILTER writes no envelope at all (the
+    # template's state is preserved), so this journal moves both
+    # decks' filters — the pass-27 point stands: every device
+    # envelope the performance calls for lands on the real shape.
+    events = _events_two_decks(wav_a, wav_b)
+    events.insert(3, _ev(F(1), 'filter', 0, 0.2))
+    events.insert(4, _ev(F(1), 'filter', 1, 0.8))
     report = perf_als.generate(
-        base, _events_two_decks(wav_a, wav_b), out,
+        base, events, out,
         set_bpm=120.0,
         bpms={str(wav_a): 120.0, str(wav_b): 120.0})
     written = report['envelopes_written']

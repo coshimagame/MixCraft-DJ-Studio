@@ -4,7 +4,7 @@ Beat-grid offset and key are *estimates*.  Both can be corrected manually;
 the corrected values are what the engine quantizes / syncs to.
 """
 from dataclasses import dataclass, asdict
-import hashlib, json, math, sqlite3
+import hashlib, json, math, sqlite3, threading
 from pathlib import Path
 import numpy as np
 
@@ -197,7 +197,11 @@ def fingerprint(path):
 class AnalysisCache:
     """SQLite cache so re-loading a track does not re-run the analysis."""
     def __init__(self, db_path):
-        self.db = sqlite3.connect(str(db_path))
+        # Pass 28: the app loads tracks on worker threads, so the
+        # connection is shared (check_same_thread=False) and every
+        # access is serialised through a lock.
+        self._lock = threading.Lock()
+        self.db = sqlite3.connect(str(db_path), check_same_thread=False)
         self.db.execute("""CREATE TABLE IF NOT EXISTS analysis(
             path TEXT PRIMARY KEY, fingerprint TEXT, bpm REAL, confidence REAL,
             beat_offset INTEGER, key_name TEXT, camelot TEXT, key_confidence REAL)""")
@@ -208,17 +212,35 @@ class AnalysisCache:
         columns = [r[1] for r in self.db.execute("PRAGMA table_info(analysis)")]
         if 'beat_confidence' not in columns:
             self.db.execute("ALTER TABLE analysis ADD COLUMN beat_confidence REAL")
+        # Pass 28: the user's per-track bar offset (which beat of
+        # the grid starts the bar, 0..3) persists here too. Rows
+        # written before pass 28 have NULL; readers treat it as 0.
+        if 'bar_offset' not in columns:
+            self.db.execute("ALTER TABLE analysis ADD COLUMN bar_offset INTEGER")
         self.db.commit()
     def get(self, path):
         fp = fingerprint(path)
-        row = self.db.execute("SELECT bpm,confidence,beat_offset,key_name,camelot,key_confidence,beat_confidence FROM analysis WHERE path=? AND fingerprint=?",
-                              (str(Path(path).resolve()), fp)).fetchone()
+        with self._lock:
+            row = self.db.execute("SELECT bpm,confidence,beat_offset,key_name,camelot,key_confidence,beat_confidence,bar_offset FROM analysis WHERE path=? AND fingerprint=?",
+                                  (str(Path(path).resolve()), fp)).fetchone()
         if not row: return None
-        return dict(bpm=row[0], confidence=row[1], beat_offset=row[2], key=row[3], camelot=row[4], key_confidence=row[5], beat_confidence=row[6])
+        return dict(bpm=row[0], confidence=row[1], beat_offset=row[2], key=row[3], camelot=row[4], key_confidence=row[5], beat_confidence=row[6], bar_offset=row[7])
     def put(self, path, result):
-        self.db.execute("INSERT OR REPLACE INTO analysis VALUES (?,?,?,?,?,?,?,?,?)",
-                        (str(Path(path).resolve()), fingerprint(path), result.get('bpm'), result.get('confidence'),
-                         result.get('beat_offset'), result.get('key'), result.get('camelot'), result.get('key_confidence'),
-                         result.get('beat_confidence')))
-        self.db.commit()
+        with self._lock:
+            self.db.execute("INSERT OR REPLACE INTO analysis VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (str(Path(path).resolve()), fingerprint(path), result.get('bpm'), result.get('confidence'),
+                             result.get('beat_offset'), result.get('key'), result.get('camelot'), result.get('key_confidence'),
+                             result.get('beat_confidence'), result.get('bar_offset')))
+            self.db.commit()
+    def set_bar_offset(self, path, bar_offset):
+        """Pass 28: update ONLY the bar offset of an existing row
+        (the deck stepper's write-through). A missing row is a
+        no-op — load_track writes the full row on the next load,
+        carrying the Track's in-memory value's next default of 0;
+        the stepper only ever runs on a loaded (hence cached)
+        track."""
+        with self._lock:
+            self.db.execute("UPDATE analysis SET bar_offset=? WHERE path=?",
+                            (int(bar_offset), str(Path(path).resolve())))
+            self.db.commit()
     def close(self): self.db.close()

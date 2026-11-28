@@ -137,19 +137,31 @@ def test_onair_follows_engine_playing_state(window):
 
 
 @qt_only
-def test_monitor_select_is_exclusive_and_clearable(window):
+def test_monitor_select_is_per_deck_and_both_may_be_on(window):
+    # Pass 28 (user direction, 2026-11-28: 「モニターはどちらか
+    # 一方だけでなく両方できるように」): the toggle is per-deck —
+    # enabling the other deck no longer clears the first, and
+    # each deck clears only itself. monitor_deck keeps naming
+    # the most recently enabled deck (the audition target).
     window.toggle_monitor(1)
+    assert window.monitor_decks == {1}
     assert window.monitor_deck == 1
     assert window.decks[1].monitor_on is True
     assert window.decks[0].monitor_on is False
     assert window.decks[1].monitor_btn.text() == 'モニター中'
-    window.toggle_monitor(0)   # selecting the other deck moves it
+    window.toggle_monitor(0)   # the other deck JOINS, not moves
+    assert window.monitor_decks == {0, 1}
     assert window.monitor_deck == 0
     assert window.decks[0].monitor_on is True
-    assert window.decks[1].monitor_on is False
-    window.toggle_monitor(0)   # selecting it again clears it
-    assert window.monitor_deck is None
+    assert window.decks[1].monitor_on is True
+    window.toggle_monitor(0)   # clears only deck A
+    assert window.monitor_decks == {1}
+    assert window.monitor_deck == 1
     assert window.decks[0].monitor_on is False
+    assert window.decks[1].monitor_on is True
+    window.toggle_monitor(1)
+    assert window.monitor_decks == set()
+    assert window.monitor_deck is None
     window.set_language('en')
     window.toggle_monitor(1)
     assert window.decks[1].monitor_btn.text() == 'MONITOR'

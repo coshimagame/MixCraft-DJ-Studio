@@ -58,6 +58,19 @@ STRINGS = {
     "monitor_on": {"en": "MONITOR", "jp": "モニター中"},
     "monitor_off": {"en": "MONITOR", "jp": "モニター"},
     "monitor_short": {"en": "MON", "jp": "モニター"},
+    # Pass 28 (bar alignment): the deck's bar-offset stepper —
+    # which beat of the analysed grid starts the bar (0..3).
+    "bar_offset": {"en": "BAR", "jp": "小節"},
+    "bar_offset_tip": {
+        "en": "Bar offset — which beat starts the bar (0-3). "
+              "Analysis finds the beats but not the downbeat; "
+              "this moves the bar lines (waveform ticks and the "
+              "Live export's bar alignment) by whole beats.",
+        "jp": "小節オフセット ― どの拍が小節の頭か（0〜3）。"
+              "解析で分かるのは拍の位置までで、小節の頭はここで"
+              "合わせます。小節線（波形の目盛りと Live 書き出し"
+              "の小節合わせ）が拍単位でずれます。",
+    },
     # --- performance pads ------------------------------------------
     "cue_set": {"en": "CUE SET", "jp": "キュー設定"},
     "cue": {"en": "CUE", "jp": "キュー"},
@@ -192,6 +205,11 @@ STRINGS = {
         "jp": "Live用セットを書き出しました。\n\n保存先: {path}\n"
               "クリップ {clips} • エンベロープ {envelopes}\n"
               "テンプレート: {base}",
+    },
+    "live_export_events_copy": {
+        "en": "A copy of the performance record was saved "
+              "with it: {path}",
+        "jp": "演奏の記録のコピーも一緒に保存しました: {path}",
     },
     "live_export_error_dialog": {
         "en": "The export could not be completed.\n\n{error}",

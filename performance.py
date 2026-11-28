@@ -63,6 +63,27 @@ pass 27 (実機の書き出しファイルの解剖から):
   - セグメントは閉じる時点のデッキ位置 (end_offset_frames) を
     保持し、クリップの終端はそれで決める。吸収した微小ジャンプの
     累積があっても、クリップの終端は演奏した実位置と一致する。
+
+pass 28 (実機の書き出しファイルの解剖から):
+  - エンベロープの値域が Live のパラメータの素の値域と食い違って
+    いた。実テンプレの Manual 値が証拠: Utility Gain と EQ Three
+    の各帯域は「振幅」(1.0 = 0 dB、EQ の 0.000316 = -70 dB)、
+    Auto Filter の Cutoff は Hz で保存されるのに、書き出しは
+    GAIN / EQ を dB の数字のまま、FILTER をノブ位置 (0..1) の
+    まま書いていた。Live から見ると GAIN 中立 = 振幅 0 (無音)、
+    EQ カット = 負の振幅、FILTER = 最小値張り付き — 「オート
+    メーションが反映されてない」の正体。変換を素の値域に統一
+    した (GAIN はエンジンの線形倍率そのまま、EQ は帯域倍率
+    2×UI 値、FILTER はエンジン DSP と同じ式で Hz 化し、中央を
+    跨ぐ演奏には FilterType のエンベロープも併記する)。
+  - 'jog' イベント (pass 28 で新設、エンジンがデルタで記録) は
+    seek と同じ位置ジャンプとして再生する。微小な jog の嵐は
+    pass 27 の断片結合が受ける。
+  - 小節合わせ: 最初のセグメントの曲のダウンビートが Live の
+    小節線 (4 拍ごと) に乗るよう、タイムライン全体を Δ 拍
+    (0 ≤ Δ < 4) ずらす。Δ は最初の曲の beat_offset (拍グリッド
+    原点) と bar_offset (小節頭の拍、0..3) から決める。グリッド
+    情報が無い曲では Δ = 0 (従来通りセグメント開始 = 0 拍)。
 """
 from __future__ import annotations
 
@@ -73,11 +94,15 @@ from engine import RATE
 
 # コマンド値域の初期値 (エンジンの _new_deck / Engine.__init__
 # と一致させること。再構成はこの状態からイベントを再生する)
+# Pass 28: volume / master の初期値は 1.0 (ユニティ)。かつて
+# 0.8 始まりで、チャンネル (-1.9 dB) とマスター (-1.9 dB) の
+# 減衰が積み重なって「音が小さい」一因だった (実測は
+# tests/test_pass28_gain_chain.py)。
 PARAM_DEFAULTS = {
-    "volume": 0.8, "gain": 1.0,
+    "volume": 1.0, "gain": 1.0,
     "eq_low": 0.5, "eq_mid": 0.5, "eq_high": 0.5, "filter": 0.5,
 }
-GLOBAL_DEFAULTS = {"cross": 0.5, "master": 0.8}
+GLOBAL_DEFAULTS = {"cross": 0.5, "master": 1.0}
 DECK_PARAMS = tuple(PARAM_DEFAULTS)
 
 # Pass 27: sync_align のうち、この拍数未満のジャンプは位相ロックの
@@ -276,6 +301,29 @@ class _Reconstructor:
                 if d["duration"] is not None:
                     pos = min(max(pos, 0.0), d["duration"])
                 d["position"] = pos
+        elif action == "jog" and d is not None:
+            # Pass 28: a jog DELTA in frames (the engine applies
+            # it to its live position with no quantize snap).
+            # Replay applies the same delta to the reconstructed
+            # position. A jog within the absorb window is a
+            # continuous-control move, not an edit: re-anchor
+            # the open segment (the sync_align treatment) so a
+            # fine-jog storm never cuts it — cutting would also
+            # lose the travel of a jog that lands as the
+            # journal's very last event, whose follow-up segment
+            # is zero-length and dropped. A delta beyond the
+            # absorb window still cuts via _sync_seg below.
+            if d["track"] is not None:
+                pos = d["position"] + float(value or 0)
+                if d["duration"] is not None:
+                    pos = min(max(pos, 0.0), d["duration"])
+                shift = pos - d["position"]
+                d["position"] = pos
+                seg = self.open_seg[index]
+                if seg is not None and abs(shift) <= _absorb_frames(
+                        self.bpms.get(d["track"]) or self.set_bpm):
+                    seg["anchor_frames"] = float(pos)
+                    seg["anchor_frame"] = float(frame)
         elif action in DECK_PARAMS and d is not None:
             d["params"][action] = float(value)
             self._record((index, action), frame, float(value))
@@ -448,11 +496,18 @@ def reconstruct(events, durations=None, bpms=None, set_bpm=None):
 # Live の値域への変換と書き出しプラン
 # ---------------------------------------------------------------------------
 
-def _db(linear, floor=-60.0, ceil=24.0):
-    """線形ゲイン → dB (Live の Utility / EQ Three の値域)。"""
-    if linear <= 0:
-        return floor
-    return min(ceil, max(floor, 20.0 * math.log10(linear)))
+def _filter_hz(value):
+    """エンジンの FILTER 位置 (0..1、0.5 = 全開) → Auto Filter の
+    Cutoff (Hz)。エンジン DSP (engine._process_deck) と同じ式:
+    中央より左はローパスで 100 Hz × 200^(2v) (0.5 で 20 kHz =
+    実質全開)、右はハイパスで 20 Hz × 200^(2(v-0.5)) (0.5 で
+    20 Hz = 実質全開、1.0 で 4 kHz)。pass 28 で Hz 化した —
+    以前はノブ位置をそのまま書いており、Live には最小値に
+    張り付いて見えた。"""
+    v = min(1.0, max(0.0, float(value)))
+    if v <= 0.5:
+        return 100.0 * 200.0 ** (2.0 * v)
+    return 20.0 * 200.0 ** (2.0 * (v - 0.5))
 
 
 def _step_value(series, frame):
@@ -512,26 +567,67 @@ def _coalesce_segments(segments, bpms, set_bpm):
     return merged
 
 
+def _drop_superseded_starts(segments):
+    """Pass 28 (実ファイルの解剖から): 同一デッキ・同一トラック・
+    同一開始位置 (offset_frames) のセグメントが複数ある場合、
+    後から始まったものだけを残す (後勝ちで置き換え)。
+
+    ユーザーの実書き出し (pass 27) で、デッキ B に開始位置
+    1.302 拍のクリップが 2 本あった — 1.235 拍の薄片と、同じ
+    位置から始まる長い本編。同じ位置から始まる断片は本編の
+    影であり、Live 上で二重に存在する意味がない (その薄片の
+    間、デッキ B の焼き込み音量は 0 で、どちらにせよ聞こえて
+    いなかった)。開始位置が違う再演 (リプライズ) には触ら
+    ない。"""
+    keep = {}
+    for seg in segments:
+        key = (seg["track"], seg["offset_frames"])
+        if key not in keep \
+                or seg["start_frame"] > keep[key]["start_frame"]:
+            keep[key] = seg
+    return sorted(keep.values(), key=lambda s: s["start_frame"])
+
+
 def build_perf_plan(recon, set_bpm, track_meta=None):
     """再構成結果 → perf_als が注入できるプラン。
 
     track_meta: {パス: {'bpm': float|None, 'name': str|None,
-    'duration_seconds': float|None}}。
+    'duration_seconds': float|None, 'beat_offset': int|None
+    (拍グリッド原点のフレーム), 'bar_offset': int (小節頭の
+    拍 0..3)}}。beat_offset / bar_offset は小節合わせ用で、
+    無い曲は合わせない。
 
     変換の約束事 (マニュアルにも明記する):
       - チャンネル音量のエンベロープにはクロスフェーダーを
         焼き込む (Live のクロスフェーダー自体には Arrangement
         オートメーションが無いため)。焼き込みはエンジンと同じ
-        等パワー (cos / sin) カーブ。
-      - GAIN は Utility の Gain (dB)、EQ は EQ Three の各帯域
-        (dB, ±15 でクリップ)、FILTER は Auto Filter の
-        Frequency (0..1 正規化位置) に写す。
+        等パワー (cos / sin) カーブ。値は Live の素の値域 =
+        振幅 (1.0 = 0 dB) そのまま。
+      - GAIN は Utility の Gain へ、エンジンの線形倍率 (0..2)
+        をそのまま書く (Live の素の値域も振幅 — 実テンプレの
+        Manual 1.17 が証拠。pass 27 までは dB の数字を書いて
+        いて、中立が振幅 0 = 無音になっていた)。
+      - EQ は EQ Three の各帯域へ、帯域倍率 (UI 値 ×2、0.5 で
+        1.0 = 0 dB) を振幅として書く (実テンプレの Manual
+        0.000316 = -70 dB が証拠)。
+      - FILTER は Auto Filter の Cutoff へ Hz で書く (エンジン
+        DSP と同じ式)。中央を跨ぐ演奏は FilterType のエンベ
+        ロープ (0=LP / 1=HP) も併記し、片側だけの演奏は
+        plan['filter_sides'] で perf_als に伝え、出力側の
+        FilterType 初期値をそちらへ合わせる。一度も触らな
+        かったデッキには FILTER のエンベロープ自体を書かない
+        (テンプレの状態を保存する)。
       - テンポは SET BPM が基準。演奏中にマスター SET BPM を
         動かした場合は、その移動が階段状にエンベロープへ入る
         (拍位置は基準 SET BPM のグリッドで換算する)。
       - クリップは演奏した時刻 (SET BPM 換算の拍) に置く。
         デッキの rate × 曲 BPM が SET BPM と違う区間は、Live
         上のクリップ長が演奏時間とずれる (警告を出す)。
+      - 小節合わせ (pass 28): 最初のクリップの曲のダウン
+        ビートが Live の小節線に乗るよう、クリップと全エン
+        ベロープを一律に Δ 拍ずらす (相対配置は不変、ドリ
+        フトなし)。最初の曲のグリッド情報 (beat_offset /
+        bar_offset) が無い場合はずらさない。
     """
     track_meta = track_meta or {}
     warnings = list(recon["warnings"])
@@ -541,6 +637,7 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
     # クロスフェーダーを焼き込んだチャンネル音量系列
     cross = auto["cross"]
     envelopes = {}
+    filter_sides = {}
     for i in range(2):
         volume = auto[i]["volume"]
         frames = sorted({f for f, _ in volume} | {f for f, _ in cross})
@@ -553,14 +650,72 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
             baked.append((frame, gain * fade))
         letter = "AB"[i]
         envelopes[f"volume_{letter}"] = _to_beats(baked, set_bpm, end_frame)
+        # Pass 28: Live's plain domain for Utility Gain and the
+        # EQ Three bands is AMPLITUDE (see the module docstring's
+        # evidence), and the engine's own values already ARE
+        # amplitudes — the gain multiplier itself, and 2x the UI
+        # value for a band (the engine multiplies the band by
+        # exactly that). Write them unchanged; the old dB numbers
+        # read as silence / invalid values in Live.
         envelopes[f"gain_{letter}"] = _to_beats(
-            [(f, _db(v)) for f, v in auto[i]["gain"]], set_bpm, end_frame)
+            auto[i]["gain"], set_bpm, end_frame)
         for band in ("eq_low", "eq_mid", "eq_high"):
             envelopes[f"{band}_{letter}"] = _to_beats(
-                [(f, _db(2.0 * v, floor=-15.0, ceil=15.0))
-                 for f, v in auto[i][band]], set_bpm, end_frame)
-        envelopes[f"filter_{letter}"] = _to_beats(
-            auto[i]["filter"], set_bpm, end_frame)
+                [(f, 2.0 * v) for f, v in auto[i][band]],
+                set_bpm, end_frame)
+        # Pass 28: FILTER — Hz for Cutoff, a FilterType step
+        # envelope only when the performance ENGAGES both sides,
+        # and nothing at all when the knob was never touched.
+        # The centre value 0.5 engages NEITHER side (the engine
+        # is dry there), so a centre -> HP performance is a
+        # single-sided 'hp', not a crossing.
+        raw_filter = auto[i]["filter"]
+        engaged = set()
+        for _, v in raw_filter:
+            if v < 0.5:
+                engaged.add("lp")
+            elif v > 0.5:
+                engaged.add("hp")
+        if not engaged:
+            filter_sides[letter] = "none"
+        elif engaged == {"lp"}:
+            filter_sides[letter] = "lp"
+            envelopes[f"filter_{letter}"] = _to_beats(
+                [(f, _filter_hz(v)) for f, v in raw_filter],
+                set_bpm, end_frame)
+        elif engaged == {"hp"}:
+            filter_sides[letter] = "hp"
+            # Neutral points take the HP side's open value
+            # (20 Hz) — the LP formula would give 20 kHz, which
+            # as a high-pass cutoff is nearly silence.
+            envelopes[f"filter_{letter}"] = _to_beats(
+                [(f, 20.0 if v == 0.5 else _filter_hz(v))
+                 for f, v in raw_filter], set_bpm, end_frame)
+        else:
+            filter_sides[letter] = "both"
+            # The type at a neutral point carries the side in
+            # force (the filter is open there on either type);
+            # leading neutrals take the first engaged side.
+            first_type = next(
+                0.0 if v < 0.5 else 1.0
+                for _, v in raw_filter if v != 0.5)
+            current = first_type
+            hz_points, type_points = [], []
+            for f, v in raw_filter:
+                if v < 0.5:
+                    current = 0.0
+                    hz_points.append((f, _filter_hz(v)))
+                elif v > 0.5:
+                    current = 1.0
+                    hz_points.append((f, _filter_hz(v)))
+                else:
+                    hz_points.append(
+                        (f, 20000.0 if current == 0.0 else 20.0))
+                type_points.append((f, current))
+            envelopes[f"filter_{letter}"] = _to_beats(
+                hz_points, set_bpm, end_frame)
+            envelopes[f"filter_type_{letter}"] = _to_beats(
+                type_points, set_bpm, end_frame)
     total_beats = end_frame / RATE * set_bpm / 60.0
     # Pass 26: the Master Tempo envelope follows the recorded
     # SET BPM series — the base tempo, stepped at each master
@@ -579,8 +734,8 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
                 for path, meta in track_meta.items()}
     clips = {"A": [], "B": []}
     for i in range(2):
-        for seg in _coalesce_segments(recon["segments"][i],
-                                      seg_bpms, set_bpm):
+        for seg in _drop_superseded_starts(_coalesce_segments(
+                recon["segments"][i], seg_bpms, set_bpm)):
             meta = track_meta.get(seg["track"]) or {}
             bpm = meta.get("bpm") or set_bpm
             if not meta.get("bpm"):
@@ -610,5 +765,56 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
                 warnings.append(
                     f"{seg['track']}: デッキ rate × 曲 BPM が SET BPM と"
                     "違うため、Live 上のクリップ長が演奏時間とずれます")
+    # Pass 28: bar alignment — shift the whole timeline so the
+    # first clip's track downbeat lands on a Live bar line.
+    shift = _bar_shift(clips, track_meta, set_bpm)
+    if shift:
+        for letter in ("A", "B"):
+            for clip in clips[letter]:
+                clip["time_beats"] += shift
+        for key, points in envelopes.items():
+            envelopes[key] = [(t + shift, v) for t, v in points]
+        total_beats += shift
+        warnings.append(
+            "最初の曲の小節頭を Live の小節線に合わせました "
+            f"(全体を {shift:.2f} 拍ずらしています)")
     return dict(set_bpm=set_bpm, total_beats=total_beats, clips=clips,
-                envelopes=envelopes, warnings=warnings)
+                envelopes=envelopes, warnings=warnings,
+                filter_sides=filter_sides, bar_shift=shift)
+
+
+def _bar_shift(clips, track_meta, set_bpm):
+    """タイムラインを何拍ずらせば、最初のクリップの曲のダウン
+    ビートが Live の小節線 (4 拍ごと) に乗るか (0 ≤ Δ < 4)。
+
+    最初のクリップの曲について、その開始位置 (曲内のフレーム)
+    から次のダウンビートまでの距離を曲の拍で数え、SET BPM の
+    拍に直して、合計が 4 の倍数になる Δ を返す。ダウンビートの
+    位置は beat_offset (拍グリッド原点、フレーム) + bar_offset
+    (小節頭が何拍目か、0..3) で決まる。どちらか欠ける曲 (解析
+    グリッド無し) では 0 — 従来通りセグメント開始が 0 拍。
+    相対配置には一切触らないので、後のクリップは演奏した相対
+    位置のまま小節に乗る (同期した演奏ではダウンビート同士も
+    一致する)。"""
+    first = None
+    for letter in ("A", "B"):
+        for clip in clips[letter]:
+            if first is None or clip["time_beats"] < first["time_beats"]:
+                first = clip
+    if first is None:
+        return 0.0
+    meta = track_meta.get(first["file"]) or {}
+    beat_offset = meta.get("beat_offset")
+    bpm = first.get("bpm")
+    if beat_offset is None or not bpm:
+        return 0.0
+    bar_offset = meta.get("bar_offset") or 0
+    beat_frames = RATE * 60.0 / float(bpm)
+    start_frame = first["offset_beats"] * beat_frames
+    into_bar = ((start_frame - float(beat_offset)) / beat_frames
+                - float(bar_offset)) % 4.0
+    to_downbeat = (4.0 - into_bar) % 4.0     # track beats
+    rate = first.get("rate") or 1.0
+    downbeat_at = first["time_beats"] \
+        + to_downbeat * float(set_bpm) / (float(bpm) * float(rate))
+    return (4.0 - (downbeat_at % 4.0)) % 4.0

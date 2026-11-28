@@ -27,10 +27,20 @@
 Utility + EQ Three + Auto Filter を積んだデッキ構成が前提):
   - チャンネル音量: DeviceChain / Mixer / Volume
     (クロスフェーダーは performance.build_perf_plan が焼き込む)
-  - GAIN: StereoGain (Utility) の Gain
-  - EQ: FilterEQ3 (EQ Three) の GainLo / GainMid / GainHi
-  - FILTER: AutoFilter の Frequency
+  - GAIN: StereoGain (Utility) の Gain (素の値域は振幅)
+  - EQ: FilterEQ3 (EQ Three) の GainLo / GainMid / GainHi (振幅)
+  - FILTER: AutoFilter の Cutoff (Hz)。中央を跨ぐ演奏では
+    FilterType (0=LP / 1=HP) のエンベロープも書く。片側だけの
+    演奏では、出力側デバイスの FilterType 初期値を演奏した
+    側へ合わせる (テンプレ側が逆タイプだと、カットオフだけ
+    写してもフィルターの向きが逆になるため)。一度も触らな
+    かったデッキには FILTER 系を一切書かない。
   - テンポ: MasterTrack (Live 12 は MainTrack) の Tempo
+
+pass 28: エンベロープの値域は Live の素の値域に統一した
+(performance.py の docstring に実テンプレ Manual 値の証拠)。
+以前は GAIN / EQ を dB、FILTER をノブ位置で書いており、Live
+では無音・無効値・最小値張り付きになっていた。
 
 検証範囲: tests/test_perf_als.py で合成 fixture に対して注入 →
 再パース検証まで。生成した .als を本物の Live 10 が開けるか、
@@ -121,6 +131,10 @@ DECK_TARGETS = {
     # (直接の子に Frequency は無い — 奥にある同名要素は LFO
     # 側で別物)。フィクスチャ等の旧形に Frequency も残す。
     "filter": ("device", "AutoFilter", ("Cutoff", "Frequency")),
+    # Pass 28: フィルターの向き (0=LP / 1=HP)。中央を跨ぐ
+    # 演奏でエンベロープとして書き、片側だけの演奏では出力
+    # 側の Manual を合わせる (inject_perf の filter_sides)。
+    "filter_type": ("device", "AutoFilter", ("FilterType",)),
 }
 
 
@@ -467,18 +481,50 @@ def inject_perf(root, plan) -> dict:
         envelopes_el.append(_make_envelope(pointee, points, allocator))
         report["envelopes_written"][key] = len(points)
 
+    # Pass 28: a single-sided filter performance needs the
+    # OUTPUT device's FilterType to start on the performed side
+    # (the Cutoff envelope alone would sweep the template's own
+    # type — the real template sits on HP). A performance that
+    # crossed the centre carries a FilterType envelope instead,
+    # and an untouched filter ('none' / absent) leaves the
+    # device exactly as the template has it. Only the exported
+    # copy changes; the base file is never written.
+    for letter, side in (plan.get("filter_sides") or {}).items():
+        if side not in ("lp", "hp"):
+            continue
+        track = deck_tracks.get(letter)
+        param = _param(track, DECK_TARGETS["filter_type"]) \
+            if track is not None else None
+        if param is None:
+            report["warnings"].append(
+                f"Deck {letter} の FilterType がテンプレートに無いため、"
+                "フィルターの向き (LP / HP) を合わせられませんでした")
+            continue
+        want = "0" if side == "lp" else "1"
+        if _get_value(param, "Manual") != want:
+            _set_value(param, "Manual", int(want))
+            report["warnings"].append(
+                f"Deck {letter} のフィルタータイプを "
+                f"{'LP' if side == 'lp' else 'HP'} に合わせました "
+                "(演奏のフィルター方向)")
+
     als_writer._set_tempo(root, plan.get("set_bpm"), report)
     allocator.finish()
     return report
 
 
-def _track_meta(paths, setlist_data=None, durations=None, bpms=None):
-    """{パス: {'bpm','name','duration_seconds'}} を組み立てる。
+def _track_meta(paths, setlist_data=None, durations=None, bpms=None,
+                grids=None):
+    """{パス: {'bpm','name','duration_seconds',...}} を組み立てる。
 
     長さは soundfile で実測 (失敗したら None)、BPM と名前は
     セットリストの該当エントリ (パス完全一致 → ファイル名一致)
     から。呼び出し側が渡した durations / bpms が最優先。
+    grids ({パス: {'beat_offset','bar_offset'}}、pass 28) は
+    小節合わせ用のグリッド情報で、呼び出し側 (アプリ) が解析
+    キャッシュとデッキ上の曲から渡す。
     """
+    grids = grids or {}
     durations = dict(durations or {})
     bpms = dict(bpms or {})
     entries = (setlist_data or {}).get("tracks") or []
@@ -509,21 +555,29 @@ def _track_meta(paths, setlist_data=None, durations=None, bpms=None):
                 name = title
             if seconds is None:
                 seconds = entry.get("duration_seconds")
+        grid = grids.get(path) or {}
         meta[path] = {"bpm": bpm, "name": name,
-                      "duration_seconds": seconds}
+                      "duration_seconds": seconds,
+                      "beat_offset": grid.get("beat_offset"),
+                      "bar_offset": grid.get("bar_offset")}
     return meta
 
 
 def generate(base_path, events_source, out_path, set_bpm=None,
-             setlist_data=None, durations=None, bpms=None) -> dict:
-    """ベース .als + 操作ログ → 演奏 .als。報告 dict を返す。"""
+             setlist_data=None, durations=None, bpms=None,
+             grids=None) -> dict:
+    """ベース .als + 操作ログ → 演奏 .als。報告 dict を返す。
+
+    grids は {パス: {'beat_offset','bar_offset'}} (pass 28 の
+    小節合わせ用)。CLI からは渡らないので、その場合は小節
+    合わせなし (従来通り) で書き出す。"""
     events = performance.load_events(events_source)
     paths = []
     for event in events:
         if event.get("action") == "load" and event.get("value") \
                 and event["value"] not in paths:
             paths.append(event["value"])
-    meta = _track_meta(paths, setlist_data, durations, bpms)
+    meta = _track_meta(paths, setlist_data, durations, bpms, grids)
     if set_bpm is None and setlist_data is not None:
         from setlist import display_summary
         set_bpm = display_summary(setlist_data)["set_bpm"]
@@ -551,7 +605,37 @@ def generate(base_path, events_source, out_path, set_bpm=None,
     als_writer.write_als(tree, out_path)
     report["segments"] = {letter: len(recon["segments"][i])
                           for i, letter in enumerate("AB")}
+    # Pass 28 (user workflow 2026-11-28): he deletes the app's
+    # mix record when he moves over to Live, so an export would
+    # outlive the only record of the performance it came from.
+    # Save a copy of the journal next to the .als — same folder,
+    # output name + '-events.json' — so the pair always survives
+    # together. 操作保存's behaviour is unchanged; this is an
+    # additional copy made by the export itself.
+    report["events_copy"] = _save_events_copy(events, out_path)
     return report
+
+
+def _events_copy_path(out_path):
+    p = Path(out_path)
+    if p.suffix.lower() == ".als":
+        return str(p.with_name(p.name[:-4] + "-events.json"))
+    return str(p) + "-events.json"
+
+
+def _save_events_copy(events, out_path):
+    """書き出しと対になるジャーナルのコピーを保存し、その
+    パスを返す。失敗しても書き出し自体は成功扱い (None)。"""
+    try:
+        target = _events_copy_path(out_path)
+        Path(target).write_text(json.dumps(
+            {"schema": 1, "sample_rate": performance.RATE,
+             "events": events},
+            ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8")
+        return target
+    except Exception:
+        return None
 
 
 def validate_base(path):

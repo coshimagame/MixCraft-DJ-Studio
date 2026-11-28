@@ -220,7 +220,15 @@ def test_hardware_pads_and_monitor(rig):
     backend.inject(('note', 1, 84, 127))  # headphone CUE 2
     ctl.poll(now=100.2)
     assert window.monitor_deck == 1
-    backend.inject(('note', 1, 84, 127))  # re-press clears
+    # Pass 28: each CUE button toggles its OWN deck only — deck 1
+    # joins while deck 2 stays monitored (both on at once).
+    backend.inject(('note', 0, 84, 127))  # headphone CUE 1
+    ctl.poll(now=100.25)
+    assert window.monitor_decks == {0, 1}
+    backend.inject(('note', 0, 84, 127))  # re-press clears deck 1 only
+    ctl.poll(now=100.28)
+    assert window.monitor_decks == {1}
+    backend.inject(('note', 1, 84, 127))  # re-press clears deck 2
     ctl.poll(now=100.3)
     assert window.monitor_deck is None
 
@@ -277,19 +285,25 @@ def test_jog_seeks_the_loaded_deck(rig):
     window.engine.command('seek', 0, 48000 * 5)   # park mid-track
     window.engine.apply_pending()
     window.journal.history.clear()
-    # Pass 24: the seek direction is INVERTED vs pass 23 (the v1
+    # Pass 24: the jog direction is INVERTED vs pass 23 (the v1
     # sign felt backwards at the platter — the user's hardware
-    # report), so a positive jog delta seeks BACKWARD from here.
+    # report), so a positive jog delta moves BACKWARD from here.
+    # Pass 28: the gesture lands as an engine 'jog' DELTA of
+    # 1 ms per tick (was an absolute 5 ms seek), and the engine
+    # applies it to the live position.
     backend.inject(('cc', 0, 34, 10))     # +10 ticks
     ctl.poll(now=100.1)
     _journal_actions(window)
-    seeks = [e for e in window.journal.history
-             if e['action'] == 'seek' and e['deck'] == 0]
-    assert seeks and seeks[-1]['value'] == 48000 * 5 - 10 * (48000 // 200)
+    jogs = [e for e in window.journal.history
+            if e['action'] == 'jog' and e['deck'] == 0]
+    assert jogs and jogs[-1]['value'] == -10 * (48000 // 1000)
+    assert window.engine.decks[0]['position'] == \
+        48000 * 5 - 10 * (48000 // 1000)
     backend.inject(('cc', 0, 33, 118))    # -10 ticks (raw 118 = -10)
     ctl.poll(now=100.2)
     _journal_actions(window)
-    seeks = [e for e in window.journal.history
-             if e['action'] == 'seek' and e['deck'] == 0]
-    assert seeks[-1]['value'] == 48000 * 5
+    jogs = [e for e in window.journal.history
+            if e['action'] == 'jog' and e['deck'] == 0]
+    assert jogs[-1]['value'] == 10 * (48000 // 1000)
+    assert window.engine.decks[0]['position'] == 48000 * 5
     window.engine.command('load', 0, stub)  # leave deck as found-ish
