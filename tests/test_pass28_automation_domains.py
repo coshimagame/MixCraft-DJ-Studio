@@ -24,10 +24,12 @@ the wrong domains.
 These tests pin the fixed domains against a fixture in the
 REAL template shape (devices nested under
 DeviceChain/DeviceChain/Devices, Manuals copied from his
-template), plus three pass-28 regressions: a same-start false
-start replaced by the real take, pre-play knob settings
+template), plus pass-28 regressions: pre-play knob settings
 surviving to beat 0, and the journal copy saved beside the
-export.
+export. The same-start case is pinned as of pass 28.1 (user
+decision 2026-11-28: 「再演は両方残す」): pass 28's last-wins
+replacement was reverted — a reprise from the same cue keeps
+BOTH plays in the export.
 """
 import gzip
 import json
@@ -284,21 +286,39 @@ def test_single_sided_filter_sets_the_output_type(tmp_path):
     assert any('LP' in w for w in report['warnings'])
 
 
-def test_same_start_false_start_is_replaced_by_the_real_take(
-        tmp_path):
+def test_same_start_reprise_keeps_both_plays(tmp_path):
+    """Pass 28.1 (user decision 2026-11-28: 「再演は両方残す」).
+
+    Pass 28 replaced the earlier of two segments sharing an
+    in-song start offset with the later one (last-wins). The
+    user ruled that a deliberate reprise from the same cue is
+    a real second play: BOTH plays stay in the export, each at
+    its performed timeline position. The journal below plays
+    deck B from its cue (1.302 beats in) twice — a 0.6 s false
+    start at 14 s and the ~19.9 s take at 20.1 s.
+    """
     base, out, report, tracks = _generate(tmp_path)
     arr = tracks[1].find('./DeviceChain/MainSequencer/Sample/'
                          'ArrangerAutomation/Events')
     clips = [c for c in arr if c.tag == 'AudioClip']
-    # The real file had TWO clips at offset 1.302 (a 1.235-beat
-    # sliver + the long take). Same start: the later take
-    # replaces the earlier fragment — exactly one clip remains.
-    assert len(clips) == 1
-    clip = clips[0]
-    start = float(clip.find('CurrentStart').get('Value'))
-    end = float(clip.find('CurrentEnd').get('Value'))
-    assert abs(start - 1.302) < 0.01
-    assert end > 40.0        # the ~19.9 s take, not the sliver
+    assert len(clips) == 2
+    clips.sort(key=lambda c: float(c.get('Time')))
+    first, second = clips
+    # Both plays start from the same in-song cue point…
+    for clip in (first, second):
+        start = float(clip.find('CurrentStart').get('Value'))
+        assert abs(start - 1.302) < 0.01
+    # …at their performed timeline positions: played at 14 s
+    # and 20.1 s, so 6.1 s apart = 12.2 beats on the 120 BPM
+    # grid (the absolute origin moves with the pass-28 bar
+    # shift, the spacing must not).
+    gap = float(second.get('Time')) - float(first.get('Time'))
+    assert abs(gap - 12.2) < 0.1
+    # …the false start short, the real take long.
+    end_first = float(first.find('CurrentEnd').get('Value'))
+    end_second = float(second.find('CurrentEnd').get('Value'))
+    assert end_first - 1.302 < 2.0     # 0.6 s of the song
+    assert end_second > 40.0           # the ~19.9 s take
 
 
 def test_export_saves_a_journal_copy_beside_the_als(tmp_path):

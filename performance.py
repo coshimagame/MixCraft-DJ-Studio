@@ -567,27 +567,6 @@ def _coalesce_segments(segments, bpms, set_bpm):
     return merged
 
 
-def _drop_superseded_starts(segments):
-    """Pass 28 (実ファイルの解剖から): 同一デッキ・同一トラック・
-    同一開始位置 (offset_frames) のセグメントが複数ある場合、
-    後から始まったものだけを残す (後勝ちで置き換え)。
-
-    ユーザーの実書き出し (pass 27) で、デッキ B に開始位置
-    1.302 拍のクリップが 2 本あった — 1.235 拍の薄片と、同じ
-    位置から始まる長い本編。同じ位置から始まる断片は本編の
-    影であり、Live 上で二重に存在する意味がない (その薄片の
-    間、デッキ B の焼き込み音量は 0 で、どちらにせよ聞こえて
-    いなかった)。開始位置が違う再演 (リプライズ) には触ら
-    ない。"""
-    keep = {}
-    for seg in segments:
-        key = (seg["track"], seg["offset_frames"])
-        if key not in keep \
-                or seg["start_frame"] > keep[key]["start_frame"]:
-            keep[key] = seg
-    return sorted(keep.values(), key=lambda s: s["start_frame"])
-
-
 def build_perf_plan(recon, set_bpm, track_meta=None):
     """再構成結果 → perf_als が注入できるプラン。
 
@@ -734,8 +713,13 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
                 for path, meta in track_meta.items()}
     clips = {"A": [], "B": []}
     for i in range(2):
-        for seg in _drop_superseded_starts(_coalesce_segments(
-                recon["segments"][i], seg_bpms, set_bpm)):
+        # Pass 28.1 (ユーザー決定 2026-11-28「再演は両方残す」):
+        # 同一開始位置 (offset_frames) からの再演は、後勝ちで
+        # 消さず両方とも残す。pass 28 の置き換え規則
+        # (_drop_superseded_starts) は廃止した。ここで落とすのは
+        # _coalesce_segments が結合する連続断片だけ。
+        for seg in _coalesce_segments(
+                recon["segments"][i], seg_bpms, set_bpm):
             meta = track_meta.get(seg["track"]) or {}
             bpm = meta.get("bpm") or set_bpm
             if not meta.get("bpm"):
