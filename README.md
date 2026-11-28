@@ -1,4 +1,7 @@
-# MixCraft DJ Studio
+# MixAble DJ Studio
+
+> 2026-11-26 に **MixCraft** から **MixAble** へ改名しました。旧名 MixCraft で書かれた
+> 文書・記録も、同じ製品を指します。
 
 Mw-fActory — オフラインで動作するWindows向け2デッキDJ試遊版 v0.2.0-trial (Phase 2)。
 
@@ -15,7 +18,7 @@ Automatic出力はWASAPIの既定出力を優先します。接続エラー時�
 
 ## 起動
 
-Windows ZIPをすべて展開し、`MixCraftDJStudio.exe` を実行してください。
+Windows ZIPをすべて展開し、`MixAble.exe` を実行してください。
 `_internal` フォルダーはexeと同じ場所に必要です。Pythonや有料APIは不要です。
 `demo` のオリジナル合成WAV、または自分の音声ファイルを各デッキにドロップします。
 Playで再生し、チャンネル音量・MASTER・A/Bクロスフェーダーでミックスします。
@@ -55,6 +58,6 @@ Pythonコールバックはハードリアルタイムを保証しません。AS
 Python 3.14 x64。詳細は [BUILD_GUIDE.md](BUILD_GUIDE.md)。
 状態一覧は [ROADMAP.md](ROADMAP.md)、検証は [TEST_CHECKLIST.md](TEST_CHECKLIST.md)。
 [GitHub Actions](https://github.com/coshimagame/MixCraft-DJ-Studio/actions) の成功した
-Windows trial実行から `MixCraftDJStudio-Windows-x64` artifactを取得できます（GitHubログインが必要）。
+Windows trial実行から `MixAble-Windows-x64` artifactを取得できます（GitHubログインが必要）。
 
 Live 10 ALS互換性は未確認であり、対応済みではありません。

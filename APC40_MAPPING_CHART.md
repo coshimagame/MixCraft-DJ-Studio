@@ -1,4 +1,4 @@
-# APC40 → MixCraft DJ Studio マッピング図表
+# APC40 → MixAble DJ Studio マッピング図表
 
 対象: `midi_map.py`（ブランチ muse/phase2-development / PR #2 時点 + 2026-11-25 ノブ配置変更）
 初代 APC40 と APC40 mkII は現行プロファイルでは同一割当（違いは初代のみ HotCue パッドあり）。

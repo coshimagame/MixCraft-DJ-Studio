@@ -239,19 +239,38 @@ def _find_donor_clip(tracks, root):
     return None
 
 
-def _ensure_slots(track, needed, report, deck_label) -> list:
-    """スロットが needed 個になるまで、そのトラック自身のスロットを複製する。"""
+def _ensure_slots(track, needed, report, deck_label,
+                  allocator=None) -> list:
+    """スロットが needed 個になるまで、そのトラック自身のスロットを複製する。
+
+    Pass 40: 複製したスロットは複製元の Id を持ち込まない。Id は
+    要素の同一性なので、同じ Id のスロットが並ぶ書き出しは
+    Live 側でクリップの重複・欠落として現れかねない静かな破損。
+    allocator があればそこから、無ければそのトラック自身の
+    スロット番号の続きから、新しい Id を振り直す。"""
     slot_list = _slot_list(track)
     slots = _slots(track)
     if not slots:
         raise AlsError(f"Deck {deck_label} のトラックにスロットが 1 つもありません")
     added = 0
+    next_local = None
     while len(slots) < needed:
         clone = copy.deepcopy(slots[-1])
         value = _slot_value(clone)
         if value is not None:
             for child in list(value):
                 value.remove(child)
+        if next_local is None:
+            existing = [int(s.get('Id')) for s in slots
+                        if (s.get('Id') or '').lstrip('-').isdigit()]
+            next_local = (max(existing) + 1) if existing else 0
+        for el in clone.iter():
+            if el.get('Id') is not None:
+                if allocator is not None:
+                    el.set('Id', str(allocator.alloc()))
+                else:
+                    el.set('Id', str(next_local))
+                    next_local += 1
         slot_list.append(clone)
         slots.append(clone)
         added += 1
@@ -491,7 +510,8 @@ def inject_plan(root, plan) -> dict:
             continue
         needed = max(e.get("slot", 0) for e in entries) + 1
         needed_max = max(needed_max, needed)
-        slots = _ensure_slots(deck_tracks[deck], needed, report, deck)
+        slots = _ensure_slots(deck_tracks[deck], needed, report, deck,
+                              allocator=allocator)
         for entry in entries:
             slot_el = slots[entry.get("slot", 0)]
             value = _slot_value(slot_el)

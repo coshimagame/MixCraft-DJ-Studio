@@ -146,6 +146,25 @@ def _normalize_status(value):
 # 正規化
 # ---------------------------------------------------------------------------
 
+def _canonical_cue(cue) -> dict:
+    """rekordbox 形式のキュー1件を、保存と往復に耐える形へそろえる。
+
+    library.import_rekordbox_xml の出力 (name / type / start / end /
+    num) が正本。type は rekordbox の文字列 ('0'=キュー, '4'=ループ)
+    に統一し、num は int (-1=メモリーキュー, 0..=ホットキュー)、
+    start / end は秒 (end は無ければ None)。
+    """
+    ctype = cue.get("type")
+    return {
+        "name": cue.get("name") or "",
+        "type": str(ctype) if ctype is not None else None,
+        "start": _as_float(cue.get("start")) or 0.0,
+        "end": _as_float(cue.get("end")),
+        "num": _as_int(cue.get("num"))
+               if cue.get("num") is not None else -1,
+    }
+
+
 def normalize_track(raw) -> dict:
     """1 曲分を正本の形にそろえる。欠けたフィールドは None で補う。"""
     if not isinstance(raw, dict):
@@ -187,15 +206,20 @@ def normalize_track(raw) -> dict:
         "position": _as_int(raw.get("position")),
         # PC 側に実ファイルがある場合の任意フィールド (正本では未使用でも保持)
         "path": raw.get("path"),
-        "cues": raw.get("cues") or [],
+        "cues": [_canonical_cue(c) for c in (raw.get("cues") or [])
+                 if isinstance(c, dict)],
     }
 
 
 def canonical_track(track) -> dict:
-    """保存用の正本フィールドだけに絞った 1 曲分 (path/cues は落とす)。
+    """保存用の正本フィールドだけに絞った 1 曲分 (path は落とす)。
 
     スマホ側の付帯情報 (note / status / position) は、値がある場合だけ
     一緒に残す (load → save → load で情報が落ちないように)。
+    Pass 38: cues は「ある場合だけ」残す — rekordbox から読み込んだ
+    キューが保存で消えると、開き直した時にグリッドのアンカーも
+    Live 書き出しのクリップ計画も根拠を失う。キューが無い曲の
+    保存形は従来と完全に同じ (キーの無い行に cues は生やさない)。
     """
     t = normalize_track(track)
     out = {k: t[k] for k in ("title", "artist", "bpm", "key", "duration_seconds",
@@ -204,7 +228,22 @@ def canonical_track(track) -> dict:
     for k in ("note", "status", "position"):
         if t.get(k) is not None:
             out[k] = t[k]
+    if t.get("cues"):
+        out["cues"] = t["cues"]
     return out
+
+
+def setlist_from_rekordbox_tracks(tracks) -> dict:
+    """library.import_rekordbox_xml の出力 (path / title / bpm /
+    key / cues の dict 列) をアプリの正本セットリスト形へ
+    (pass 38)。実ファイルのパスとキューがそのまま行に乗り、
+    デッキ読み込み時のグリッドアンカー (pass 26) と Live
+    書き出しのクリップ計画が従来通り効く。"""
+    raw = {"format": FORMAT, "version": VERSION, "tracks": [
+        {"title": t.get("title") or "", "bpm": t.get("bpm"),
+         "key": t.get("key"), "path": t.get("path"),
+         "cues": t.get("cues") or []} for t in tracks]}
+    return normalize_setlist(raw)
 
 
 def normalize_setlist(data) -> dict:
@@ -418,7 +457,38 @@ STATUS_LABELS = {
 }
 
 
-def display_rows(setlist) -> list:
+def live_statuses(tracks, playing=(), played=()) -> list:
+    """ライブ状態 (デッキの実再生) から各行の status を決める純関数。
+
+    playing: 今かかっている行の index 集合。played: 既に鳴った行の
+    index 集合。next は「今かかっている行 (無ければ最後に鳴った行)
+    より後ろで最初の未再生の行」。ファイル側の started /
+    current_index / 曲ごとの status スナップショットは一切見ない —
+    PC アプリのパネルではデッキの実状態が正 (pass 27: 読み込んだ
+    JSON の再生位置スナップショットと実際の演奏が食い違って、行の
+    表示とデッキの ON AIR が矛盾した)。
+    """
+    playing = set(playing)
+    played = set(played)
+    statuses = []
+    for i in range(len(tracks)):
+        if i in playing:
+            statuses.append("playing")
+        elif i in played:
+            statuses.append("played")
+        else:
+            statuses.append("queued")
+    sounded = playing | played
+    if sounded:
+        anchor = max(sounded)
+        for i in range(anchor + 1, len(statuses)):
+            if statuses[i] == "queued":
+                statuses[i] = "next"
+                break
+    return statuses
+
+
+def display_rows(setlist, statuses=None) -> list:
     """セットリストを表示用の行 dict のリストに整形する。
 
     各行: number (1 始まり), title, artist, bpm, key, duration_seconds,
@@ -430,31 +500,38 @@ def display_rows(setlist) -> list:
     あればそれを正とし、無ければ started / current_index から導出する。
     next (再生中の次に控える曲) は明示の status には無いので常に導出する:
     再生中より後ろで最初の queued が next になる。
+
+    statuses を渡すと、その status 列をそのまま使う (導出しない)。
+    PC アプリがライブ状態 (live_statuses) を渡すための口で、行の
+    並び・長さが tracks と一致しない場合は無視して従来導出に落とす。
     """
     data = normalize_setlist(setlist)
     tracks = data["tracks"]
-    current = data["current_index"]
-    started = data["started"]
-    statuses = []
-    for i, t in enumerate(tracks):
-        s = t.get("status")
-        if s not in ("played", "playing", "queued"):
-            s = None
-        if s is None:
-            if not started:
-                s = "queued"
-            elif i < current:
-                s = "played"
-            elif i == current:
-                s = "playing"
-            else:
-                s = "queued"
-        statuses.append(s)
-    if started and current >= 0:
-        for i in range(current + 1, len(tracks)):
-            if statuses[i] == "queued":
-                statuses[i] = "next"
-                break
+    if statuses is not None and len(statuses) != len(tracks):
+        statuses = None
+    if statuses is None:
+        current = data["current_index"]
+        started = data["started"]
+        statuses = []
+        for i, t in enumerate(tracks):
+            s = t.get("status")
+            if s not in ("played", "playing", "queued"):
+                s = None
+            if s is None:
+                if not started:
+                    s = "queued"
+                elif i < current:
+                    s = "played"
+                elif i == current:
+                    s = "playing"
+                else:
+                    s = "queued"
+            statuses.append(s)
+        if started and current >= 0:
+            for i in range(current + 1, len(tracks)):
+                if statuses[i] == "queued":
+                    statuses[i] = "next"
+                    break
     rows = []
     for i, t in enumerate(tracks):
         rows.append({

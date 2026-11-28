@@ -1,4 +1,4 @@
-# MixCraft DJ Studio — Ableton 相棒型への設計転換 (2026-11-25)
+# MixAble DJ Studio — Ableton 相棒型への設計転換 (2026-11-25)
 
 決定: ユーザー（むぅちゃん）が 2026-11-25 に方向転換を承認。
 単体DJアプリとしての開発は v0.2.0-trial (PR #2) で一区切りとし、
@@ -8,9 +8,9 @@
 ## 1. なぜ転換するのか
 
 APC40 は元々 Ableton と共同開発された Live 専用コントローラーであり、
-MixCraft が単体で再実装してきたものの大半を Live 本体が既に高品質に持っている。
+MixAble が単体で再実装してきたものの大半を Live 本体が既に高品質に持っている。
 
-| 機能 | 単体版 MixCraft | Live 10 Suite |
+| 機能 | 単体版 MixAble | Live 10 Suite |
 |---|---|---|
 | 音程維持タイムストレッチ | 未実装（レート再生のみ） | Warp (Complex Pro) で実証済み |
 | EQ / Filter | 自作クロスオーバー（Python、RT余裕は要計測） | EQ Three / EQ Eight / Auto Filter |
@@ -19,7 +19,7 @@ MixCraft が単体で再実装してきたものの大半を Live 本体が既�
 | 低遅延オーディオ | WASAPI 22ms を自前で達成 | ユーザーの既存環境で動作済み |
 | APC40 LED/バンク | 未接続（ロジックのみ） | 本体がネイティブ対応 |
 
-逆に、Live が持っていないものこそ MixCraft の存在意義になる（2節）。
+逆に、Live が持っていないものこそ MixAble の存在意義になる（2節）。
 
 ## 2. 新しい役割分担
 
@@ -28,7 +28,7 @@ MixCraft が単体で再実装してきたものの大半を Live 本体が既�
 - オートメーションの記録と後編集（= EDIT MODE の受け皿）
 - APC40 の基本連携（セッション表示、フェーダー、LED）
 
-### MixCraft が足す（ここが製品価値）
+### MixAble が足す（ここが製品価値）
 1. **解析**: BPM / ビートグリッド / キー (Camelot) — `analysis.py` を再利用。
    結果は Live クリップの Warp マーカーとクリップ名/色に書き戻す。
 2. **自動ミックス計画**: `automix.py` を再利用。フレーズ整列した繋ぎ候補
@@ -146,7 +146,7 @@ Live のモデルとぶつかる点（正直に設計へ織り込む）:
 - **rekordbox の Cue ポイントは変換して使う。** Live にホットキューの概念は
   無いので、そのまま1対1では使えない。ただし rekordbox XML 書き出しには
   POSITION_MARK (Hot Cue / メモリーキュー / ループ、秒位置) が含まれるため、
-  MixCraft が変換する: Hot Cue → その位置から始まる別クリップ、
+  MixAble が変換する: Hot Cue → その位置から始まる別クリップ、
   メモリーキュー → Arrangement のロケーター、ループ → クリップのループ範囲。
   `library.py` に読み取り (`import_rekordbox_xml` の `cues`) と変換
   (`cues_to_clip_plan`) を実装し、サンプル XML で検証済み (2026-11-25)。

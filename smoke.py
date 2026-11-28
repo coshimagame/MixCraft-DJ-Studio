@@ -5,6 +5,21 @@ from PySide6.QtCore import QTimer
 from engine import RATE, load_track
 from make_demo import create
 
+def _audio_inventory():
+    """Pass 23 evidence: which host APIs the (possibly packaged)
+    PortAudio build exposes, and which output devices it sees —
+    this is how we learn whether ASIO exists in the shipped
+    binary at all. Best-effort: any failure records the error."""
+    try:
+        import sounddevice as sd
+        hosts=sd.query_hostapis()
+        return dict(hostapis=[h['name'] for h in hosts],
+            outputs=[dict(name=d['name'],hostapi=hosts[d['hostapi']]['name'],
+                channels=d['max_output_channels'])
+                for d in sd.query_devices() if d['max_output_channels']>=1])
+    except Exception as e:
+        return dict(error=str(e))
+
 def schedule(app,window,directory,hardware):
     directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
     create(directory/'demo')
@@ -23,7 +38,10 @@ def schedule(app,window,directory,hardware):
         if not hardware:
             for _ in range(200): window.engine.render(512)
         window.tick()
-        result=dict(frames=window.engine.frame,peak=window.engine.peak,
+        result=dict(audio_inventory=_audio_inventory(),
+            audio_device=getattr(window,'audio_device_name',''),
+            midi_available=bool(getattr(window,'midi',None) and window.midi.available),
+            frames=window.engine.frame,peak=window.engine.peak,
             positions=[d['position'] for d in window.engine.decks],
             overloads=window.engine.overloads,stream_active=bool(window.stream and window.stream.active),
             latency=window.stream.latency if window.stream else None,

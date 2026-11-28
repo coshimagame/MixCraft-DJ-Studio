@@ -1,12 +1,15 @@
 name: Windows trial
 on:
   push:
-    branches: [main]
+    # Pass 22 (tonight build, part 3): the rekordbox-style branch
+    # builds too, so the user can download tonight's exe from the
+    # run's artifact without merging PR #8 first.
+    branches: [main, muse/rekordbox-style-2]
   pull_request:
   workflow_dispatch:
 jobs:
   test-build:
-    timeout-minutes: 20
+    timeout-minutes: 35
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,6 +17,28 @@ jobs:
         with:
           python-version: '3.14'
       - run: python -m pip install -r requirements.txt pytest==9.2.0 pyinstaller==6.22.3
+      - name: Build ASIO-enabled PortAudio (vcpkg) into sounddevice's ASIO slot
+        shell: pwsh
+        run: |
+          # Pass 24, item 6 (user: 「asioもrbの使って」 — the real
+          # DDJ-RB ASIO, not the WASAPI substitute). The
+          # sounddevice wheel's bundled PortAudio has no ASIO
+          # host (pass 23 smoke evidence), but sounddevice 0.5.6
+          # loads libportaudio64bit-asio.dll from its own
+          # portaudio-binaries folder when SD_ENABLE_ASIO is set
+          # (app.py sets it when the file is present). Build that
+          # DLL here: vcpkg's asiosdk port fetches the Steinberg
+          # SDK inside CI only — the SDK is never committed to
+          # this repository. The vcpkg build keeps the DS /
+          # WASAPI / WDM-KS / MME hosts enabled, so the existing
+          # fallback ladder is untouched.
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install 'portaudio[asio]:x64-windows'
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg portaudio[asio] build failed' }
+          $built = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\portaudio.dll"
+          if (-not (Test-Path $built)) { throw "Built PortAudio DLL not found: $built" }
+          $dest = python -c "import _sounddevice_data, os; print(os.path.join(next(iter(_sounddevice_data.__path__)), 'portaudio-binaries', 'libportaudio64bit-asio.dll'))"
+          Copy-Item $built $dest -Force
+          Write-Host "ASIO-enabled PortAudio placed at $dest"
       - run: python -m pytest -q
       - run: python make_demo.py demo
       - run: python build.py
@@ -21,18 +46,31 @@ jobs:
         timeout-minutes: 2
         shell: pwsh
         run: |
-          $trial = Start-Process dist/MixCraftDJStudio/MixCraftDJStudio.exe -ArgumentList '--smoke-test', 'smoke' -WindowStyle Hidden -Wait -PassThru
+          $trial = Start-Process dist/MixAble/MixAble.exe -ArgumentList '--smoke-test', 'smoke' -WindowStyle Hidden -Wait -PassThru
           if ($trial.ExitCode -ne 0) { throw 'Packaged smoke test failed' }
           if (-not (Test-Path smoke/smoke.json)) { throw 'Missing smoke result' }
-      - run: python collect_licenses.py dist/MixCraftDJStudio/third-party-licenses
-      - run: Copy-Item demo,*.md -Destination dist/MixCraftDJStudio -Recurse
+      - name: Verify the packaged PortAudio exposes an ASIO host
+        shell: pwsh
+        run: |
+          # Pass 24 evidence, same yardstick as pass 23: the
+          # packaged exe's own smoke inventory must list ASIO
+          # among its host APIs. (No DDJ-RB is attached to the
+          # runner, so the device name itself is not expected —
+          # the host's presence plus the app's ASIO-first ladder
+          # is what this proves.)
+          $smoke = Get-Content smoke/smoke.json -Raw | ConvertFrom-Json
+          $hosts = $smoke.audio_inventory.hostapis
+          Write-Host "Packaged PortAudio host APIs: $($hosts -join ', ')"
+          if ($hosts -notcontains 'ASIO') { throw 'ASIO host missing from the packaged PortAudio' }
+      - run: python collect_licenses.py dist/MixAble/third-party-licenses
+      - run: Copy-Item demo,*.md -Destination dist/MixAble -Recurse
       - uses: actions/upload-artifact@v4
         with:
-          name: MixCraftDJStudio-Windows-x64
-          path: dist/MixCraftDJStudio
+          name: MixAble-Windows-x64
+          path: dist/MixAble
       - uses: actions/upload-artifact@v4
         with:
-          name: MixCraftDJStudio-smoke-evidence
+          name: MixAble-smoke-evidence
           path: |
             smoke/smoke.json
             smoke/screenshot.png

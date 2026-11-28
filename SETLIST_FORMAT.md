@@ -1,6 +1,6 @@
 # セットリスト JSON 形式 (mixcraft-setlist v1)
 
-スマホの下ごしらえページ ⇄ PC (MixCraft) でセットリストを受け渡すための
+スマホの下ごしらえページ ⇄ PC (MixAble) でセットリストを受け渡すための
 共通 JSON 形式の正本仕様。実装は `setlist.py`（読み書き・検証・変換）、
 検証は `tests/test_setlist.py`。
 
