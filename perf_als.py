@@ -593,7 +593,8 @@ def inject_perf(root, plan) -> dict:
         session_template = copy.deepcopy(session_donor)
         try:
             slots = als_writer._ensure_slots(
-                track, len(entries), report, deck)
+                track, len(entries), report, deck,
+                allocator=allocator)
         except AlsError:
             report["warnings"].append(
                 f"Deck {deck} のトラックにクリップスロットが無いため、"
