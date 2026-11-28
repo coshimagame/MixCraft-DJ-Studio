@@ -84,6 +84,23 @@ pass 28 (実機の書き出しファイルの解剖から):
     (0 ≤ Δ < 4) ずらす。Δ は最初の曲の beat_offset (拍グリッド
     原点) と bar_offset (小節頭の拍、0..3) から決める。グリッド
     情報が無い曲では Δ = 0 (従来通りセグメント開始 = 0 拍)。
+
+pass 29 (ユーザーの実ジャーナルでの検証、2026-11-28):
+  - 実セッションのジャーナル (1448 イベント) をそのまま再生
+    して確定した欠陥: デッキ 0 のスクラッチ (DDJ-RB のジョグ
+    ±3024 フレーム ×351) が tick ごとにセグメントを切り、
+    1 デッキ 50 クリップ (大半が 1 拍未満の薄片で、Live 上の
+    時間範囲が互いに重なる) になっていた。ジョグは大きさに
+    よらず連続操作なので、replay では常にセグメントを切らず
+    再アンカーする (seek 等の意図的な編集だけが境界のまま)。
+    逆行して終わるセグメント (スピンバック) は、終端位置が
+    開始位置以下なら「経過時間分を真っ直ぐ再生した長さ」に
+    フォールバックしてクリップの形を保つ。
+  - 実ジャーナルには stop / pause イベントが一切無い (再生
+    しっぱなしで書き出し)。セグメントの終端は従来通り
+    ジャーナルの最終フレームで閉じる — 実データの形に合わせ
+    たこの規則を tests/test_pass29_journal_replay.py が固定
+    する。
 """
 from __future__ import annotations
 
@@ -305,23 +322,32 @@ class _Reconstructor:
             # Pass 28: a jog DELTA in frames (the engine applies
             # it to its live position with no quantize snap).
             # Replay applies the same delta to the reconstructed
-            # position. A jog within the absorb window is a
-            # continuous-control move, not an edit: re-anchor
-            # the open segment (the sync_align treatment) so a
-            # fine-jog storm never cuts it — cutting would also
-            # lose the travel of a jog that lands as the
-            # journal's very last event, whose follow-up segment
-            # is zero-length and dropped. A delta beyond the
-            # absorb window still cuts via _sync_seg below.
+            # position.
+            # Pass 29 (the user's REAL journal, 2026-11-28): a
+            # jog is a continuous-control gesture at ANY size —
+            # the real session's scratch passage was 351 hardware
+            # ticks of ±3024 frames each, far beyond the absorb
+            # window, and replay cut a segment at every tick:
+            # 50 clips for one deck, 45 of them sub-beat slivers
+            # whose Live-time spans overlap each other (clip
+            # length comes from the offset span, start times are
+            # dense), and the deck's second half simply did not
+            # survive into a readable set. So jog now ALWAYS
+            # re-anchors the open segment (the sync_align
+            # treatment), never cuts: one continuous play of a
+            # track is one segment, and the clip's end position
+            # is the deck's real position when the segment closes
+            # (pass 27's end_offset_frames), so the performed
+            # travel — scratches included — is carried by the
+            # clip's span. Deliberate edits (seek / cue_jump /
+            # hotcue_jump) still cut, exactly as before.
             if d["track"] is not None:
                 pos = d["position"] + float(value or 0)
                 if d["duration"] is not None:
                     pos = min(max(pos, 0.0), d["duration"])
-                shift = pos - d["position"]
                 d["position"] = pos
                 seg = self.open_seg[index]
-                if seg is not None and abs(shift) <= _absorb_frames(
-                        self.bpms.get(d["track"]) or self.set_bpm):
+                if seg is not None:
                     seg["anchor_frames"] = float(pos)
                     seg["anchor_frame"] = float(frame)
         elif action in DECK_PARAMS and d is not None:
@@ -733,6 +759,15 @@ def build_perf_plan(recon, set_bpm, track_meta=None):
             # 従来通り (開始位置 + 経過 × rate) で見積もる。
             if seg.get("end_offset_frames") is not None:
                 end_s = seg["end_offset_frames"] / RATE
+                # Pass 29: a net-backward segment (a spinback /
+                # scratch that ends behind where it started) has
+                # no valid single-clip form — CurrentEnd <=
+                # CurrentStart is not a clip Live can show. Fall
+                # back to the performed timeline span played
+                # straight through, so the clip stays valid and
+                # timeline-faithful.
+                if end_s <= offset_s:
+                    end_s = offset_s + span_s * seg["rate"]
             else:
                 end_s = offset_s + span_s * seg["rate"]
             clips["AB"[i]].append({

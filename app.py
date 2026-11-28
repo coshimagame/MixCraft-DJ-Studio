@@ -1632,6 +1632,22 @@ class Window(QMainWindow):
         # _deck_claims[i] is the row deck i currently speaks for.
         self._setlist_played = set()
         self._deck_claims = [None, None]
+        # Pass 29 (user report, 2026-11-28: 「トラックリストと再生
+        # 中のものの矛盾も解決してない」): pass 27 kept off-list
+        # plays from touching the planned rows, but a deck playing
+        # a file the list never heard of then left the panel
+        # claiming a plan reality had left behind (his list said
+        # one track waiting while the decks played two others).
+        # Now an off-list load earns an ACTUAL row — in load
+        # order, with its real deck chip and a live status from
+        # the same claims machinery — rendered ABOVE the planned
+        # rows, which keep their pass-27 behaviour untouched.
+        # _actual_rows[i] is a normalized entry plus 'deck';
+        # _actual_played is its sounded ledger; _actual_claims[i]
+        # is the actual row deck i currently has loaded.
+        self._actual_rows = []
+        self._actual_played = set()
+        self._actual_claims = [None, None]
         self._setlist_sig = None   # last rendered (statuses, monitor path)
         # Pass 10 (user direction, 2026-11-27): ONE language at a
         # time — the bilingual labels looked cluttered (「文字ガチャ
@@ -2940,6 +2956,9 @@ class Window(QMainWindow):
     def _reset_setlist_live(self):
         self._setlist_played = set()
         self._deck_claims = [None, None]
+        self._actual_rows = []
+        self._actual_played = set()
+        self._actual_claims = [None, None]
         self._setlist_sig = None
 
     def _claim_for(self, deck, path, tracks):
@@ -2989,6 +3008,88 @@ class Window(QMainWindow):
                 if claim is not None:
                     self._setlist_played.add(claim)
             self._deck_claims[i] = claim
+            # Pass 29: the actual-row side of the same tick. A
+            # loaded file that matches NO planned row appears as
+            # an actual row (created on load, not just on play —
+            # the contradiction he photographed was about loaded
+            # decks); a listed file never gets one, its claim
+            # above is the whole story. The row's deck follows
+            # the deck that holds it, and sounding joins the
+            # actual ledger, so stop / track end leaves it 済.
+            actual = self._actual_claims[i]
+            if actual is not None and (
+                    path is None or actual >= len(self._actual_rows)
+                    or not _path_matches(
+                        self._actual_rows[actual].get('path'), path)):
+                actual = None
+            if path is not None and self.setlist_data is not None \
+                    and not any(_path_matches(e.get('path'), path)
+                                for e in tracks):
+                if actual is None:
+                    actual = self._actual_row_for(i, path)
+                if actual is not None:
+                    self._actual_rows[actual]['deck'] = i
+                    if d['playing']:
+                        self._actual_played.add(actual)
+            self._actual_claims[i] = actual
+
+    def _actual_row_for(self, deck, path):
+        """The actual row for an off-list file: the existing one
+        for that path, or a new one appended in load order. The
+        entry is the panel-drop builder's (tags / filename
+        title, measured duration); BPM / key come from the
+        deck's own analysis, which a bare file read cannot
+        know."""
+        for idx, entry in enumerate(self._actual_rows):
+            if _path_matches(entry.get('path'), path):
+                return idx
+        try:
+            entry = file_track_entry(Path(path))
+        except Exception:
+            return None
+        track = self.decks[deck].wave.track
+        if track is not None:
+            if entry.get('bpm') is None \
+                    and getattr(track, 'bpm', None):
+                entry['bpm'] = track.bpm
+            if not entry.get('key'):
+                entry['key'] = getattr(track, 'camelot', None) \
+                    or getattr(track, 'key', None)
+        entry['deck'] = deck
+        self._actual_rows.append(entry)
+        return len(self._actual_rows) - 1
+
+    def _actual_live_statuses(self):
+        """Live statuses for the actual rows alone — the same
+        pure rule as the planned rows (pass 27), computed over
+        their own claims / ledger so the two groups never
+        disturb each other's next-marker."""
+        playing = {self._actual_claims[i]
+                   for i, d in enumerate(self.engine.decks)
+                   if d['playing']
+                   and self._actual_claims[i] is not None}
+        return live_statuses(self._actual_rows, playing,
+                             self._actual_played)
+
+    def _load_actual_entry(self, index):
+        """Double-click on an actual row (pass 29): the same
+        standby-deck load as a planned row, from the actual
+        row's own file."""
+        if not 0 <= index < len(self._actual_rows):
+            return
+        entry = self._actual_rows[index]
+        path = entry.get('path')
+        if not path or not Path(path).is_file():
+            self._status_fn = lambda lang: \
+                i18n.tr('setlist_entry_no_file', lang)
+            self._apply_status()
+            return
+        deck = self.standby_deck()
+        self.load(deck, path)
+        title = entry.get('title') or Path(path).stem
+        self._status_fn = lambda lang, t=title, d='AB'[deck]: \
+            i18n.tr('setlist_entry_loaded', lang).format(title=t, deck=d)
+        self._apply_status()
 
     def _setlist_live_statuses(self):
         tracks = (self.setlist_data or {}).get('tracks') or []
@@ -3013,8 +3114,12 @@ class Window(QMainWindow):
 
     def _setlist_signature(self):
         """What the rendered rows depend on: the live statuses
-        plus the monitor row markers' target paths."""
+        (planned and, pass 29, actual), the actual rows
+        themselves, plus the monitor row markers' target paths."""
         return (tuple(self._setlist_live_statuses()),
+                tuple(self._actual_live_statuses()),
+                tuple((r.get('path'), r.get('deck'))
+                      for r in self._actual_rows),
                 self._monitor_paths())
 
     def _refresh_setlist_live(self):
@@ -3048,9 +3153,32 @@ class Window(QMainWindow):
         # Pass 27: the rows' statuses are the LIVE ones (decks'
         # real state via the claims/ledger), not the file's
         # snapshot — display_rows uses them verbatim.
-        for row_index, row in enumerate(display_rows(
+        # Pass 29: ACTUAL rows (off-list tracks the decks really
+        # loaded / played) render ABOVE the planned rows, in the
+        # order the decks took them, with their real deck letter
+        # instead of the plan's alternation; planned rows follow
+        # with their pass-27 statuses and alternation untouched.
+        items = []
+        if self._actual_rows:
+            for row, entry in zip(
+                    display_rows({'format': 'mixcraft-setlist',
+                                  'version': 1,
+                                  'tracks': self._actual_rows},
+                                 statuses=self._actual_live_statuses()),
+                    self._actual_rows):
+                items.append((row, entry,
+                              'AB'[entry.get('deck') or 0],
+                              self._load_actual_entry))
+        for row in display_rows(
                 self.setlist_data,
-                statuses=self._setlist_live_statuses())):
+                statuses=self._setlist_live_statuses()):
+            entry = entries[row['index']] \
+                if row['index'] < len(entries) else {}
+            items.append((row, entry,
+                          'A' if row['number'] % 2 == 1 else 'B',
+                          self.load_setlist_entry))
+        for row_index, (row, entry, deck_letter, activate) in \
+                enumerate(items):
             # Pass 14: the rows live on old-LCD glass now, and an old
             # LCD has no colour — the fixed status colours become
             # INK DENSITIES plus the text badges: played = dim ink,
@@ -3078,8 +3206,9 @@ class Window(QMainWindow):
             # odd positions (1,3,5...) -> Deck A, even (2,4,6...) ->
             # Deck B. Pass 15: the bar beside it is NEUTRAL ink now —
             # the A=blue / B=red colour coding is retired, the
-            # letter carries the identity.
-            deck_letter = 'A' if row['number'] % 2 == 1 else 'B'
+            # letter carries the identity. Pass 29: for ACTUAL rows
+            # the letter is the deck that really holds the track
+            # (carried in the item tuple), not the alternation.
             line = QHBoxLayout()
             line.setContentsMargins(6, 3, 6, 3)
             deck_bar = QFrame()
@@ -3126,7 +3255,6 @@ class Window(QMainWindow):
             # the monitored deck's loaded track (matched by path,
             # pass 13's rule). Other rows keep an empty slot of the
             # same width so the badge column stays aligned.
-            entry = entries[row['index']] if row['index'] < len(entries) else {}
             is_monitored = any(
                 _path_matches(entry.get('path'), monitored_path)
                 for monitored_path in monitor_paths)
@@ -3152,8 +3280,8 @@ class Window(QMainWindow):
             # NOW PLAYING row's container is the inverted ink block.
             # Pass 24: the row is a SetlistRow — a double-click
             # loads the entry's file onto the standby deck.
-            container = SetlistRow(row['index'],
-                                   self.load_setlist_entry)
+            # Pass 29: actual rows activate from their own list.
+            container = SetlistRow(row['index'], activate)
             if row['status'] == 'playing':
                 container.setObjectName('setrowplaying')
             else:

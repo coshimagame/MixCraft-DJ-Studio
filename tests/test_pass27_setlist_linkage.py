@@ -132,15 +132,21 @@ def test_double_click_play_stop_then_next_entry(window, tmp_path):
     assert _statuses(window) == ['played', 'playing', 'next']
 
 
-def test_off_list_file_play_leaves_rows_untouched(window, tmp_path):
+def test_off_list_file_play_leaves_planned_rows_untouched(window,
+                                                          tmp_path):
     _, off = _setup(window, tmp_path)
     _load(window, 0, off)
     _play(window, 0)
-    # No row may light up for a file that is not in the list,
-    # and with nothing in the list sounded there is no 'next'.
+    # No PLANNED row may light up for a file that is not in the
+    # list, and with nothing in the list sounded there is no
+    # 'next'. (Pass 29 adds the other half: the performance
+    # itself appears as an ACTUAL row above the plan — see
+    # test_pass29_setlist_actual_rows.py.)
     assert _statuses(window) == ['queued', 'queued', 'queued']
     assert window._deck_claims == [None, None]
     assert window._setlist_played == set()
+    assert len(window._actual_rows) == 1
+    assert window._actual_live_statuses() == ['playing']
 
 
 def test_deck_drop_of_listed_file_matches_double_click(window,
