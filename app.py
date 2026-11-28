@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -1098,6 +1099,81 @@ def save_audio_diagnostics(data_dir, diag):
     except OSError:
         pass
 
+# ---------------------------------------------------------------------------
+# Pass 36: the diagnostics export. The pass-25 record above sat in
+# %LOCALAPPDATA%\MixCraftDJStudio and the ASIO diagnosis stalled
+# for hours on fetching it out of AppData by hand — so the app now
+# carries the file to the Desktop itself, under a name he can
+# find, and says what the record means in one line.
+# ---------------------------------------------------------------------------
+
+DIAG_DESKTOP_FILENAME = 'MixAble-audio-diagnostics.json'
+
+def desktop_dir():
+    """The user's Desktop — where the diagnostics export lands:
+    a place he can find without digging through AppData."""
+    return Path.home() / 'Desktop'
+
+def read_audio_diagnostics(data_dir):
+    """The last ladder record as a dict, or None when there is
+    no readable file."""
+    try:
+        return json.loads(
+            (Path(data_dir) / AUDIO_DIAG_FILENAME).read_text(
+                encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+
+def copy_audio_diagnostics(data_dir, dest_dir):
+    """Copy audio-diagnostics.json into dest_dir under the
+    findable Desktop name -> the destination Path, or None when
+    there is nothing to copy or the copy failed."""
+    source = Path(data_dir) / AUDIO_DIAG_FILENAME
+    if not source.is_file():
+        return None
+    try:
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / DIAG_DESKTOP_FILENAME
+        shutil.copyfile(source, dest)
+        return dest
+    except OSError:
+        return None
+
+def audio_diag_summary(diag, lang):
+    """One plain line from a ladder record: what is making
+    sound now, or why the DDJ-RB is not. Read from the record
+    itself — never from live widget state — so the dialog tells
+    the same story the exported file does."""
+    if not isinstance(diag, dict):
+        return i18n.tr('diag_outcome_unknown', lang)
+    outcome = diag.get('outcome')
+    attempts = diag.get('attempts') or []
+    if outcome == 'opened':
+        for record in attempts:
+            if record.get('ok'):
+                host = record.get('hostapi') or 'default host'
+                if record.get('name'):
+                    return i18n.tr('diag_outcome_opened', lang) \
+                        .format(device=record['name'], host=host)
+                return i18n.tr('diag_outcome_opened_default',
+                               lang).format(host=host)
+        return i18n.tr('diag_outcome_unknown', lang)
+    if outcome == 'silent':
+        return i18n.tr('diag_outcome_silent', lang)
+    if outcome == 'system_default_fallback':
+        rb_indices = {d.get('index')
+                      for d in diag.get('rb_devices') or []}
+        for record in attempts:
+            if record.get('device') in rb_indices \
+                    and record.get('error'):
+                return i18n.tr('diag_outcome_rb_failed', lang) \
+                    .format(error=record['error'])
+        if not rb_indices:
+            return i18n.tr('diag_outcome_rb_absent', lang)
+        return i18n.tr('diag_outcome_fallback', lang)
+    return i18n.tr('diag_outcome_unknown', lang)
+
 BUNDLED_TEMPLATE_NAME = 'template.als'
 
 def bundled_template_path(roots=None):
@@ -2044,13 +2120,21 @@ class Window(QMainWindow):
         self.apply_button = QPushButton('Apply / 適用')
         self.apply_button.clicked.connect(self.start_audio)
         utility.addWidget(self.apply_button)
+        # Pass 36: the diagnostics export sits with the audio
+        # controls it describes — one click refreshes the ladder
+        # record and carries it to the Desktop (see
+        # export_diagnostics). Never disabled: it matters most
+        # exactly when the audio state is failed or fallback.
+        self.diag_button = QPushButton('EXPORT DIAGNOSTICS / 診断を書き出す')
+        self.diag_button.clicked.connect(self.export_diagnostics)
+        utility.addWidget(self.diag_button)
         # Pass 24: the utility bar's controls wear the slimmer
         # padding (STYLE's [util="true"] rules) — the bar's height
         # is part of the window's floor on short screens.
         for util_widget in (self.duration, self.preview_button,
                             self.preview_stop, self.export_button,
                             self.live_button, self.devices,
-                            self.apply_button):
+                            self.apply_button, self.diag_button):
             util_widget.setProperty('util', True)
         layout.addWidget(utility_bar)
         # BOTTOM ZONE (pass 9 sketch): left, one compact MIXER BLOCK
@@ -2193,6 +2277,7 @@ class Window(QMainWindow):
         self._reg(self.export_button.setText, 'save_events')
         self._reg(self.live_button.setText, 'export_live')
         self._reg(self.apply_button.setText, 'apply')
+        self._reg(self.diag_button.setText, 'diag_export')
         self._reg(self.setlist_label.setText, 'setlist_caption')
         self._reg(self.mix_reset.setText, 'timer_reset')
         self._reg(self.setlist_open.setText, 'open_setlist')
@@ -2467,6 +2552,33 @@ class Window(QMainWindow):
                 self.devices.setItemData(
                     row, f"{d['name']}: {state_of(data)}",
                     Qt.ItemDataRole.ToolTipRole)
+    def export_diagnostics(self):
+        """Pass 36 (promised 2026-11-28 after the ASIO diagnosis
+        stalled for hours on fetching a file out of AppData by
+        hand): one click refreshes the ladder record — a fresh
+        open attempt at the current selection is what writes
+        audio-diagnostics.json (start_audio, the Apply path) —
+        then copies the file to the Desktop under a findable
+        name and says, in plain words, where it went and what
+        the record says is happening. No gating on a healthy
+        stream: the failed and fallback states are exactly when
+        this is needed."""
+        try:
+            self.start_audio()
+        except Exception:
+            pass
+        dest = copy_audio_diagnostics(self.data_dir, desktop_dir())
+        if dest is None:
+            QMessageBox.information(
+                self, i18n.tr('diag_title', self.lang),
+                i18n.tr('diag_missing', self.lang))
+            return
+        summary = audio_diag_summary(
+            read_audio_diagnostics(self.data_dir), self.lang)
+        QMessageBox.information(
+            self, i18n.tr('diag_title', self.lang),
+            i18n.tr('diag_saved', self.lang).format(
+                name=dest.name, summary=summary))
     def _audio_rb_signature(self):
         """The visible DDJ-RB outputs as a comparable tuple —
         the audio retry's change detector (pass 25)."""

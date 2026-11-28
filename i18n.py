@@ -311,6 +311,58 @@ STRINGS = {
     },
     "audio_state_absent": {"en": "not found", "jp": "見つかりません"},
     "audio_state_untried": {"en": "not tried yet", "jp": "未試行"},
+    # Pass 36: the diagnostics export — one button beside the
+    # device picker refreshes the ladder record and copies it to
+    # the Desktop under a findable name; the dialog reports where
+    # it went and the one-line outcome read back from that file.
+    "diag_export": {"en": "EXPORT DIAGNOSTICS", "jp": "診断を書き出す"},
+    "diag_title": {"en": "Audio diagnostics", "jp": "音声の診断"},
+    "diag_saved": {
+        "en": "Saved the audio diagnostics to your Desktop as "
+              "{name}. Please attach that file in the chat.\n\n"
+              "{summary}",
+        "jp": "音声の診断をデスクトップに {name} として保存しました。"
+              "このファイルをチャットに添付してください。\n\n"
+              "{summary}",
+    },
+    "diag_missing": {
+        "en": "There is no diagnostics file yet — no audio open "
+              "attempt has been recorded. Press Apply once, then "
+              "export again.",
+        "jp": "診断ファイルがまだありません（音声を開く試行がまだ"
+              "記録されていません）。一度「適用」を押してから、"
+              "もう一度書き出してください。",
+    },
+    "diag_outcome_opened": {
+        "en": "Now playing through: {device} ({host})",
+        "jp": "いま鳴っている出力: {device}（{host}）",
+    },
+    "diag_outcome_opened_default": {
+        "en": "Now playing through: the system default ({host})",
+        "jp": "いま鳴っている出力: システム既定（{host}）",
+    },
+    "diag_outcome_rb_failed": {
+        "en": "The DDJ-RB could not be opened: {error}",
+        "jp": "DDJ-RBを開けませんでした: {error}",
+    },
+    "diag_outcome_rb_absent": {
+        "en": "The DDJ-RB was not found among the output devices",
+        "jp": "DDJ-RBが出力装置の中に見つかりませんでした",
+    },
+    "diag_outcome_fallback": {
+        "en": "The selected output would not open — playing "
+              "through the system default",
+        "jp": "選んだ出力を開けなかったので、システム既定の出力で"
+              "鳴らしています",
+    },
+    "diag_outcome_silent": {
+        "en": "No output device could be opened",
+        "jp": "どの出力装置も開けませんでした",
+    },
+    "diag_outcome_unknown": {
+        "en": "The diagnostics hold no outcome yet",
+        "jp": "診断にまだ結果が入っていません",
+    },
     "load_both_first": {
         "en": "Load both decks first",
         "jp": "両デッキに音声を読み込んでください",
